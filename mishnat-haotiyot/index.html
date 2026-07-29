@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no">
+  <meta name="theme-color" content="#173b35">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="משנת האותיות">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <title>מראה סופר — משנת האותיות</title>
+  <style>html,body{margin:0;height:100%;background:#e8e4dc;font-family:Arial,sans-serif}.loading{height:100%;display:grid;place-content:center;text-align:center;color:#173b35;gap:16px}.spinner{width:46px;height:46px;margin:auto;border:5px solid #c8d0cc;border-top-color:#173b35;border-radius:50%;animation:s .8s linear infinite}@keyframes s{to{transform:rotate(360deg)}}</style>
+</head>
+<body>
+  <div class="loading"><div class="spinner"></div><strong>משנת האותיות</strong><span>טוען את סביבת העבודה…</span></div>
+  <script src="payload-1.js"></script>
+  <script src="payload-2.js"></script>
+  <script src="payload-3.js"></script>
+  <script src="payload-4.js"></script>
+  <script>
+  (async()=>{
+    try{
+      const bytes=Uint8Array.from(atob(self.__MISHNAT_PAYLOAD||''),c=>c.charCodeAt(0));
+      const stream=new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+      const html=await new Response(stream).text();
+      document.open();document.write(html);document.close();
+    }catch(error){
+      document.body.innerHTML='<div class="loading"><strong>לא ניתן לטעון את האפליקציה</strong><span>'+String(error)+'</span></div>';
+    }
+  })();
+  </script>
+</body>
+</html>
