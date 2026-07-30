@@ -6,11 +6,11 @@
 
   // הגרסה היציבה אינה מפעילה ניתוח כבד מיד עם העלאת התמונה.
   // המשתמש יכול להתחיל למדוד מיד ולהפעיל ניתוח נוסחת כתב לפי דרישה.
-  loadImageSource = function loadImageSourceStable(source, resetProject) {
+  loadImageSource = function loadImageSourceStable(source, resetProject, preparedImage = null) {
     analysisOverlay.hidden = true;
-    const image = new Image();
+    const image = preparedImage || new Image();
 
-    image.onload = () => {
+    const handleLoad = () => {
       state.image = image;
       state.imageSrc = source;
       emptyState.style.display = 'none';
@@ -18,8 +18,10 @@
       if (resetProject) {
         state.objects = [];
         state.draft = null;
+        state.draftHistory = [];
         state.selectedId = null;
         state.selectedPoint = null;
+        state.selectedSegment = null;
         state.nextId = 1;
         state.history = [];
         state.future = [];
@@ -27,7 +29,15 @@
       }
 
       fitImage();
+      const savedView = !resetProject ? state.projectDocument?.uiState?.view : null;
+      if (savedView && Number.isFinite(+savedView.x) && Number.isFinite(+savedView.y) && Number.isFinite(+savedView.scale)) {
+        state.view = { x: +savedView.x, y: +savedView.y, scale: clamp(+savedView.scale, .03, 12) };
+        zoomText.textContent = `${Math.round(state.view.scale * 100)}%`;
+      }
       renderAll();
+      for (const kastel of state.objects.filter(item => item.type === 'kastel' && !item.guides)) {
+        initializeKastelGuides(kastel);
+      }
 
       if (resetProject) {
         state.formula.analysis.status = 'idle';
@@ -42,6 +52,11 @@
       alert('לא ניתן לפתוח את התמונה');
     };
 
+    if (preparedImage) {
+      handleLoad();
+      return;
+    }
+    image.onload = handleLoad;
     image.src = source;
   };
 

@@ -3,13 +3,43 @@ function commitDraft(message) {
   if (!state.draft) return;
   snapshot();
   const object = state.draft;
+  if (object.type === 'area') ensureAreaSegments(object);
   state.objects.push(object);
   state.draft = null;
+  state.draftHistory = [];
   state.selectedPoint = null;
-  state.selectedId = object.id;
+  state.selectedSegment = null;
   syncFormulaFromObject(object);
   statusText.textContent = message;
-  renderAll();
+  selectObject(object.id);
+  return object;
+}
+
+function commitDragHistory(drag) {
+  if (!drag?.before || drag.historyCommitted) return;
+  state.history.push(drag.before);
+  if (state.history.length > 80) state.history.shift();
+  state.future = [];
+  drag.historyCommitted = true;
+}
+
+function dragPassedThreshold(drag, screenPoint, threshold = 3) {
+  if (drag?.moved) return true;
+  if (!drag?.originScreen || distance(drag.originScreen, screenPoint) >= threshold) {
+    drag.moved = true;
+    return true;
+  }
+  return false;
+}
+
+function markObjectModified(object) {
+  if (!object) return;
+  object.provenance = object.provenance || { origin: object.auto ? 'assisted' : 'human', createdAt: new Date().toISOString() };
+  if (['automatic', 'assisted'].includes(object.provenance.origin)) {
+    object.provenance.originalOrigin = object.provenance.origin;
+    object.provenance.origin = 'human-corrected';
+  }
+  object.provenance.modifiedAt = new Date().toISOString();
 }
 
 function pointerMove(event) {
@@ -40,27 +70,67 @@ function pointerMove(event) {
   if (drag.type === 'pan') {
     state.view.x = drag.view.x + (screenPoint.x - drag.start.x);
     state.view.y = drag.view.y + (screenPoint.y - drag.start.y);
-  } else if (drag.type === 'drawKastel') {
+  } else if (drag.type === 'drawRect') {
     const a = drag.start;
     state.draft.points = [a, { x: imagePoint.x, y: a.y }, imagePoint, { x: a.x, y: imagePoint.y }];
   } else if (drag.type === 'draftHandle' && state.draft) {
-    state.draft.points[drag.handle] = imagePoint;
+    if (!dragPassedThreshold(drag, screenPoint)) return;
+    if (drag.beforeDraft && !drag.historyCommitted) {
+      state.draftHistory.push(drag.beforeDraft);
+      if (state.draftHistory.length > 80) state.draftHistory.shift();
+      drag.historyCommitted = true;
+    }
+    if (state.draft.type === 'area') moveAreaAnchor(state.draft, drag.handle, imagePoint);
+    else state.draft.points[drag.handle] = imagePoint;
     state.selectedPoint = { target: 'draft', index: drag.handle };
+  } else if (drag.type === 'draftCurveHandle' && state.draft?.type === 'area') {
+    if (!dragPassedThreshold(drag, screenPoint)) return;
+    if (drag.beforeDraft && !drag.historyCommitted) {
+      state.draftHistory.push(drag.beforeDraft);
+      if (state.draftHistory.length > 80) state.draftHistory.shift();
+      drag.historyCommitted = true;
+    }
+    ensureAreaSegments(state.draft);
+    state.draft.segments[drag.segment] = { curved: true, control: imagePoint };
+    state.selectedSegment = { target: 'draft', index: drag.segment };
   } else if (drag.type === 'handle') {
+    if (!dragPassedThreshold(drag, screenPoint)) return;
+    commitDragHistory(drag);
     const object = state.objects.find(item => item.id === drag.id);
     if (object) {
-      object.points[drag.handle] = imagePoint;
+      if (object.type === 'area') moveAreaAnchor(object, drag.handle, imagePoint);
+      else object.points[drag.handle] = imagePoint;
       object.auto = false;
+      markObjectModified(object);
       state.selectedPoint = { target: 'object', id: object.id, index: drag.handle };
       syncFormulaFromObject(object);
     }
+  } else if (drag.type === 'curveHandle') {
+    if (!dragPassedThreshold(drag, screenPoint)) return;
+    commitDragHistory(drag);
+    const object = state.objects.find(item => item.id === drag.id && item.type === 'area');
+    if (object) {
+      ensureAreaSegments(object);
+      object.segments[drag.segment] = { curved: true, control: imagePoint };
+      markObjectModified(object);
+      state.selectedSegment = { target: 'object', id: object.id, index: drag.segment };
+    }
   } else if (drag.type === 'object') {
+    if (!dragPassedThreshold(drag, screenPoint)) return;
+    commitDragHistory(drag);
     const object = state.objects.find(item => item.id === drag.id);
     if (object) {
       const dx = imagePoint.x - drag.start.x;
       const dy = imagePoint.y - drag.start.y;
       object.points = drag.original.map(point => ({ x: point.x + dx, y: point.y + dy }));
+      if (object.type === 'area') {
+        object.segments = (drag.originalSegments || []).map(segment => ({
+          ...segment,
+          control: segment.control ? { x: segment.control.x + dx, y: segment.control.y + dy } : null
+        }));
+      }
       object.auto = false;
+      markObjectModified(object);
       syncFormulaFromObject(object);
     }
   }
@@ -74,19 +144,33 @@ function pointerUp(event) {
   state.pointers.delete(event.pointerId);
   if (state.pointers.size < 2) state.pinchStart = null;
 
-  if (state.dragging?.type === 'drawKastel' && state.draft) {
+  const completedDrag = state.dragging;
+  if (completedDrag?.type === 'drawRect' && state.draft) {
+    const objectType = state.dragging.objectType;
     const width = distance(state.draft.points[0], state.draft.points[1]);
     const height = distance(state.draft.points[0], state.draft.points[3]);
     if (width * state.view.scale < 12 || height * state.view.scale < 12) {
       state.draft = null;
-      statusText.textContent = 'הקעסטעל קטן מדי ובוטל';
+      statusText.textContent = objectType === 'kastel' ? 'הקעסטעל קטן מדי ובוטל' : 'אזור הכיול קטן מדי ובוטל';
       state.dragging = null;
       renderAll();
       return;
     }
     state.draft.closed = true;
-    commitDraft('הקעסטעל נוצר. עבור לבחירה כדי לעוות את הפינות');
+    const object = commitDraft(objectType === 'kastel'
+      ? 'הקעסטעל נוצר. חוק השלישים והמדדים הותאמו'
+      : 'אזור הכיול נוצר ומנותח כעת');
+    if (objectType === 'kastel') initializeKastelGuides(object);
+    if (objectType === 'nibRegion') analyzeCalibrationRegion(object);
   }
+  if (completedDrag?.moved && ['handle', 'object'].includes(completedDrag.type)) {
+    const movedObject = state.objects.find(item => item.id === completedDrag.id);
+    if (movedObject?.type === 'nibRegion') analyzeCalibrationRegion(movedObject);
+    if (movedObject?.type === 'kastel' && movedObject.guides?.source !== 'manual') {
+      initializeKastelGuides(movedObject, true);
+    }
+  }
+  if (completedDrag?.moved) renderAll();
   state.dragging = null;
 }
 function pointerCancel(event) {
@@ -116,7 +200,25 @@ canvas.addEventListener('wheel', event => {
 function syncFormulaFromObject(object) {
   if (!object || object.points.length < 2) return;
   const value = distance(object.points[0], object.points[1]);
-  if (object.type === 'nib' && value > 0) state.formula.nibPx = value;
+  if (object.type === 'nib' && value > 0) {
+    state.formula.nibPx = value;
+    const parentRegion = object.regionId
+      ? state.objects.find(item => item.id === object.regionId && item.type === 'nibRegion')
+      : null;
+    if (parentRegion) {
+      parentRegion.calibrationPx = value;
+      parentRegion.confidence = object.auto ? object.confidence ?? null : 1;
+      markObjectModified(parentRegion);
+    }
+    state.formula.calibration = {
+      method: object.regionId ? (object.auto ? 'region' : 'region-corrected') : object.auto ? 'global-auto' : 'manual-line',
+      regionObjectId: object.regionId || null,
+      objectId: object.id,
+      valuePx: value,
+      confidence: object.auto ? state.formula.analysis.nibConfidence || null : 1,
+      verified: !object.auto
+    };
+  }
   if (object.type === 'gap' && object.formulaKey === 'common-gap' && value > 0) state.formula.commonGapPx = value;
 }
 
@@ -128,6 +230,7 @@ function setTool(tool) {
     pan: 'בחירה ועריכה: גע במדידה או בנקודה וגרור',
     area: 'מדידת שטח ואיזון לובן: סמן נקודות סביב התחום',
     nib: 'עובי קולמוס: סמן שתי נקודות לרוחב עובי מייצג',
+    nibRegion: 'כיול מאזור: גרור מסגרת סביב מקטע קולמוס מייצג',
     gap: `מרווחים: ${selectedVariableName()} — סמן שתי נקודות`,
     length: 'אורך חופשי: סמן שתי נקודות',
     angle: 'זווית: סמן שתי נקודות לאורך הקו',
@@ -135,7 +238,7 @@ function setTool(tool) {
     thirds: 'חוק השלישים: סמן נקודה בתוך הקעסטעל'
   };
   statusText.textContent = messages[tool] || 'מוכן';
-  if (tool === 'nib') activateFormulaTab('nib');
+  if (tool === 'nib' || tool === 'nibRegion') activateFormulaTab('nib');
   if (tool === 'gap') activateFormulaTab('gaps');
   renderControls();
 }
@@ -144,6 +247,9 @@ document.querySelectorAll('.tool[data-tool]').forEach(button => button.addEventL
 $('undoBtn').addEventListener('click', undo);
 $('redoBtn').addEventListener('click', redo);
 $('deletePointBtn').addEventListener('click', deleteSelectedPoint);
+$('closeAreaBtn').addEventListener('click', closeAreaDraft);
+$('curveSegmentBtn').addEventListener('click', curveSelectedSegment);
+$('straightenSegmentBtn').addEventListener('click', straightenSelectedSegment);
 $('cancelDraftBtn').addEventListener('click', cancelDraft);
 $('deleteBtn').addEventListener('click', deleteSelectedObject);
 $('clearBtn').addEventListener('click', () => {
@@ -151,10 +257,13 @@ $('clearBtn').addEventListener('click', () => {
   snapshot();
   state.objects = [];
   state.draft = null;
+  state.draftHistory = [];
   state.selectedId = null;
   state.selectedPoint = null;
+  state.selectedSegment = null;
   state.formula.nibPx = null;
   state.formula.commonGapPx = null;
+  state.formula.calibration = null;
   statusText.textContent = 'כל הסימונים נוקו';
   renderAll();
 });
@@ -163,7 +272,10 @@ function deleteSelectedPoint() {
   const selection = state.selectedPoint;
   if (!selection) return;
   if (selection.target === 'draft' && state.draft) {
-    state.draft.points.splice(selection.index, 1);
+    state.draftHistory.push(structuredCloneSafe(state.draft));
+    if (state.draftHistory.length > 80) state.draftHistory.shift();
+    if (state.draft.type === 'area') removeAreaPoint(state.draft, selection.index);
+    else state.draft.points.splice(selection.index, 1);
     if (!state.draft.points.length) state.draft = null;
     state.selectedPoint = null;
     statusText.textContent = 'הנקודה נמחקה מן הסימון הנוכחי';
@@ -172,28 +284,97 @@ function deleteSelectedPoint() {
   }
   const object = state.objects.find(item => item.id === selection.id);
   if (!object) return;
-  if (object.type === 'kastel') {
-    statusText.textContent = 'בקעסטעל מזיזים את ארבע הפינות; אין למחוק פינה';
+  if (object.type === 'kastel' || object.type === 'nibRegion') {
+    statusText.textContent = object.type === 'kastel'
+      ? 'בקעסטעל מזיזים את ארבע הפינות; אין למחוק פינה'
+      : 'באזור כיול מזיזים את ארבע הפינות; אין למחוק פינה';
     return;
   }
   const minimum = { area: 3, length: 2, angle: 2, nib: 2, gap: 2, thirds: 1 }[object.type] || 1;
   snapshot();
   if (object.points.length - 1 < minimum) {
     state.objects = state.objects.filter(item => item.id !== object.id);
+    if (object.type === 'nib') activateFallbackNibCalibration(object.regionId || null);
+    if (object.type === 'gap' && object.formulaKey === 'common-gap') {
+      const lastGap = [...state.objects].reverse().find(item => item.type === 'gap' && item.formulaKey === 'common-gap');
+      state.formula.commonGapPx = lastGap ? distance(lastGap.points[0], lastGap.points[1]) : null;
+    }
     state.selectedId = null;
     statusText.textContent = 'המדידה נמחקה משום שלא נותרו בה די נקודות';
   } else {
-    object.points.splice(selection.index, 1);
+    if (object.type === 'area') removeAreaPoint(object, selection.index);
+    else object.points.splice(selection.index, 1);
     statusText.textContent = 'הנקודה נמחקה';
   }
   state.selectedPoint = null;
+  state.selectedSegment = null;
+  renderAll();
+}
+
+function closeAreaDraft() {
+  if (state.draft?.type !== 'area' || state.draft.points.length < 3) return;
+  state.draft.closed = true;
+  ensureAreaSegments(state.draft);
+  commitDraft('השטח נסגר ונמדד. ניתן להמשיך לערוך כל נקודה ומקטע');
+}
+
+function selectedAreaSegment() {
+  const selection = state.selectedSegment;
+  if (!selection) return null;
+  const object = selection.target === 'draft'
+    ? state.draft
+    : state.objects.find(item => item.id === selection.id);
+  if (object?.type !== 'area') return null;
+  ensureAreaSegments(object);
+  if (!Number.isInteger(selection.index) || selection.index < 0 || selection.index >= areaSegmentCount(object)) return null;
+  return { object, index: selection.index, isDraft: selection.target === 'draft' };
+}
+
+function curveSelectedSegment() {
+  const selected = selectedAreaSegment();
+  if (!selected) return;
+  if (!selected.isDraft) snapshot();
+  else {
+    state.draftHistory.push(structuredCloneSafe(selected.object));
+    if (state.draftHistory.length > 80) state.draftHistory.shift();
+  }
+  const { object, index } = selected;
+  const start = object.points[index];
+  const end = object.points[segmentEndIndex(object, index)];
+  const center = midpoint(start, end);
+  const length = distance(start, end) || 1;
+  const offset = Math.min(length * .22, 38 / Math.max(.2, state.view.scale));
+  const nx = -(end.y - start.y) / length;
+  const ny = (end.x - start.x) / length;
+  object.segments[index] = {
+    curved: true,
+    control: object.segments[index]?.control || { x: center.x + nx * offset, y: center.y + ny * offset }
+  };
+  markObjectModified(object);
+  statusText.textContent = 'המקטע עוגל. גרור את היהלום לדייק את העיקול';
+  renderAll();
+}
+
+function straightenSelectedSegment() {
+  const selected = selectedAreaSegment();
+  if (!selected) return;
+  if (!selected.isDraft) snapshot();
+  else {
+    state.draftHistory.push(structuredCloneSafe(selected.object));
+    if (state.draftHistory.length > 80) state.draftHistory.shift();
+  }
+  selected.object.segments[selected.index] = { curved: false, control: null };
+  markObjectModified(selected.object);
+  statusText.textContent = 'המקטע יושר';
   renderAll();
 }
 
 function cancelDraft() {
   if (!state.draft) return;
   state.draft = null;
+  state.draftHistory = [];
   state.selectedPoint = null;
+  state.selectedSegment = null;
   state.dragging = null;
   statusText.textContent = 'הסימון הנוכחי בוטל';
   renderAll();
@@ -203,9 +384,21 @@ function deleteSelectedObject() {
   snapshot();
   const deleted = state.objects.find(item => item.id === state.selectedId);
   state.objects = state.objects.filter(item => item.id !== state.selectedId);
+  if (deleted?.type === 'nibRegion') {
+    state.objects = state.objects.filter(item => item.regionId !== deleted.id);
+    if (state.formula.calibration?.regionObjectId === deleted.id) {
+      activateFallbackNibCalibration(deleted.id);
+    }
+  }
   if (deleted?.type === 'nib') {
-    const lastNib = [...state.objects].reverse().find(item => item.type === 'nib');
-    state.formula.nibPx = lastNib ? distance(lastNib.points[0], lastNib.points[1]) : null;
+    if (deleted.regionId) {
+      const region = state.objects.find(item => item.id === deleted.regionId && item.type === 'nibRegion');
+      if (region) {
+        region.calibrationPx = null;
+        region.confidence = null;
+      }
+    }
+    activateFallbackNibCalibration(deleted.regionId || null);
   }
   if (deleted?.type === 'gap' && deleted.formulaKey === 'common-gap') {
     const lastGap = [...state.objects].reverse().find(item => item.type === 'gap' && item.formulaKey === 'common-gap');
@@ -213,6 +406,7 @@ function deleteSelectedObject() {
   }
   state.selectedId = null;
   state.selectedPoint = null;
+  state.selectedSegment = null;
   statusText.textContent = 'המדידה נמחקה';
   renderAll();
 }
@@ -224,6 +418,7 @@ function activateFormulaTab(tab) {
 }
 document.querySelectorAll('[data-formula-tab]').forEach(button => button.addEventListener('click', () => activateFormulaTab(button.dataset.formulaTab)));
 $('startNibBtn').addEventListener('click', () => setTool('nib'));
+$('startNibRegionBtn').addEventListener('click', () => setTool('nibRegion'));
 $('startGapBtn').addEventListener('click', () => setTool('gap'));
 $('analyzeBtn').addEventListener('click', () => analyzeImage(true));
 
@@ -259,8 +454,28 @@ ui.nibPx.addEventListener('change', () => {
   } else if (object) {
     resizeLineToLength(object, value);
     object.auto = false;
+    markObjectModified(object);
   }
+  const parentRegion = object?.regionId
+    ? state.objects.find(item => item.id === object.regionId && item.type === 'nibRegion')
+    : null;
+  if (parentRegion) {
+    parentRegion.calibrationPx = value;
+    parentRegion.confidence = 1;
+    markObjectModified(parentRegion);
+  }
+  state.formula.calibration = {
+    method: parentRegion ? 'region-corrected' : 'manual-value',
+    regionObjectId: parentRegion?.id || null,
+    objectId: object?.id || null,
+    valuePx: value,
+    confidence: 1,
+    verified: true
+  };
   statusText.textContent = 'עובי הקולמוס עודכן';
+  for (const kastel of state.objects.filter(item => item.type === 'kastel' && item.guides?.source !== 'manual')) {
+    initializeKastelGuides(kastel);
+  }
   renderAll();
 });
 function defaultCenteredLine(length) {
@@ -280,7 +495,7 @@ function resizeLineToLength(object, targetLength) {
   ];
 }
 
-for (const element of [ui.name, ui.color, ui.lineWidth, ui.fillAlpha, ui.fillEnabled]) {
+for (const element of [ui.name, ui.color, ui.lineWidth, ui.fillAlpha, ui.fillEnabled, ui.category, ui.assessment, ui.note].filter(Boolean)) {
   element.addEventListener('input', updateSelectedStyle);
   element.addEventListener('change', updateSelectedStyle);
 }
@@ -290,11 +505,15 @@ function updateSelectedStyle() {
   object.name = ui.name.value.trim() || defaultName(object.type);
   object.color = ui.color.value;
   object.lineWidth = +ui.lineWidth.value;
-  if (['area', 'kastel'].includes(object.type)) {
+  if (['area', 'kastel', 'nibRegion'].includes(object.type)) {
     object.fillAlpha = +ui.fillAlpha.value / 100;
     object.fillEnabled = ui.fillEnabled.checked;
   }
+  object.category = ui.category?.value || object.category || defaultCategory(object.type);
+  object.assessment = ui.assessment?.value || object.assessment || 'unclassified';
+  object.note = ui.note?.value.trim() || '';
   object.auto = false;
+  markObjectModified(object);
   renderList();
   renderResults();
   draw();
@@ -307,35 +526,86 @@ ui.angleRef.addEventListener('change', () => {
   renderAll();
 });
 
+for (const [input, key] of [[ui.roofGuide, 'roofBottomT'], [ui.seatGuide, 'seatTopT']]) {
+  input?.addEventListener('input', () => {
+    const object = state.objects.find(item => item.id === state.selectedId && item.type === 'kastel');
+    if (!object) return;
+    if (input.dataset.editing !== '1') {
+      snapshot();
+      input.dataset.editing = '1';
+    }
+    if (!object.guides) initializeKastelGuides(object);
+    object.guides[key] = clamp(+input.value / 1000, .02, .98);
+    if (object.guides.roofBottomT >= object.guides.seatTopT - .03) {
+      if (key === 'roofBottomT') object.guides.roofBottomT = object.guides.seatTopT - .03;
+      else object.guides.seatTopT = object.guides.roofBottomT + .03;
+    }
+    object.guides.source = 'manual';
+    markObjectModified(object);
+    input.value = Math.round(object.guides[key] * 1000);
+    draw();
+    renderResults();
+  });
+  input?.addEventListener('change', () => { input.dataset.editing = '0'; });
+  input?.addEventListener('blur', () => { input.dataset.editing = '0'; });
+}
+
 $('imageInput').addEventListener('change', event => {
   const file = event.target.files?.[0];
   if (!file) return;
+  const now = new Date().toISOString();
+  state.sourceMeta = {
+    id: createStableId('image'),
+    fileName: file.name,
+    mimeType: file.type || null,
+    byteLength: file.size
+  };
+  state.projectMeta = {
+    id: createStableId('project'),
+    title: file.name.replace(/\.[^.]+$/, ''),
+    createdAt: now,
+    updatedAt: now
+  };
+  state.projectDocument = null;
   const reader = new FileReader();
   reader.onload = () => loadImageSource(reader.result, true);
   reader.readAsDataURL(file);
   event.target.value = '';
 });
 
-function loadImageSource(source, resetProject) {
-  const image = new Image();
-  image.onload = () => {
+function loadImageSource(source, resetProject, preparedImage = null) {
+  const image = preparedImage || new Image();
+  const handleLoad = () => {
     state.image = image;
     state.imageSrc = source;
     emptyState.style.display = 'none';
     if (resetProject) {
       state.objects = [];
       state.draft = null;
+      state.draftHistory = [];
       state.selectedId = null;
       state.selectedPoint = null;
+      state.selectedSegment = null;
       state.nextId = 1;
       state.history = [];
       state.future = [];
       state.formula = mergeFormula({});
     }
     fitImage();
+    const savedView = !resetProject ? state.projectDocument?.uiState?.view : null;
+    if (savedView && Number.isFinite(+savedView.x) && Number.isFinite(+savedView.y) && Number.isFinite(+savedView.scale)) {
+      state.view = { x: +savedView.x, y: +savedView.y, scale: clamp(+savedView.scale, .03, 12) };
+      zoomText.textContent = `${Math.round(state.view.scale * 100)}%`;
+    }
     renderAll();
+    for (const kastel of state.objects.filter(item => item.type === 'kastel' && !item.guides)) initializeKastelGuides(kastel);
     if (resetProject) analyzeImage(false);
   };
+  if (preparedImage) {
+    handleLoad();
+    return;
+  }
+  image.onload = handleLoad;
   image.onerror = () => alert('לא ניתן לפתוח את התמונה');
   image.src = source;
 }

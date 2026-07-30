@@ -12,7 +12,7 @@
   <title>מדידאות — מראה סופר</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="icon.svg" />
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="styles.css?v=20260731d" />
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -26,7 +26,7 @@
       </div>
       <div class="top-actions">
         <label class="btn primary">העלאת תמונה<input id="imageInput" type="file" accept="image/*" hidden /></label>
-        <button id="saveProjectBtn" class="btn">שמירת פרויקט</button>
+        <button id="saveProjectBtn" class="btn">שמירת פרויקט ודאטה</button>
         <label class="btn">פתיחת פרויקט<input id="projectInput" type="file" accept="application/json" hidden /></label>
         <button id="exportBtn" class="btn">ייצוא תמונה</button>
       </div>
@@ -51,6 +51,7 @@
 
         <section class="tool-section formula-tools">
           <h2>נוסחת הכתב</h2>
+          <button class="tool" data-tool="nibRegion"><span class="tool-icon">▣</span><span>כיול קולמוס מאזור</span></button>
           <button class="tool" data-tool="nib"><span class="tool-icon">▮</span><span>עובי קולמוס</span></button>
           <button class="tool" data-tool="gap"><span class="tool-icon">↔</span><span>מרווחים</span></button>
         </section>
@@ -67,6 +68,9 @@
           <h2>תיקון</h2>
           <button id="undoBtn" class="tool"><span class="tool-icon">↶</span><span>ביטול</span></button>
           <button id="redoBtn" class="tool"><span class="tool-icon">↷</span><span>שחזור</span></button>
+          <button id="closeAreaBtn" class="tool" disabled><span class="tool-icon">⬡</span><span>סגירת השטח</span></button>
+          <button id="curveSegmentBtn" class="tool" disabled><span class="tool-icon">⌒</span><span>עיגול המקטע</span></button>
+          <button id="straightenSegmentBtn" class="tool" disabled><span class="tool-icon">―</span><span>יישור המקטע</span></button>
           <button id="deletePointBtn" class="tool danger" disabled><span class="tool-icon">●−</span><span>מחיקת נקודה</span></button>
           <button id="cancelDraftBtn" class="tool danger" disabled><span class="tool-icon">×</span><span>ביטול סימון נוכחי</span></button>
           <button id="deleteBtn" class="tool danger" disabled><span class="tool-icon">🗑</span><span>מחיקת מדידה</span></button>
@@ -78,7 +82,7 @@
         <div id="emptyState" class="empty-state">
           <div class="empty-icon">✦</div>
           <h2>העלה צילום של אות, מילה או שורה</h2>
-          <p>לאחר ההעלאה תבוצע הצעה ראשונית לעובי הקולמוס ולמרווח המצוי.</p>
+          <p>התמונה נטענת מיד. ניתוח עובי קולמוס ומרווחים מופעל רק בלחיצה.</p>
         </div>
         <div id="analysisOverlay" class="analysis-overlay" hidden>
           <div class="spinner" aria-hidden="true"></div>
@@ -107,13 +111,14 @@
               <div class="metric"><span>עובי מכויל</span><strong id="nibMetric">—</strong></div>
               <div class="metric"><span>מרווח מצוי</span><strong id="commonGapMetric">—</strong></div>
             </div>
-            <p id="analysisNote" class="microcopy">הזיהוי האוטומטי הוא נקודת פתיחה. ניתן לגרור את שתי קצות הקו ולדייק.</p>
+            <p id="analysisNote" class="microcopy">ליציבות, הניתוח אינו מופעל אוטומטית. אפשר להפעילו לפי הצורך או לסמן ידנית.</p>
             <label>עובי קולמוס בפיקסלים
               <input id="nibPxInput" type="number" min="0.1" step="0.1" placeholder="טרם כויל" />
             </label>
             <div class="button-row">
-              <button id="analyzeBtn" class="btn compact" type="button">ניתוח מחדש</button>
-              <button id="startNibBtn" class="btn compact primary" type="button">סימון ידני</button>
+              <button id="analyzeBtn" class="btn compact" type="button">ניתוח נוסחת הכתב</button>
+              <button id="startNibRegionBtn" class="btn compact primary" type="button">כיול מאזור</button>
+              <button id="startNibBtn" class="btn compact" type="button">קו ידני</button>
             </div>
           </div>
 
@@ -133,20 +138,43 @@
         <section class="property-section">
           <h2>מאפייני הסימון</h2>
           <label>שם המדידה<input id="nameInput" type="text" placeholder="למשל: ירך ימנית" /></label>
+          <label>קטגוריה מקצועית
+            <select id="categorySelect">
+              <option value="nib">עובי קולמוס</option>
+              <option value="white-space">לובן ושטחים</option>
+              <option value="roof">גגות</option>
+              <option value="seat">מושבים</option>
+              <option value="stem">ירכות ודפנות</option>
+              <option value="root">שורשים ומשקלים</option>
+              <option value="balcony">מרפסות</option>
+              <option value="letter-gap">מרווח בין אותיות</option>
+              <option value="word-gap">מרווח בין מילים</option>
+              <option value="line-gap">מרווח בין שורות</option>
+              <option value="thirds">חוק השלישים</option>
+              <option value="angle">זוויות</option>
+              <option value="other">אחר</option>
+            </select>
+          </label>
+          <label>סיווג לדאטה
+            <select id="assessmentSelect">
+              <option value="unclassified">ללא סיווג</option>
+              <option value="reference">דוגמת ייחוס</option>
+              <option value="acceptable">תקין</option>
+              <option value="outlier">חריג</option>
+            </select>
+          </label>
+          <label>הערה מקצועית<textarea id="noteInput" rows="2" placeholder="למשל: מרפסת מוגזמת"></textarea></label>
           <div class="two-cols">
             <label>צבע<input id="colorInput" type="color" value="#ef4444" /></label>
             <label>עובי קו<input id="lineWidthInput" type="range" min="1" max="14" value="4" /></label>
           </div>
           <label>שקיפות מילוי<input id="fillAlphaInput" type="range" min="0" max="80" value="18" /></label>
           <label class="check"><input id="fillEnabledInput" type="checkbox" checked /> מילוי פנימי</label>
-          <label>יחידת תצוגה
-            <select id="unitSelect">
-              <option value="px">פיקסלים</option>
-              <option value="kulmus" selected>קולמוסים</option>
-              <option value="mm">מ״מ</option>
-            </select>
-          </label>
-          <label id="scaleLabel">פיקסלים ליחידה ידנית<input id="scaleInput" type="number" min="0.001" step="0.1" value="1" /></label>
+          <p class="microcopy">אורכים ומרווחים מוצגים קודם ביחידות עובי קולמוס, ובמקביל בפיקסלים. שטחים נשמרים בפיקסלים².</p>
+          <div hidden aria-hidden="true">
+            <select id="unitSelect"><option value="kulmus" selected>עובי קולמוס</option></select>
+            <label id="scaleLabel">פיקסלים ליחידה ידנית<input id="scaleInput" type="number" min="0.001" step="0.1" value="1" /></label>
+          </div>
           <label>ייחוס זווית
             <select id="angleRefSelect">
               <option value="nearest" selected>הציר הקרוב</option>
@@ -154,6 +182,13 @@
               <option value="vertical">קו אנכי</option>
             </select>
           </label>
+        </section>
+
+        <section id="kastelGuidesPanel" class="property-section" hidden>
+          <h2>גג, מושב וחוק השלישים</h2>
+          <p class="microcopy">המסגרת קובעת את ראש הגג ותחתית המושב. הקווים הפנימיים מזוהים כהצעה וניתנים לדייק.</p>
+          <label>תחתית הגג<input id="roofGuideInput" type="range" min="20" max="700" value="180" /></label>
+          <label>ראש המושב<input id="seatGuideInput" type="range" min="300" max="980" value="820" /></label>
         </section>
 
         <section class="property-section">
@@ -170,20 +205,22 @@
 
     <dialog id="helpDialog">
       <h2>אופן שימוש</h2>
-      <p><b>שטח ואיזון לובן:</b> סמן נקודות סביב התחום. נגיעה בנקודה קיימת בוחרת אותה ואינה מוסיפה נקודה חדשה. לחץ על הנקודה הראשונה לסגירה.</p>
+      <p><b>שטח ואיזון לובן:</b> אפשר להוסיף עשרות נקודות סביב התחום וללחוץ „סגירת השטח”. נגיעה בכל נקודה קיימת מאפשרת לגרור אותה, לרבות הנקודה הראשונה.</p>
+      <p><b>עיגול מקטע:</b> גע ביהלום שבין שתי נקודות וגרור אותו, או בחר מקטע ולחץ „עיגול המקטע”.</p>
       <p><b>מחיקת נקודה:</b> גע בנקודה כדי לבחור אותה, ולאחר מכן לחץ „מחיקת נקודה”. במצב בחירה ניתן גם לגרור נקודה למקום מדויק.</p>
-      <p><b>עובי קולמוס:</b> לאחר העלאת תמונה מתקבלת הצעה אוטומטית. גרור את קצות הקו לאזור מייצג, או סמן כיול חדש.</p>
+      <p><b>עובי קולמוס:</b> גרור אזור צר סביב מקטע מייצג. האפליקציה תחלץ ממנו את עובי הקולמוס; אפשר גם לסמן קו ידני.</p>
       <p><b>מרווחים:</b> בחר משתנה, סמן שתי נקודות, וקבל את המרחק בפיקסלים וביחידות קולמוס.</p>
       <p><b>זווית:</b> שתי נקודות. ברירת המחדל מציגה את הסטייה מן הציר הקרוב, ולכן מתקבלים ערכים כגון 0°, 12° ו־13° ולא זווית משלימה.</p>
-      <p><b>קעסטעל:</b> גרור מסגרת סביב האות. במצב בחירה ניתן להזיז כל פינה וליצור מעוין.</p>
+      <p><b>קעסטעל:</b> גרור מסגרת סביב האות. חוק השלישים מוצג בגובה בלבד; לרוחב מופיעים סימונים לפי עובי הקולמוס. קווי תחתית הגג וראש המושב ניתנים לדייק.</p>
       <button id="closeHelp" class="btn primary">סגור</button>
     </dialog>
 
     <button id="helpBtn" class="floating-help" aria-label="עזרה">?</button>
   </div>
-  <script src="app-1.js"></script>
-  <script src="app-2.js"></script>
-  <script src="app-3.js"></script>
-  <script src="app-4.js"></script>
+  <script src="app-1.js?v=20260731d"></script>
+  <script src="app-2.js?v=20260731d"></script>
+  <script src="app-3.js?v=20260731d"></script>
+  <script src="app-4.js?v=20260731d"></script>
+  <script src="stability-patch.js?v=20260731d"></script>
 </body>
 </html>
