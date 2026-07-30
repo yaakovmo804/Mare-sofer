@@ -2,96 +2,185 @@
 <html lang="he" dir="rtl">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <meta name="theme-color" content="#111827" />
+  <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="מדידאות" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="apple-mobile-web-app-title" content="מד שטחים" />
-  <title>מד שטחים — מראה סופר</title>
+  <meta name="format-detection" content="telephone=no" />
+  <title>מדידאות — מראה סופר</title>
   <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="icon.svg" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">
-      <div class="logo">מ״ס</div>
-      <div>
-        <h1>מד שטחים — מראה סופר</h1>
-        <p>שטח • אורך • זווית • קעסטעל • חוק השלישים</p>
+  <div id="app" class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo" aria-hidden="true">מ״ס</div>
+        <div>
+          <h1>מדידאות</h1>
+          <p>מדידת האות — שטחים, איזון לובן, נוסחת הכתב וגאומטריה</p>
+        </div>
       </div>
+      <div class="top-actions">
+        <label class="btn primary">העלאת תמונה<input id="imageInput" type="file" accept="image/*" hidden /></label>
+        <button id="saveProjectBtn" class="btn">שמירת פרויקט</button>
+        <label class="btn">פתיחת פרויקט<input id="projectInput" type="file" accept="application/json" hidden /></label>
+        <button id="exportBtn" class="btn">ייצוא תמונה</button>
+      </div>
+    </header>
+
+    <div id="standaloneHint" class="standalone-hint" hidden>
+      <span>לפתיחה ללא ממשק הדפדפן: פתח ב־Safari ← שיתוף ← הוספה למסך הבית.</span>
+      <button id="dismissStandaloneHint" type="button" aria-label="סגירה">×</button>
     </div>
-    <div class="top-actions">
-      <label class="btn primary">העלאת תמונה<input id="imageInput" type="file" accept="image/*" hidden /></label>
-      <button id="saveProjectBtn" class="btn">שמירת פרויקט</button>
-      <label class="btn">פתיחת פרויקט<input id="projectInput" type="file" accept="application/json" hidden /></label>
-      <button id="exportBtn" class="btn">ייצוא PNG</button>
-    </div>
-  </header>
 
-  <main class="workspace-shell">
-    <aside class="toolbar panel">
-      <h2>כלים</h2>
-      <button class="tool active" data-tool="pan">✋ הזזה וזום</button>
-      <button class="tool" data-tool="area">⬡ מדידת שטח</button>
-      <button class="tool" data-tool="length">↔ מדידת אורך</button>
-      <button class="tool" data-tool="angle">∠ מדידת זווית</button>
-      <button class="tool" data-tool="kastel">◇ קעסטעל</button>
-      <button class="tool" data-tool="thirds">⅓ נקודת שלישים</button>
-      <div class="separator"></div>
-      <button id="undoBtn" class="tool">↶ ביטול</button>
-      <button id="redoBtn" class="tool">↷ שחזור</button>
-      <button id="deleteBtn" class="tool danger">🗑 מחיקת נבחר</button>
-      <button id="clearBtn" class="tool danger">ניקוי כל הסימונים</button>
-    </aside>
+    <main class="workspace-shell">
+      <aside class="toolbar panel" aria-label="כלי עבודה">
+        <section class="tool-section">
+          <h2>ניווט ועריכה</h2>
+          <button class="tool active" data-tool="pan"><span class="tool-icon">✋</span><span>בחירה, הזזה וזום</span></button>
+        </section>
 
-    <section class="canvas-panel panel">
-      <div id="emptyState" class="empty-state">
-        <div class="empty-icon">✦</div>
-        <h2>העלה צילום של אות או מילה</h2>
-        <p>לאחר ההעלאה בחר כלי והתחל לסמן.</p>
-      </div>
-      <canvas id="canvas"></canvas>
-      <div class="statusbar">
-        <span id="statusText">מוכן</span>
-        <span id="zoomText">100%</span>
-      </div>
-    </section>
+        <section class="tool-section">
+          <h2>שטחים ואיזון לובן</h2>
+          <button class="tool" data-tool="area"><span class="tool-icon">⬡</span><span>מדידת שטח</span></button>
+        </section>
 
-    <aside class="properties panel">
-      <h2>מאפיינים</h2>
-      <label>שם המדידה<input id="nameInput" type="text" placeholder="למשל: ירך ימנית" /></label>
-      <label>צבע<input id="colorInput" type="color" value="#ef4444" /></label>
-      <label>עובי קו<input id="lineWidthInput" type="range" min="1" max="14" value="4" /></label>
-      <label>שקיפות מילוי<input id="fillAlphaInput" type="range" min="0" max="80" value="18" /></label>
-      <label class="check"><input id="fillEnabledInput" type="checkbox" checked /> מילוי פנימי</label>
-      <label>יחידת כיול
-        <select id="unitSelect">
-          <option value="px">פיקסלים</option>
-          <option value="kulmus">קולמוסים</option>
-          <option value="mm">מ״מ</option>
-        </select>
-      </label>
-      <label>פיקסלים ליחידה<input id="scaleInput" type="number" min="0.001" step="0.1" value="1" /></label>
-      <div class="separator"></div>
-      <h3>תוצאות</h3>
-      <div id="results" class="results"><p>טרם נבחרה מדידה.</p></div>
-      <div class="separator"></div>
-      <h3>רשימת מדידות</h3>
-      <div id="measurementsList" class="measurements-list"></div>
-    </aside>
-  </main>
+        <section class="tool-section formula-tools">
+          <h2>נוסחת הכתב</h2>
+          <button class="tool" data-tool="nib"><span class="tool-icon">▮</span><span>עובי קולמוס</span></button>
+          <button class="tool" data-tool="gap"><span class="tool-icon">↔</span><span>מרווחים</span></button>
+        </section>
 
-  <dialog id="helpDialog">
-    <h2>אופן שימוש</h2>
-    <p><b>שטח:</b> לחץ נקודות סביב האזור. לחץ שוב על הנקודה הראשונה או לחץ פעמיים לסגירה.</p>
-    <p><b>אורך:</b> שתי נקודות.</p>
-    <p><b>זווית:</b> שלוש נקודות: זרוע ראשונה, קודקוד, זרוע שנייה. תוצג הזווית הקטנה.</p>
-    <p><b>קעסטעל:</b> גרור מלבן סביב האות. לאחר מכן ניתן להזיז כל פינה וליצור מעוין.</p>
-    <p><b>שלישים:</b> בחר קעסטעל ולאחר מכן סמן נקודה. תוצג חלוקת היחס והסטייה משליש.</p>
-    <button id="closeHelp" class="btn primary">סגור</button>
-  </dialog>
+        <section class="tool-section">
+          <h2>מדידות גאומטריות</h2>
+          <button class="tool" data-tool="length"><span class="tool-icon">⌁</span><span>אורך חופשי</span></button>
+          <button class="tool" data-tool="angle"><span class="tool-icon">∠</span><span>זווית מנקודה לנקודה</span></button>
+          <button class="tool" data-tool="kastel"><span class="tool-icon">◇</span><span>קעסטעל</span></button>
+          <button class="tool" data-tool="thirds"><span class="tool-icon">⅓</span><span>נקודת חוק השלישים</span></button>
+        </section>
 
-  <button id="helpBtn" class="floating-help">?</button>
+        <section class="tool-section edit-tools">
+          <h2>תיקון</h2>
+          <button id="undoBtn" class="tool"><span class="tool-icon">↶</span><span>ביטול</span></button>
+          <button id="redoBtn" class="tool"><span class="tool-icon">↷</span><span>שחזור</span></button>
+          <button id="deletePointBtn" class="tool danger" disabled><span class="tool-icon">●−</span><span>מחיקת נקודה</span></button>
+          <button id="cancelDraftBtn" class="tool danger" disabled><span class="tool-icon">×</span><span>ביטול סימון נוכחי</span></button>
+          <button id="deleteBtn" class="tool danger" disabled><span class="tool-icon">🗑</span><span>מחיקת מדידה</span></button>
+          <button id="clearBtn" class="tool danger"><span class="tool-icon">⌫</span><span>ניקוי כל הסימונים</span></button>
+        </section>
+      </aside>
+
+      <section class="canvas-panel panel" aria-label="משטח המדידה">
+        <div id="emptyState" class="empty-state">
+          <div class="empty-icon">✦</div>
+          <h2>העלה צילום של אות, מילה או שורה</h2>
+          <p>לאחר ההעלאה תבוצע הצעה ראשונית לעובי הקולמוס ולמרווח המצוי.</p>
+        </div>
+        <div id="analysisOverlay" class="analysis-overlay" hidden>
+          <div class="spinner" aria-hidden="true"></div>
+          <span>מנתח עובי קולמוס ומרווחים…</span>
+        </div>
+        <canvas id="canvas"></canvas>
+        <div class="statusbar">
+          <span id="statusText">מוכן</span>
+          <span id="zoomText">100%</span>
+        </div>
+      </section>
+
+      <aside class="properties panel">
+        <section class="property-section formula-card">
+          <div class="section-title-row">
+            <h2>נוסחת הכתב</h2>
+            <span id="analysisBadge" class="badge neutral">טרם נותח</span>
+          </div>
+          <div class="tabs" role="tablist" aria-label="נוסחת הכתב">
+            <button class="tab active" data-formula-tab="nib" type="button">עובי קולמוס</button>
+            <button class="tab" data-formula-tab="gaps" type="button">מרווחים</button>
+          </div>
+
+          <div id="nibTab" class="tab-panel active">
+            <div class="metric-grid">
+              <div class="metric"><span>עובי מכויל</span><strong id="nibMetric">—</strong></div>
+              <div class="metric"><span>מרווח מצוי</span><strong id="commonGapMetric">—</strong></div>
+            </div>
+            <p id="analysisNote" class="microcopy">הזיהוי האוטומטי הוא נקודת פתיחה. ניתן לגרור את שתי קצות הקו ולדייק.</p>
+            <label>עובי קולמוס בפיקסלים
+              <input id="nibPxInput" type="number" min="0.1" step="0.1" placeholder="טרם כויל" />
+            </label>
+            <div class="button-row">
+              <button id="analyzeBtn" class="btn compact" type="button">ניתוח מחדש</button>
+              <button id="startNibBtn" class="btn compact primary" type="button">סימון ידני</button>
+            </div>
+          </div>
+
+          <div id="gapsTab" class="tab-panel">
+            <label>סוג המרווח
+              <select id="gapVariableSelect"></select>
+            </label>
+            <div class="add-variable-row">
+              <input id="newVariableInput" type="text" placeholder="שם משתנה חדש" />
+              <button id="addVariableBtn" class="btn compact" type="button">הוספה</button>
+            </div>
+            <button id="startGapBtn" class="btn compact primary full" type="button">מדידת המרווח הנבחר</button>
+            <div id="formulaSummary" class="formula-summary"></div>
+          </div>
+        </section>
+
+        <section class="property-section">
+          <h2>מאפייני הסימון</h2>
+          <label>שם המדידה<input id="nameInput" type="text" placeholder="למשל: ירך ימנית" /></label>
+          <div class="two-cols">
+            <label>צבע<input id="colorInput" type="color" value="#ef4444" /></label>
+            <label>עובי קו<input id="lineWidthInput" type="range" min="1" max="14" value="4" /></label>
+          </div>
+          <label>שקיפות מילוי<input id="fillAlphaInput" type="range" min="0" max="80" value="18" /></label>
+          <label class="check"><input id="fillEnabledInput" type="checkbox" checked /> מילוי פנימי</label>
+          <label>יחידת תצוגה
+            <select id="unitSelect">
+              <option value="px">פיקסלים</option>
+              <option value="kulmus" selected>קולמוסים</option>
+              <option value="mm">מ״מ</option>
+            </select>
+          </label>
+          <label id="scaleLabel">פיקסלים ליחידה ידנית<input id="scaleInput" type="number" min="0.001" step="0.1" value="1" /></label>
+          <label>ייחוס זווית
+            <select id="angleRefSelect">
+              <option value="nearest" selected>הציר הקרוב</option>
+              <option value="horizontal">קו אופקי</option>
+              <option value="vertical">קו אנכי</option>
+            </select>
+          </label>
+        </section>
+
+        <section class="property-section">
+          <h2>תוצאות</h2>
+          <div id="results" class="results"><p>טרם נבחרה מדידה.</p></div>
+        </section>
+
+        <section class="property-section measurements-section">
+          <h2>רשימת מדידות</h2>
+          <div id="measurementsList" class="measurements-list"></div>
+        </section>
+      </aside>
+    </main>
+
+    <dialog id="helpDialog">
+      <h2>אופן שימוש</h2>
+      <p><b>שטח ואיזון לובן:</b> סמן נקודות סביב התחום. נגיעה בנקודה קיימת בוחרת אותה ואינה מוסיפה נקודה חדשה. לחץ על הנקודה הראשונה לסגירה.</p>
+      <p><b>מחיקת נקודה:</b> גע בנקודה כדי לבחור אותה, ולאחר מכן לחץ „מחיקת נקודה”. במצב בחירה ניתן גם לגרור נקודה למקום מדויק.</p>
+      <p><b>עובי קולמוס:</b> לאחר העלאת תמונה מתקבלת הצעה אוטומטית. גרור את קצות הקו לאזור מייצג, או סמן כיול חדש.</p>
+      <p><b>מרווחים:</b> בחר משתנה, סמן שתי נקודות, וקבל את המרחק בפיקסלים וביחידות קולמוס.</p>
+      <p><b>זווית:</b> שתי נקודות. ברירת המחדל מציגה את הסטייה מן הציר הקרוב, ולכן מתקבלים ערכים כגון 0°, 12° ו־13° ולא זווית משלימה.</p>
+      <p><b>קעסטעל:</b> גרור מסגרת סביב האות. במצב בחירה ניתן להזיז כל פינה וליצור מעוין.</p>
+      <button id="closeHelp" class="btn primary">סגור</button>
+    </dialog>
+
+    <button id="helpBtn" class="floating-help" aria-label="עזרה">?</button>
+  </div>
   <script src="app.js"></script>
 </body>
 </html>
