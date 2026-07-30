@@ -1,11 +1,18 @@
 {
-  "name": "מד שטחים — מראה סופר",
-  "short_name": "מד שטחים",
+  "id": "./",
+  "name": "מדידאות — מראה סופר",
+  "short_name": "מדידאות",
+  "description": "מדידת שטחים, איזון לובן, עובי קולמוס, מרווחים וגאומטריית האות",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#eef2f7",
+  "display_override": ["standalone", "fullscreen"],
+  "orientation": "any",
+  "background_color": "#e9eef5",
   "theme_color": "#111827",
   "lang": "he",
-  "dir": "rtl"
+  "dir": "rtl",
+  "icons": [
+    {"src":"icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}
+  ]
 }
