@@ -1,0 +1,18 @@
+{
+  "id": "./medidaot.html",
+  "name": "מדידאות — מראה סופר",
+  "short_name": "מדידאות",
+  "description": "מדידת שטחים, איזון לובן, עובי קולמוס, מרווחים וגאומטריית האות",
+  "start_url": "./medidaot.html?v=20260731c",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["standalone", "fullscreen"],
+  "orientation": "any",
+  "background_color": "#e9eef5",
+  "theme_color": "#111827",
+  "lang": "he",
+  "dir": "rtl",
+  "icons": [
+    {"src":"icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}
+  ]
+}
