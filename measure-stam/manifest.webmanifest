@@ -1,0 +1,11 @@
+{
+  "name": "מד שטחים — מראה סופר",
+  "short_name": "מד שטחים",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#eef2f7",
+  "theme_color": "#111827",
+  "lang": "he",
+  "dir": "rtl"
+}
