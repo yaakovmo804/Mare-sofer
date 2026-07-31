@@ -2,6 +2,11 @@
 
 const LETTER_VECTOR_CACHE = new Map();
 let activeLetterTradition = 'beitYosef';
+let letterWeightHistoryArmed = false;
+
+function letterVectorEngine() {
+  return globalThis.MEDIDAOT_VECTOR_ENGINE || null;
+}
 
 function isLetterTemplate(object) {
   return object?.type === 'letterTemplate';
@@ -33,6 +38,19 @@ function cachedLetterPaths(asset) {
   return LETTER_VECTOR_CACHE.get(cacheKey);
 }
 
+function letterSourceMetrics(objectOrLetter, tradition = 'beitYosef') {
+  return letterVectorEngine()?.getSourceMetrics?.(objectOrLetter, tradition) || null;
+}
+
+function letterDesignAspect(objectOrLetter, tradition = 'beitYosef') {
+  const metrics = letterSourceMetrics(objectOrLetter, tradition);
+  if (metrics?.sourceCell?.height > 0) {
+    return metrics.sourceCell.width / metrics.sourceCell.height;
+  }
+  const asset = letterAsset(objectOrLetter, tradition);
+  return asset ? asset.viewBox[2] / Math.max(.001, asset.viewBox[3]) : 1;
+}
+
 function letterObjectRect(object) {
   const xs = object.points.map(point => point.x);
   const ys = object.points.map(point => point.y);
@@ -62,17 +80,29 @@ function normalizeLetterTemplateObject(object) {
     ? object.template.letter
     : 'א';
   const asset = letterAsset(letter, tradition);
+  const previousTemplate = object.template || {};
   object.template = {
     kind: 'letter',
     vectorAssetVersion: 1,
-    ...(object.template || {}),
+    layoutMode: 'tight-v1',
+    ...previousTemplate,
     letter,
     tradition,
-    slug: asset?.slug || object.template?.slug || 'aleph'
+    slug: asset?.slug || previousTemplate.slug || 'aleph'
   };
+  if (object.template.layoutMode !== 'source-cell-v2') object.template.layoutMode = 'tight-v1';
+  object.template.vectorAssetVersion = object.template.layoutMode === 'source-cell-v2'
+    ? Math.max(2, +object.template.vectorAssetVersion || 2)
+    : Math.max(1, +object.template.vectorAssetVersion || 1);
   object.letterMode = object.letterMode === 'outline' ? 'outline' : 'solid';
   object.letterOpacity = clamp(Number.isFinite(+object.letterOpacity) ? +object.letterOpacity : .62, .08, 1);
   object.letterOutlineWidth = clamp(Number.isFinite(+object.letterOutlineWidth) ? +object.letterOutlineWidth : 2.5, .5, 30);
+  const persistedWeight = object.letterVector?.weight ?? object.letterWeight;
+  object.letterWeight = clamp(Number.isFinite(+persistedWeight) ? +persistedWeight : 1, .55, 1.45);
+  if (object.letterVector && Number.isFinite(+object.letterVector.weight)) {
+    object.letterVector.weight = object.letterWeight;
+  }
+  object.letterEditAnchors = object.letterEditAnchors === true;
   object.letterGridVisible = object.letterGridVisible !== false;
   object.letterLockAspect = object.letterLockAspect !== false;
   object.role = 'reference-overlay';
@@ -110,24 +140,55 @@ function drawLetterTemplateShape(context, object, rect, unitScale = 1) {
   if (object.letterGridVisible) {
     drawLetterGrid(context, rect, object.color, object.letterOpacity ?? .62, unitScale);
   }
+  const engine = letterVectorEngine();
+  const transform = engine?.getLayoutTransform?.(object, { rect, asset });
   const [, , viewWidth, viewHeight] = asset.viewBox;
-  const scaleX = rect.width / Math.max(.001, viewWidth);
-  const scaleY = rect.height / Math.max(.001, viewHeight);
+  const scaleX = transform?.scaleX ?? rect.width / Math.max(.001, viewWidth);
+  const scaleY = transform?.scaleY ?? rect.height / Math.max(.001, viewHeight);
   const averageScale = (Math.abs(scaleX) + Math.abs(scaleY)) / 2 || 1;
   context.save();
-  context.translate(rect.x, rect.y);
-  context.scale(scaleX, scaleY);
+  if (transform) {
+    const matrix = transform.matrix;
+    context.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f);
+  } else {
+    context.translate(rect.x, rect.y);
+    context.scale(scaleX, scaleY);
+  }
   context.globalAlpha = clamp(object.letterOpacity ?? .62, .08, 1);
   context.fillStyle = object.color || '#2563eb';
   context.strokeStyle = object.color || '#2563eb';
   context.lineJoin = 'round';
   context.lineCap = 'round';
   context.lineWidth = Math.max(.35, (object.letterOutlineWidth || 2.5) * unitScale / averageScale);
-  for (const entry of cachedLetterPaths(asset)) {
+  const rendered = engine?.buildPath2D?.(object, {
+    asset,
+    weight: object.letterWeight,
+    shared: true
+  });
+  const entries = rendered?.available ? rendered.entries : cachedLetterPaths(asset);
+  for (const entry of entries) {
     if (object.letterMode === 'outline') context.stroke(entry.path);
     else context.fill(entry.path, entry.rule);
   }
   context.restore();
+}
+
+function letterVisualRect(object) {
+  if (!isLetterTemplate(object)) return null;
+  const visual = letterVectorEngine()?.getVisualBounds?.(object, {
+    asset: letterAsset(object),
+    weight: object.letterWeight
+  })?.image;
+  return visual || letterObjectRect(object);
+}
+
+function pointInLetterTemplate(imagePoint, object) {
+  const rect = letterVisualRect(object);
+  return !!rect &&
+    imagePoint.x >= rect.left &&
+    imagePoint.x <= rect.right &&
+    imagePoint.y >= rect.top &&
+    imagePoint.y <= rect.bottom;
 }
 
 function letterHandlePositions(object) {
@@ -144,6 +205,102 @@ function letterHandlePositions(object) {
     sw: { x: rect.left, y: rect.bottom },
     w: { x: rect.left, y: centerY }
   };
+}
+
+function letterVectorHandles(object) {
+  if (!isLetterTemplate(object) || !object.letterEditAnchors) return [];
+  return letterVectorEngine()?.enumerateHandles?.(object, {
+    asset: letterAsset(object),
+    coordinateSpace: 'image'
+  }) || [];
+}
+
+function drawLetterVectorHandles(object) {
+  const handles = letterVectorHandles(object);
+  if (!handles.length) return;
+  if (Math.abs((object.letterWeight || 1) - 1) > .001) {
+    const objectRect = letterObjectRect(object);
+    const topLeft = imageToScreen({ x: objectRect.x, y: objectRect.y });
+    const screenRect = {
+      x: topLeft.x,
+      y: topLeft.y,
+      width: objectRect.width * state.view.scale,
+      height: objectRect.height * state.view.scale
+    };
+    const engine = letterVectorEngine();
+    const asset = letterAsset(object);
+    const transform = engine?.getLayoutTransform?.(object, { rect: screenRect, asset });
+    const master = engine?.buildPath2D?.(object, { asset, weight: 1, shared: true });
+    if (transform && master?.available) {
+      ctx.save();
+      const matrix = transform.matrix;
+      ctx.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f);
+      ctx.strokeStyle = 'rgba(14, 116, 144, .34)';
+      ctx.lineWidth = 1.1 / Math.max(.001, (Math.abs(matrix.a) + Math.abs(matrix.d)) / 2);
+      ctx.setLineDash([3, 3]);
+      for (const entry of master.entries) ctx.stroke(entry.path);
+      ctx.restore();
+    }
+  }
+  const anchors = handles.filter(handle => handle.kind === 'anchor');
+  const anchorByCommand = new Map(
+    anchors.map(handle => [`${handle.pathIndex}:${handle.commandIndex}`, handle])
+  );
+  const pathAnchors = new Map();
+  for (const anchor of anchors) {
+    if (!pathAnchors.has(anchor.pathIndex)) pathAnchors.set(anchor.pathIndex, []);
+    pathAnchors.get(anchor.pathIndex).push(anchor);
+  }
+  for (const list of pathAnchors.values()) {
+    list.sort((a, b) => a.commandIndex - b.commandIndex);
+  }
+  const selectedHandleId = state.letterVectorSelection?.id === object.id
+    ? state.letterVectorSelection.handleId
+    : null;
+
+  ctx.save();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(14, 116, 144, .42)';
+  ctx.setLineDash([]);
+  for (const handle of handles.filter(item => item.kind === 'control')) {
+    let anchor = null;
+    if (handle.role === 'control-in') {
+      anchor = anchorByCommand.get(`${handle.pathIndex}:${handle.commandIndex}`) || null;
+    } else {
+      const candidates = pathAnchors.get(handle.pathIndex) || [];
+      anchor = [...candidates].reverse().find(item => item.commandIndex < handle.commandIndex)
+        || candidates[candidates.length - 1]
+        || null;
+    }
+    if (!anchor) continue;
+    const controlScreen = imageToScreen(handle.point);
+    const anchorScreen = imageToScreen(anchor.point);
+    ctx.beginPath();
+    ctx.moveTo(anchorScreen.x, anchorScreen.y);
+    ctx.lineTo(controlScreen.x, controlScreen.y);
+    ctx.stroke();
+  }
+
+  for (const handle of handles) {
+    const point = imageToScreen(handle.point);
+    const selected = handle.id === selectedHandleId;
+    ctx.beginPath();
+    if (handle.kind === 'anchor') {
+      ctx.fillStyle = selected ? '#f59e0b' : '#ffffff';
+      ctx.strokeStyle = selected ? '#92400e' : '#0369a1';
+      ctx.lineWidth = selected ? 2.4 : 1.45;
+      ctx.arc(point.x, point.y, selected ? 5.8 : 3.6, 0, Math.PI * 2);
+    } else {
+      const radius = selected ? 5 : 3;
+      ctx.fillStyle = selected ? '#f59e0b' : '#cffafe';
+      ctx.strokeStyle = selected ? '#92400e' : '#0e7490';
+      ctx.lineWidth = selected ? 2.2 : 1.2;
+      ctx.rect(point.x - radius, point.y - radius, radius * 2, radius * 2);
+    }
+    ctx.fill();
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 function drawLetterTemplateSelection(object) {
@@ -177,6 +334,7 @@ function drawLetterTemplateSelection(object) {
     ctx.stroke();
   }
   ctx.restore();
+  drawLetterVectorHandles(object);
 }
 
 function drawLetterTemplateOnScreen(object, selected) {
@@ -210,6 +368,14 @@ function nearestLetterHandle(object, imagePoint, thresholdScreen = 20) {
     }
   }
   return best;
+}
+
+function nearestLetterVectorHandle(object, imagePoint, thresholdScreen = 16) {
+  if (!isLetterTemplate(object) || !object.letterEditAnchors) return null;
+  return letterVectorEngine()?.hitTestHandle?.(object, imagePoint, {
+    asset: letterAsset(object),
+    radius: thresholdScreen / Math.max(.03, state.view.scale)
+  }) || null;
 }
 
 function resizeLetterFromHandle(originalPoints, handle, imagePoint, lockAspect) {
@@ -278,13 +444,23 @@ function renderLetterKeyboard() {
     button.title = isAriOverride ? `${letter} — צורת האר״י` : `${letter} — ${letterTraditionLabel(activeLetterTradition)}`;
 
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('viewBox', asset.viewBox.join(' '));
+    const metrics = letterSourceMetrics(letter, activeLetterTradition);
+    const sourceCell = metrics?.sourceCell;
+    svg.setAttribute('viewBox', sourceCell
+      ? `0 0 ${sourceCell.width} ${sourceCell.height}`
+      : asset.viewBox.join(' '));
     svg.setAttribute('aria-hidden', 'true');
     for (const sourcePath of asset.paths) {
       const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
       path.setAttribute('d', sourcePath.d);
       path.setAttribute('fill', 'currentColor');
       path.setAttribute('fill-rule', sourcePath.rule || 'nonzero');
+      if (metrics?.assetOriginInCell) {
+        path.setAttribute(
+          'transform',
+          `translate(${metrics.assetOriginInCell.x} ${metrics.assetOriginInCell.y})`
+        );
+      }
       svg.append(path);
     }
     const label = document.createElement('span');
@@ -313,7 +489,7 @@ function addLetterTemplate(letter, tradition = activeLetterTradition) {
   const center = screenToImage({ x: canvasRect.width / 2, y: canvasRect.height / 2 });
   const targetScreenHeight = clamp(canvasRect.height * .31, 120, 210);
   const height = Math.min(state.image.height * .48, targetScreenHeight / Math.max(.03, state.view.scale));
-  const aspect = asset.viewBox[2] / Math.max(.001, asset.viewBox[3]);
+  const aspect = letterDesignAspect(letter, tradition);
   const width = height * aspect;
   const x = clamp(center.x - width / 2, -width * .25, state.image.width - width * .75);
   const y = clamp(center.y - height / 2, -height * .25, state.image.height - height * .75);
@@ -330,11 +506,14 @@ function addLetterTemplate(letter, tradition = activeLetterTradition) {
       letter,
       tradition,
       slug: asset.slug,
-      vectorAssetVersion: 1
+      vectorAssetVersion: 2,
+      layoutMode: 'source-cell-v2'
     },
     letterMode: 'solid',
     letterOpacity: .62,
     letterOutlineWidth: 2.5,
+    letterWeight: 1,
+    letterEditAnchors: false,
     letterGridVisible: true,
     letterLockAspect: true,
     display: { resultLabelVisible: false }
@@ -344,7 +523,7 @@ function addLetterTemplate(letter, tradition = activeLetterTradition) {
   state.objects.push(object);
   setTool('pan');
   selectObject(object.id);
-  statusText.textContent = `תבנית ${letter} הונחה. גרור להזזה; ידיות הצד משנות רוחב או גובה`;
+  statusText.textContent = `תבנית ${letter} הונחה בגודלה היחסי המקורי. גרור להזזה; ידיות הצד משנות רוחב או גובה`;
 }
 
 function selectedLetterTemplate() {
@@ -366,13 +545,22 @@ function syncLetterControls(object = selectedLetterTemplate()) {
   $('letterOpacityInput').value = Math.round((object.letterOpacity ?? .62) * 100);
   $('letterOutlineWidthInput').value = object.letterOutlineWidth || 2.5;
   $('letterOutlineWidthLabel').hidden = mode !== 'outline';
+  $('letterWeightInput').value = Math.round((object.letterWeight || 1) * 100);
+  $('letterWeightValue').value = `${Math.round((object.letterWeight || 1) * 100)}%`;
   $('letterGridInput').checked = object.letterGridVisible !== false;
   $('letterLockAspectInput').checked = object.letterLockAspect !== false;
+  $('letterEditAnchorsInput').checked = object.letterEditAnchors === true;
+  const vectorStats = letterVectorEngine()?.stats?.(object, letterAsset(object));
+  $('letterAnchorReadout').textContent = vectorStats?.available
+    ? `${vectorStats.anchors} נקודות עוגן · ${vectorStats.controls} ידיות Bézier${vectorStats.materialized ? ' · נשמרו עריכות אישיות' : ' · וקטור מקור מלא'}${Math.abs((object.letterWeight || 1) - 1) > .001 ? ' · הקו המקווקו הוא מסלול המקור הנערך' : ''}`
+    : 'המסלול הווקטורי אינו זמין.';
   const rect = letterObjectRect(object);
+  const visual = letterVisualRect(object) || rect;
   const nibText = state.formula.nibPx
-    ? ` · ${fmt(rect.width / state.formula.nibPx, 2)} × ${fmt(rect.height / state.formula.nibPx, 2)} עובי קולמוס`
+    ? ` · ${fmt(visual.width / state.formula.nibPx, 2)} × ${fmt(visual.height / state.formula.nibPx, 2)} עובי קולמוס`
     : '';
-  $('letterSizeReadout').textContent = `רוחב ${fmt(rect.width, 1)} · גובה ${fmt(rect.height, 1)} פיקסלים${nibText}`;
+  $('letterSizeReadout').textContent =
+    `צורת האות: ${fmt(visual.width, 1)} × ${fmt(visual.height, 1)} פיקסלים${nibText} · מסגרת יחסית: ${fmt(rect.width, 1)} × ${fmt(rect.height, 1)}`;
 }
 
 function updateSelectedLetterProperty(property, value) {
@@ -410,16 +598,19 @@ function duplicateSelectedLetter() {
 function resetSelectedLetterRatio() {
   const object = selectedLetterTemplate();
   if (!object) return;
-  const asset = letterAsset(object);
-  if (!asset) return;
   const rect = letterObjectRect(object);
   const center = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-  const width = rect.height * asset.viewBox[2] / Math.max(.001, asset.viewBox[3]);
+  const width = rect.height * letterDesignAspect(object);
   snapshot();
+  object.template = {
+    ...(object.template || {}),
+    vectorAssetVersion: 2,
+    layoutMode: 'source-cell-v2'
+  };
   object.points = letterRectPoints(center.x - width / 2, rect.y, width, rect.height);
   markObjectModified(object);
   renderAll();
-  statusText.textContent = 'יחסי הרוחב והגובה של האות הוחזרו למקור';
+  statusText.textContent = 'האות הוחזרה לתא וליחסים המקוריים של לוח האותיות';
 }
 
 $('letterBoardBtn')?.addEventListener('click', () => {
@@ -450,6 +641,42 @@ $('letterModeOutlineBtn')?.addEventListener('click', () => {
 $('letterColorInput')?.addEventListener('input', event => updateSelectedLetterProperty('color', event.target.value));
 $('letterOpacityInput')?.addEventListener('input', event => updateSelectedLetterProperty('letterOpacity', +event.target.value / 100));
 $('letterOutlineWidthInput')?.addEventListener('input', event => updateSelectedLetterProperty('letterOutlineWidth', +event.target.value));
+$('letterWeightInput')?.addEventListener('pointerdown', () => {
+  if (!selectedLetterTemplate()) return;
+  snapshot();
+  letterWeightHistoryArmed = true;
+});
+$('letterWeightInput')?.addEventListener('input', event => {
+  const object = selectedLetterTemplate();
+  const engine = letterVectorEngine();
+  if (!object || !engine?.setObjectWeight) return;
+  if (!letterWeightHistoryArmed) {
+    snapshot();
+    letterWeightHistoryArmed = true;
+  }
+  const requestedWeight = clamp(+event.target.value / 100, .55, 1.45);
+  engine.setObjectWeight(object, requestedWeight, {
+    asset: letterAsset(object),
+    includeRender: false
+  });
+  object.auto = false;
+  markObjectModified(object);
+  syncLetterControls(object);
+  draw();
+  renderResults();
+});
+$('letterWeightInput')?.addEventListener('change', () => {
+  letterWeightHistoryArmed = false;
+});
+$('letterWeightInput')?.addEventListener('pointerup', () => {
+  letterWeightHistoryArmed = false;
+});
+$('letterWeightInput')?.addEventListener('pointercancel', () => {
+  letterWeightHistoryArmed = false;
+});
+$('letterWeightInput')?.addEventListener('blur', () => {
+  letterWeightHistoryArmed = false;
+});
 $('letterGridInput')?.addEventListener('change', event => {
   snapshot();
   updateSelectedLetterProperty('letterGridVisible', event.target.checked);
@@ -457,6 +684,17 @@ $('letterGridInput')?.addEventListener('change', event => {
 $('letterLockAspectInput')?.addEventListener('change', event => {
   snapshot();
   updateSelectedLetterProperty('letterLockAspect', event.target.checked);
+});
+$('letterEditAnchorsInput')?.addEventListener('change', event => {
+  const object = selectedLetterTemplate();
+  if (!object) return;
+  object.letterEditAnchors = event.target.checked;
+  state.letterVectorSelection = null;
+  syncLetterControls(object);
+  draw();
+  statusText.textContent = object.letterEditAnchors
+    ? 'מצב עריכת עוגנים פעיל: גע בנקודה או בידית וגרור'
+    : 'מצב עריכת העוגנים נסגר; האות נשארה וקטורית';
 });
 $('duplicateLetterBtn')?.addEventListener('click', duplicateSelectedLetter);
 $('resetLetterRatioBtn')?.addEventListener('click', resetSelectedLetterRatio);

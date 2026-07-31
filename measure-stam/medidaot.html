@@ -13,7 +13,7 @@
   <link rel="manifest" href="manifest-medidaot.webmanifest" />
   <link rel="apple-touch-icon" sizes="180x180" href="assets/medidaot-apple-touch-180.png" />
   <link rel="icon" type="image/png" sizes="32x32" href="assets/medidaot-favicon-32.png" />
-  <link rel="stylesheet" href="styles.css?v=20260731j" />
+  <link rel="stylesheet" href="styles.css?v=20260731k" />
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -59,9 +59,9 @@
 
         <section class="tool-section formula-tools">
           <h2>נוסחת הכתב</h2>
-          <button class="tool" data-tool="nibRegion"><span class="tool-icon">▣</span><span>כיול קולמוס מאזור</span></button>
-          <button class="tool" data-tool="nib"><span class="tool-icon">▮</span><span>עובי קולמוס</span></button>
-          <button class="tool" data-tool="gap"><span class="tool-icon">↔</span><span>מרווחים</span></button>
+          <button id="autoNibToolBtn" class="tool" type="button"><span class="tool-icon">◎</span><span>זיהוי עובי קולמוס</span></button>
+          <button class="tool" data-tool="nib"><span class="tool-icon">▮</span><span>תיקון עובי ידני</span></button>
+          <button id="gapsPanelBtn" class="tool" type="button"><span class="tool-icon">↕</span><span>מרווחים</span></button>
         </section>
 
         <section class="tool-section">
@@ -91,12 +91,12 @@
         <div id="emptyState" class="empty-state">
           <img class="empty-app-icon" src="assets/medidaot-icon-512.png" alt="" />
           <h2>העלה צילום של אות, מילה או שורה</h2>
-          <p>התמונה נטענת מיד. עובי הקולמוס יכול להיקבע מאזור, מקו ידני או מגג שזוהה בקעסטעל.</p>
+          <p>התמונה נטענת ומנותחת מקומית. עובי הקולמוס מזוהה מן הגגות וניתן לתיקון ידני.</p>
           <img class="empty-brand-logo" src="assets/mareh-sofer-brand.png" alt="מראה סופר" />
         </div>
         <div id="analysisOverlay" class="analysis-overlay" hidden>
           <div class="spinner" aria-hidden="true"></div>
-          <span>מבצע בדיקה כללית — ללא שינוי כיול…</span>
+          <span>מזהה גגות, עובי קולמוס ושורות כתב…</span>
         </div>
         <canvas id="canvas"></canvas>
         <section id="letterDrawer" class="letter-drawer" aria-label="לוח צורת האותיות" hidden>
@@ -135,7 +135,7 @@
               <div class="metric"><span>יחידת היסוד</span><strong id="nibMetric">—</strong><small id="nibMetricDetail">טרם כויל</small></div>
               <div class="metric"><span>מרווח מצוי</span><strong id="commonGapMetric">—</strong></div>
             </div>
-            <p id="analysisNote" class="microcopy">הבדיקה הכללית אינה משנה כיול. כיול פעיל נקבע מאזור, מקו ידני או מגג שזוהה בקעסטעל; כיול ידני נשאר נעול.</p>
+            <p id="analysisNote" class="microcopy">המערכת מאתרת גגות ישרים בתמונה, מודדת חתכים יציבים וקובעת את עובי הקולמוס אוטומטית. ערך ידני מאומת נשאר נעול.</p>
             <details class="technical-details calibration-details">
               <summary>ערך חישובי מתקדם</summary>
               <label>עובי הקולמוס בפיקסלים
@@ -143,9 +143,9 @@
               </label>
             </details>
             <div class="button-row">
-              <button id="analyzeBtn" class="btn compact" type="button">בדיקה כללית (ללא כיול)</button>
-              <button id="startNibRegionBtn" class="btn compact primary" type="button">כיול מאזור</button>
+              <button id="analyzeBtn" class="btn compact primary" type="button">זיהוי אוטומטי</button>
               <button id="startNibBtn" class="btn compact" type="button">קו ידני</button>
+              <button id="startNibRegionBtn" class="btn compact" type="button">בדיקה באזור</button>
             </div>
           </div>
 
@@ -157,7 +157,11 @@
               <input id="newVariableInput" type="text" placeholder="שם משתנה חדש" />
               <button id="addVariableBtn" class="btn compact" type="button">הוספה</button>
             </div>
-            <button id="startGapBtn" class="btn compact primary full" type="button">מדידת המרווח הנבחר</button>
+            <p class="microcopy">„בין השיטין” נמדד מתחתית הדיו של השורה העליונה ועד גבול הכתב של השורה הבאה, ביחידות עובי קולמוס.</p>
+            <div class="button-row">
+              <button id="autoLineGapBtn" class="btn compact primary" type="button">זהה בין השיטין</button>
+              <button id="startGapBtn" class="btn compact" type="button">סימון ידני</button>
+            </div>
             <div id="formulaSummary" class="formula-summary"></div>
           </div>
         </section>
@@ -176,7 +180,7 @@
               <option value="balcony">מרפסות</option>
               <option value="letter-gap">מרווח בין אותיות</option>
               <option value="word-gap">מרווח בין מילים</option>
-              <option value="line-gap">מרווח בין שורות</option>
+              <option value="line-gap">מרווח בין השיטין</option>
               <option value="thirds">חוק השלישים</option>
               <option value="angle">זוויות</option>
               <option value="reference-template">תבנית אות</option>
@@ -225,12 +229,21 @@
           <label>צבע התבנית<input id="letterColorInput" type="color" value="#2563eb" /></label>
           <label>שקיפות<input id="letterOpacityInput" type="range" min="8" max="100" value="62" /></label>
           <label id="letterOutlineWidthLabel">עובי קו חלול<input id="letterOutlineWidthInput" type="range" min="1" max="12" step="0.5" value="2.5" /></label>
+          <label>עובי הקולמוס בתבנית
+            <span class="range-with-value">
+              <input id="letterWeightInput" type="range" min="55" max="145" step="1" value="100" />
+              <output id="letterWeightValue">100%</output>
+            </span>
+          </label>
+          <p class="microcopy">המחוון מצר או מעבה את איברי האות; הרוחב והגובה החיצוניים נשארים קבועים.</p>
           <label class="check"><input id="letterGridInput" type="checkbox" checked /> רשת עזר</label>
           <label class="check"><input id="letterLockAspectInput" type="checkbox" checked /> שמירת יחס בידיות הפינה</label>
+          <label class="check"><input id="letterEditAnchorsInput" type="checkbox" /> עריכת נקודות עוגן וידיות Bézier</label>
+          <p id="letterAnchorReadout" class="microcopy">האות נשמרת כמסלול וקטורי מלא.</p>
           <p id="letterSizeReadout" class="microcopy">—</p>
           <div class="button-row">
             <button id="duplicateLetterBtn" class="btn compact" type="button">שכפול</button>
-            <button id="resetLetterRatioBtn" class="btn compact" type="button">יחס מקור</button>
+            <button id="resetLetterRatioBtn" class="btn compact" type="button">מקור הלוח</button>
             <button id="deleteLetterBtn" class="btn compact danger" type="button">מחיקה</button>
           </div>
         </section>
@@ -267,11 +280,11 @@
       <h2>אופן שימוש</h2>
       <p><b>שטח ואיזון לובן:</b> אפשר להוסיף עשרות נקודות סביב התחום. בסיום גע בנקודה הראשונה או לחץ „סיום וסגירת השטח”. מעבר לכלי אחר סוגר אוטומטית שטח תקין; סימון חלקי שאינו יכול להיות מדידה מבוטל.</p>
       <p><b>עיגול מקטע:</b> גע ביהלום שבין שתי נקודות וגרור אותו, או בחר מקטע ולחץ „עיגול המקטע”.</p>
-      <p><b>לוח צורת האותיות:</b> בחר בית יוסף או כתב האר״י ולחץ על אות. התבנית מונחת כשכבה וקטורית; גרור אותה להזזה, השתמש בידיות הפינה להגדלה והקטנה ובידיות הצד להרחבה, הצרה ומתיחה. אפשר לבחור מלא או חלול, צבע, שקיפות ורשת עזר, ולשכפל כמה עותקים.</p>
+      <p><b>לוח צורת האותיות:</b> כל אות מונחת בגודלה היחסי המקורי מן הלוח, בלי השוואת גבהים. אפשר להזיז, למתוח ולשנות עובי קולמוס בלי לשנות את ממדי האות. מצב עריכת עוגנים מציג את נקודות המסלול ואת ידיות ה־Bézier.</p>
       <p><b>מחיקת נקודה:</b> גע בנקודה כדי לבחור אותה, ולאחר מכן לחץ „מחיקת נקודה”. במצב בחירה ניתן גם לגרור נקודה למקום מדויק.</p>
       <p><b>מגע:</b> מדידה ועריכת נקודות נעשות ב־Apple Pencil בלבד. הזזה וזום נעשים בשתי אצבעות. במחשב אפשר לעבוד בעכבר.</p>
-      <p><b>עובי קולמוס:</b> גרור אזור צר סביב מקטע ישר ורציף, כך שייראה מעט נייר משני צדי הדיו. אזור שנחתך בתוך הדיו, פינה או הסתעפות יידחו. האפליקציה מודדת חתכים רבים, קובעת חציון יציב ומסמנת דגימה שחורגת ביותר מ־10% בלי לשנות את הכיול הפעיל; סימון הכיול החדש מחליף את הקודם.</p>
-      <p><b>מרווחים:</b> בחר משתנה, סמן שתי נקודות, וקבל את המרחק ביחידות עובי קולמוס. ערך הפיקסלים נשאר זמין תחת „פרטים חישוביים”.</p>
+      <p><b>עובי קולמוס:</b> הזיהוי האוטומטי סורק גגות ישרים, מסלק קצוות, ירכות ותגים, ומחשב חציון של חתכים עקביים. אפשר לתקן בקו ידני; בדיקה באזור נשארת כאפשרות מתקדמת.</p>
+      <p><b>מרווחים:</b> „זהה בין השיטין” מאתר שורות סמוכות ומודד מתחתית השורה העליונה עד ראש השורה הבאה. יתר סוגי המרווחים ניתנים לסימון ידני. התוצאה מוצגת ביחידות עובי קולמוס.</p>
       <p><b>זווית:</b> שתי נקודות. ברירת המחדל מציגה את הסטייה מן הציר הקרוב, ולכן מתקבלים ערכים כגון 0°, 12° ו־13° ולא זווית משלימה.</p>
       <p><b>קעסטעל:</b> גרור מסגרת סביב האות. „חוק השלישים” מחלק את רוחב הקעסטעל אוטומטית בשני קווים אנכיים. „זהה גג, חלל ומושב” מסמן את הגבול העליון והתחתון של הגג והמושב, מפיק את החלל שביניהם ומציע עובי קולמוס מן הגג; כל גבול ניתן לתיקון ידני.</p>
       <p><b>תוצאות על התמונה:</b> כל מדידה גמורה שומרת את תווית התוצאה שלה. ברשימת „תוצאות כל המדידות” אפשר להציג או להסתיר כל תווית בנפרד, בלי להסתיר את קו המדידה.</p>
@@ -281,12 +294,14 @@
 
     <button id="helpBtn" class="floating-help" aria-label="עזרה">?</button>
   </div>
-  <script src="letter-assets.js?v=20260731j"></script>
-  <script src="app-1.js?v=20260731j"></script>
-  <script src="letter-tools.js?v=20260731j"></script>
-  <script src="app-2.js?v=20260731j"></script>
-  <script src="app-3.js?v=20260731j"></script>
-  <script src="app-4.js?v=20260731j"></script>
-  <script src="stability-patch.js?v=20260731j"></script>
+  <script src="letter-assets.js?v=20260731k"></script>
+  <script src="letter-vector-engine.js?v=20260731k"></script>
+  <script src="app-1.js?v=20260731k"></script>
+  <script src="letter-tools.js?v=20260731k"></script>
+  <script src="app-2.js?v=20260731k"></script>
+  <script src="app-3.js?v=20260731k"></script>
+  <script src="app-4.js?v=20260731k"></script>
+  <script src="auto-measure.js?v=20260731k"></script>
+  <script src="stability-patch.js?v=20260731k"></script>
 </body>
 </html>

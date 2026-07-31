@@ -10,7 +10,11 @@ function commitDraft(message) {
   state.draftHistory = [];
   state.selectedPoint = null;
   state.selectedSegment = null;
+  state.letterVectorSelection = null;
   syncFormulaFromObject(object);
+  if (object.type === 'gap' && object.formulaKey === 'between-lines') {
+    refreshBetweenLinesSummary();
+  }
   statusText.textContent = message;
   selectObject(object.id);
   return object;
@@ -59,11 +63,50 @@ function markObjectModified(object) {
   object.provenance.modifiedAt = new Date().toISOString();
 }
 
+function refreshBetweenLinesSummary() {
+  const gaps = state.objects
+    .filter(object => object.type === 'gap' && object.formulaKey === 'between-lines');
+  const proposals = gaps
+    .map(object => ({
+      measurementId: object.uid || String(object.id),
+      valuePx: measurementLengthPx(object),
+      valueNib: state.formula.nibPx ? measurementLengthPx(object) / state.formula.nibPx : null,
+      points: structuredCloneSafe(object.points),
+      manualCorrected: object.gapDetection?.manualCorrected === true,
+      confidence: object.gapDetection?.confidence ?? object.confidence ?? null
+    }))
+    .filter(proposal => Number.isFinite(proposal.valuePx) && proposal.valuePx > 0);
+  const values = proposals.map(proposal => proposal.valuePx).sort((a, b) => a - b);
+  if (!values.length) {
+    state.formula.betweenLinesPx = null;
+    state.formula.analysis = {
+      ...(state.formula.analysis || {}),
+      interlineProposals: [],
+      autoInterlineMedianPx: null,
+      autoInterlineMedianNib: null
+    };
+    return null;
+  }
+  const middle = Math.floor(values.length / 2);
+  const median = values.length % 2
+    ? values[middle]
+    : (values[middle - 1] + values[middle]) / 2;
+  state.formula.betweenLinesPx = median;
+  state.formula.analysis = {
+    ...(state.formula.analysis || {}),
+    interlineProposals: proposals,
+    autoInterlineMedianPx: median,
+    autoInterlineMedianNib: state.formula.nibPx ? median / state.formula.nibPx : null
+  };
+  return median;
+}
+
 function clearDraftState() {
   state.draft = null;
   state.draftHistory = [];
   state.selectedPoint = null;
   state.selectedSegment = null;
+  state.letterVectorSelection = null;
   state.dragging = null;
 }
 
@@ -166,9 +209,39 @@ function pointerMove(event) {
       if (object.type === 'area') moveAreaAnchor(object, drag.handle, imagePoint);
       else object.points[drag.handle] = imagePoint;
       object.auto = false;
+      if (object.type === 'gap' && object.gapDetection) {
+        const correctedLength = distance(object.points[0], object.points[1]);
+        object.gapDetection = {
+          ...object.gapDetection,
+          originalMedianPx: object.gapDetection.originalMedianPx ?? object.gapDetection.medianPx,
+          medianPx: correctedLength,
+          manualCorrected: true,
+          method: 'manual-endpoint-correction',
+          verified: true
+        };
+        if (object.autoMeasurement) {
+          object.autoMeasurement = {
+            ...object.autoMeasurement,
+            originalValuePx: object.autoMeasurement.originalValuePx ?? object.autoMeasurement.valuePx,
+            originalValueNib: object.autoMeasurement.originalValueNib ?? object.autoMeasurement.valueNib,
+            valuePx: correctedLength,
+            valueNib: state.formula.nibPx ? correctedLength / state.formula.nibPx : null,
+            supersededByManualEndpoints: true
+          };
+        }
+        if (object.rowBoundaries) {
+          object.rowBoundaries = {
+            ...object.rowBoundaries,
+            supersededByManualEndpoints: true
+          };
+        }
+      }
       markObjectModified(object);
       state.selectedPoint = { target: 'object', id: object.id, index: drag.handle };
       syncFormulaFromObject(object);
+      if (object.type === 'gap' && object.formulaKey === 'between-lines') {
+        refreshBetweenLinesSummary();
+      }
     }
   } else if (drag.type === 'letterResize') {
     if (!dragPassedThreshold(drag, screenPoint)) return;
@@ -183,6 +256,24 @@ function pointerMove(event) {
       );
       object.auto = false;
       markObjectModified(object);
+      syncLetterControls(object);
+    }
+  } else if (drag.type === 'letterVectorHandle') {
+    if (!dragPassedThreshold(drag, screenPoint)) return;
+    commitDragHistory(drag);
+    const object = state.objects.find(item => item.id === drag.id && isLetterTemplate(item));
+    const engine = globalThis.MEDIDAOT_VECTOR_ENGINE;
+    if (object && engine?.moveObjectHandle) {
+      engine.moveObjectHandle(object, drag.vectorHandleId, imagePoint, {
+        asset: letterAsset(object),
+        moveAdjacentControls: true
+      });
+      object.auto = false;
+      markObjectModified(object);
+      state.letterVectorSelection = {
+        id: object.id,
+        handleId: drag.vectorHandleId
+      };
       syncLetterControls(object);
     }
   } else if (drag.type === 'curveHandle') {
@@ -208,6 +299,13 @@ function pointerMove(event) {
           ...segment,
           control: segment.control ? { x: segment.control.x + dx, y: segment.control.y + dy } : null
         }));
+      }
+      if (object.type === 'gap' && object.gapDetection) {
+        for (const key of ['upperBoundary', 'lowerBoundary']) {
+          if (Array.isArray(object.gapDetection[key])) {
+            object.gapDetection[key] = object.gapDetection[key].map(point => ({ x: point.x + dx, y: point.y + dy }));
+          }
+        }
       }
       object.auto = false;
       markObjectModified(object);
@@ -248,7 +346,7 @@ function pointerUp(event) {
     const objectType = state.dragging.objectType;
     finishRectDraft(objectType, state.interactionBefore);
   }
-  if (completedDrag?.moved && ['handle', 'object', 'letterResize'].includes(completedDrag.type)) {
+  if (completedDrag?.moved && ['handle', 'object', 'letterResize', 'letterVectorHandle'].includes(completedDrag.type)) {
     const movedObject = state.objects.find(item => item.id === completedDrag.id);
     if (movedObject?.type === 'nibRegion') {
       const rollbackSnapshot = completedDrag.before;
@@ -310,7 +408,7 @@ canvas.addEventListener('wheel', event => {
 
 function syncFormulaFromObject(object) {
   if (!object || object.points.length < 2) return;
-  const value = distance(object.points[0], object.points[1]);
+  const value = object.type === 'gap' ? measurementLengthPx(object) : distance(object.points[0], object.points[1]);
   if (object.type === 'nib' && value > 0) {
     state.formula.nibPx = value;
     const parentRegion = object.regionId
@@ -393,6 +491,7 @@ function settleDraftBeforeToolChange(nextTool) {
     if (draftType === 'gap') {
       state.draft.formulaKey = state.formula.selectedVariable;
       state.draft.name = selectedVariableName();
+      state.draft.category = defaultCategory('gap', state.formula.selectedVariable);
     }
     if (draftType === 'angle') state.draft.angleRef = ui.angleRef.value;
     commitDraft(draftType === 'nib' ? 'עובי הקולמוס כויל' : 'המדידה נוספה');
@@ -412,12 +511,14 @@ function setTool(tool) {
   const draftOutcome = settleDraftBeforeToolChange(tool);
   state.tool = tool;
   document.querySelectorAll('.tool[data-tool]').forEach(button => button.classList.toggle('active', button.dataset.tool === tool));
+  $('gapsPanelBtn')?.classList.toggle('active', tool === 'gap');
+  $('autoNibToolBtn')?.classList.remove('active');
   if (TOOL_COLORS[tool]) ui.color.value = TOOL_COLORS[tool];
   const messages = {
     pan: 'בחירה ועריכה ב־Apple Pencil; הזזה וזום בשתי אצבעות',
     area: 'מדידת שטח ואיזון לובן: סמן נקודות ב־Apple Pencil',
     nib: 'עובי קולמוס: סמן שתי נקודות לרוחב עובי מייצג',
-    nibRegion: 'כיול מאזור: גרור מסגרת סביב מקטע קולמוס מייצג',
+    nibRegion: 'בדיקה מתקדמת באזור: גרור מסגרת סביב מרכזו של גג ישר',
     gap: `מרווחים: ${selectedVariableName()} — סמן שתי נקודות`,
     length: 'אורך חופשי: סמן שתי נקודות',
     angle: 'זווית: סמן שתי נקודות לאורך הקו',
@@ -454,8 +555,10 @@ $('clearBtn').addEventListener('click', () => {
   state.selectedId = null;
   state.selectedPoint = null;
   state.selectedSegment = null;
+  state.letterVectorSelection = null;
   state.formula.nibPx = null;
   state.formula.commonGapPx = null;
+  state.formula.betweenLinesPx = null;
   state.formula.calibration = null;
   state.formula.nibSamples = [];
   state.activeCalibrationRegionId = null;
@@ -686,9 +789,13 @@ function deleteSelectedObject() {
     const lastGap = [...state.objects].reverse().find(item => item.type === 'gap' && item.formulaKey === 'common-gap');
     state.formula.commonGapPx = lastGap ? distance(lastGap.points[0], lastGap.points[1]) : null;
   }
+  if (deleted?.type === 'gap' && deleted.formulaKey === 'between-lines') {
+    refreshBetweenLinesSummary();
+  }
   state.selectedId = null;
   state.selectedPoint = null;
   state.selectedSegment = null;
+  state.letterVectorSelection = null;
   statusText.textContent = 'המדידה נמחקה';
   renderAll();
 }
@@ -702,7 +809,30 @@ document.querySelectorAll('[data-formula-tab]').forEach(button => button.addEven
 $('startNibBtn').addEventListener('click', () => setTool('nib'));
 $('startNibRegionBtn').addEventListener('click', () => setTool('nibRegion'));
 $('startGapBtn').addEventListener('click', () => setTool('gap'));
-$('analyzeBtn').addEventListener('click', () => analyzeImage(true));
+$('analyzeBtn').addEventListener('click', () => {
+  const automatic = globalThis.MEDIDAOT_AUTO_MEASURE;
+  if (automatic?.runNib) automatic.runNib({ userInitiated: true }).catch(() => {});
+  else analyzeImage(true);
+});
+$('autoNibToolBtn')?.addEventListener('click', () => {
+  activateFormulaTab('nib');
+  const automatic = globalThis.MEDIDAOT_AUTO_MEASURE;
+  if (automatic?.runNib) automatic.runNib({ userInitiated: true }).catch(() => {});
+  else analyzeImage(true);
+});
+$('gapsPanelBtn')?.addEventListener('click', () => {
+  activateFormulaTab('gaps');
+  $('gapsPanelBtn').classList.add('active');
+  statusText.textContent = 'בחר סוג מרווח; בין השיטין ניתן לזיהוי אוטומטי או לתיקון ידני';
+  renderFormulaUI();
+});
+$('autoLineGapBtn')?.addEventListener('click', () => {
+  state.formula.selectedVariable = 'between-lines';
+  ui.gapVariable.value = 'between-lines';
+  const automatic = globalThis.MEDIDAOT_AUTO_MEASURE;
+  if (automatic?.runInterline) automatic.runInterline({ userInitiated: true }).catch(() => {});
+  else statusText.textContent = 'מנוע זיהוי בין השיטין טרם נטען';
+});
 
 ui.gapVariable.addEventListener('change', () => {
   state.formula.selectedVariable = ui.gapVariable.value;
@@ -824,6 +954,11 @@ function updateSelectedStyle() {
     object.fillEnabled = ui.fillEnabled.checked;
   }
   object.category = ui.category?.value || object.category || defaultCategory(object.type);
+  if (object.type === 'gap' && object.category === 'line-gap') {
+    object.formulaKey = 'between-lines';
+    state.formula.selectedVariable = 'between-lines';
+    ui.gapVariable.value = 'between-lines';
+  }
   object.assessment = ui.assessment?.value || object.assessment || 'unclassified';
   object.note = ui.note?.value.trim() || '';
   object.auto = false;
@@ -926,6 +1061,7 @@ function loadImageSource(source, resetProject, preparedImage = null) {
       state.selectedId = null;
       state.selectedPoint = null;
       state.selectedSegment = null;
+      state.letterVectorSelection = null;
       state.nextId = 1;
       state.history = [];
       state.future = [];
@@ -939,7 +1075,16 @@ function loadImageSource(source, resetProject, preparedImage = null) {
     }
     renderAll();
     for (const kastel of state.objects.filter(item => item.type === 'kastel' && !item.guides)) initializeKastelGuides(kastel);
-    if (resetProject) statusText.textContent = 'התמונה נטענה. אפשר לכייל ידנית, או ליצור קעסטעל ולזהות את הגג';
+    if (resetProject) {
+      statusText.textContent = 'התמונה נטענה. מזהה כעת את עובי הקולמוס מן הגגות…';
+      setTimeout(() => {
+        const automatic = globalThis.MEDIDAOT_AUTO_MEASURE;
+        if (automatic?.analyzeLoadedImage) {
+          automatic.analyzeLoadedImage({ apply: true }).catch(() => {});
+        }
+        else analyzeImage(false);
+      }, 0);
+    }
   };
   if (preparedImage) {
     handleLoad();
@@ -960,7 +1105,7 @@ async function analyzeImage(userInitiated) {
   state.formula.analysis.status = 'running';
   analysisOverlay.hidden = false;
   renderFormulaUI();
-  statusText.textContent = 'מבצע בדיקה כללית — הכיול הפעיל לא ישתנה';
+  statusText.textContent = 'מזהה גגות ישרים ועובי קולמוס…';
   await new Promise(resolve => setTimeout(resolve, 40));
   try {
     const analysis = computeImageMetrics(state.image);
@@ -970,7 +1115,7 @@ async function analyzeImage(userInitiated) {
     if (token !== state.calibrationAnalysisToken) return;
     console.error(error);
     state.formula.analysis.status = 'failed';
-    statusText.textContent = 'הבדיקה הכללית לא הצליחה. לקביעת עובי קולמוס יש לסמן אזור כיול';
+    statusText.textContent = 'לא נמצא גג יציב דיו. אפשר לתקן באמצעות קו ידני או בדיקה באזור.';
   } finally {
     if (token === state.calibrationAnalysisToken) {
       analysisOverlay.hidden = true;

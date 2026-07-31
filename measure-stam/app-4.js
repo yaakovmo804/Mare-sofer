@@ -13,8 +13,8 @@ function applyAnalysis(analysis) {
   statusText.textContent = analysis.nib
     ? state.formula.nibPx
       ? 'הבדיקה הכללית הסתיימה ולא שינתה את כיול הקולמוס הפעיל'
-      : 'הבדיקה הכללית הסתיימה. לקביעת 1 עובי קולמוס יש לסמן אזור כיול'
-    : 'לא זוהה מבנה יציב. לקביעת עובי קולמוס יש לסמן אזור כיול';
+      : 'זוהתה הצעת עובי קולמוס; אפשר לאשר או לדייק אותה באמצעות קו ידני'
+    : 'לא זוהה מבנה יציב. אפשר להשתמש בקו ידני או בבדיקה המתקדמת באזור';
 }
 
 function computeImageMetrics(image, options = {}) {
@@ -897,11 +897,25 @@ async function analyzeCalibrationRegion(region, rollbackSnapshot = null) {
     if (token !== state.calibrationAnalysisToken) return;
     console.error(error);
     const hadPreviousCalibration = Number.isFinite(+safeRollback.formula?.nibPx) && +safeRollback.formula.nibPx > 0;
-    restoreSnapshot(safeRollback);
-    state.activeCalibrationRegionId = previousActiveRegionId || state.formula.calibration?.regionObjectId || null;
+    region.calibrationPx = null;
+    region.sampleAccepted = false;
+    region.analysisError = String(error?.message || 'unstable-stroke');
+    region.provenance = region.provenance || {};
+    region.provenance.modifiedAt = new Date().toISOString();
+    state.activeCalibrationRegionId = region.id;
+    state.selectedId = region.id;
+    state.formula.analysis = {
+      ...state.formula.analysis,
+      status: hadPreviousCalibration ? 'done' : 'failed'
+    };
+    const guidance = /boundary|clipped/i.test(region.analysisError)
+      ? 'התחום נוגע בדיו בקצה. המסגרת נשארה על התמונה — הגדל אותה מעט וגרור את פינותיה.'
+      : /more than one|multi|component/i.test(region.analysisError)
+        ? 'נמצאו כמה איברים בתחום. המסגרת נשארה — מקם אותה על מרכז גג ישר.'
+        : 'החתך אינו יציב דיו. המסגרת נשארה וניתנת לתיקון; אפשר גם להשתמש בזיהוי האוטומטי.';
     statusText.textContent = hadPreviousCalibration
-      ? 'לא נמצא חתך קולמוס יציב באזור; הכיול הקודם נשאר פעיל. סמן מקטע ישר ורציף בלבד'
-      : 'לא נמצא חתך קולמוס יציב. סמן אזור צר סביב מקטע ישר ורציף, ללא פינה או הסתעפות';
+      ? `${guidance} הכיול הקודם נשאר פעיל.`
+      : guidance;
   } finally {
     if (token === state.calibrationAnalysisToken) {
       analysisOverlay.hidden = true;
@@ -1558,6 +1572,25 @@ function drawObjectToContext(context, object) {
       }
     }
   } else if (['length', 'nib', 'gap', 'angle'].includes(object.type) && points.length >= 2) {
+    if (object.type === 'gap' && object.gapDetection?.manualCorrected !== true) {
+      const boundaries = [
+        object.gapDetection.upperBoundary,
+        object.gapDetection.lowerBoundary
+      ].filter(boundary => Array.isArray(boundary) && boundary.length >= 2);
+      if (boundaries.length) {
+        context.save();
+        context.globalAlpha = .72;
+        context.lineWidth = Math.max(1, (object.lineWidth || 3) * .55);
+        context.setLineDash([5, 5]);
+        for (const boundary of boundaries) {
+          context.beginPath();
+          context.moveTo(boundary[0].x, boundary[0].y);
+          for (const point of boundary.slice(1)) context.lineTo(point.x, point.y);
+          context.stroke();
+        }
+        context.restore();
+      }
+    }
     context.beginPath(); context.moveTo(points[0].x, points[0].y); context.lineTo(points[1].x, points[1].y); context.stroke();
     if (object.type === 'angle' && points.length >= 3) {
       context.beginPath(); context.moveTo(points[1].x, points[1].y); context.lineTo(points[2].x, points[2].y); context.stroke();
@@ -1726,14 +1759,14 @@ async function serializeProjectV3() {
   return {
     ...base,
     format: 'mirror-sofer.measure-stam.project',
-    schemaVersion: '3.2.0',
+    schemaVersion: '3.3.0',
     project: {
       ...(base.project || {}),
       id: captured.projectMeta.id,
       title: captured.projectMeta.title || 'פרויקט מדידאות',
       createdAt: captured.projectMeta.createdAt,
       updatedAt: now,
-      appVersion: '2026.07.31j',
+      appVersion: '2026.07.31k',
       locale: 'he-IL'
     },
     source: {
@@ -1863,28 +1896,45 @@ function measurementMetrics(object) {
   }
   if (object.type === 'letterTemplate' && object.points.length === 4) {
     const rect = letterObjectRect(object);
+    const vectorStats = globalThis.MEDIDAOT_VECTOR_ENGINE?.stats?.(object, letterAsset(object)) || null;
+    const visualRect = vectorStats?.visualBounds?.image || rect;
     return {
-      metricId: 'reference-letter-template.v1',
+      metricId: 'reference-letter-template.v2',
       letter: object.template?.letter || null,
       tradition: object.template?.tradition || 'beitYosef',
-      vectorAssetVersion: object.template?.vectorAssetVersion || 1,
+      vectorAssetVersion: object.template?.vectorAssetVersion || 2,
+      layoutMode: object.template?.layoutMode || 'tight-v1',
       widthPx: rect.width,
       heightPx: rect.height,
+      visualWidthPx: visualRect.width,
+      visualHeightPx: visualRect.height,
       mode: object.letterMode || 'solid',
-      opacity: object.letterOpacity ?? .62
+      opacity: object.letterOpacity ?? .62,
+      nibFactor: object.letterWeight ?? 1,
+      vectorRevision: object.letterVector?.revision ?? 0,
+      anchorCount: vectorStats?.anchors ?? null,
+      controlCount: vectorStats?.controls ?? null
     };
   }
   if (['length', 'nib', 'gap'].includes(object.type) && object.points.length >= 2) {
-    const lengthPx = distance(object.points[0], object.points[1]);
+    const lengthPx = object.type === 'gap' ? measurementLengthPx(object) : distance(object.points[0], object.points[1]);
     return {
       metricId: object.type === 'nib'
         ? 'nib-width-line.v1'
         : object.type === 'gap'
-          ? 'gap-length.v1'
+          ? object.gapDetection
+            ? 'interline-clearance.v1'
+            : 'gap-length.v1'
           : 'line-length.v1',
       lengthPx,
       lengthNib: state.formula.nibPx ? lengthPx / state.formula.nibPx : null,
-      calibrationId: activeNibCalibrationId()
+      calibrationId: activeNibCalibrationId(),
+      ...(object.gapDetection ? {
+        confidence: object.gapDetection.confidence ?? null,
+        sampleCount: object.gapDetection.sampleCount ?? null,
+        method: object.gapDetection.method || 'auto-interline-clearance-v1',
+        manualCorrected: object.gapDetection.manualCorrected === true
+      } : {})
     };
   }
   if (object.type === 'angle') return { metricId: 'axis-deviation-angle.v1', angleDeg: objectAngle(object) };
@@ -2027,6 +2077,7 @@ $('projectInput').addEventListener('change', event => {
       state.selectedId = null;
       state.selectedPoint = null;
       state.selectedSegment = null;
+      state.letterVectorSelection = null;
       state.history = [];
       state.future = [];
       if (migrated.imageSrc) loadImageSource(migrated.imageSrc, false, preparedImage);

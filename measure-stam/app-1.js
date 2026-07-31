@@ -15,7 +15,7 @@ const BUILTIN_VARIABLES = [
   { id: 'roof-seat', name: 'מרווח גג–מושב', builtin: true },
   { id: 'between-letters', name: 'מרווח בין אות לאות', builtin: true },
   { id: 'between-words', name: 'מרווח בין מילים', builtin: true },
-  { id: 'between-lines', name: 'מרווח בין שורות', builtin: true },
+  { id: 'between-lines', name: 'בין השיטין — מתחתית האות לשורה הבאה', builtin: true },
   { id: 'between-heads', name: 'מרווח בין ראשים', builtin: true },
   { id: 'shin-teeth', name: 'מרווח בין שיני שי״ן', builtin: true },
   { id: 'bet-seat-line', name: 'תחתית מושב ב׳–שורה/שרטוט', builtin: true },
@@ -46,7 +46,7 @@ const SEMANTIC_CATEGORIES = [
   { id: 'balcony', name: 'מרפסות' },
   { id: 'letter-gap', name: 'מרווח בין אותיות' },
   { id: 'word-gap', name: 'מרווח בין מילים' },
-  { id: 'line-gap', name: 'מרווח בין שורות' },
+  { id: 'line-gap', name: 'מרווח בין השיטין' },
   { id: 'thirds', name: 'חוק השלישים' },
   { id: 'angle', name: 'זוויות' },
   { id: 'reference-template', name: 'תבנית אות' },
@@ -63,6 +63,7 @@ const state = {
   selectedId: null,
   selectedPoint: null,
   selectedSegment: null,
+  letterVectorSelection: null,
   draftHistory: [],
   view: { x: 0, y: 0, scale: 1 },
   dragging: null,
@@ -78,11 +79,20 @@ const state = {
   formula: {
     nibPx: null,
     commonGapPx: null,
+    betweenLinesPx: null,
     calibration: null,
     nibSamples: [],
     selectedVariable: 'common-gap',
     variables: structuredCloneSafe(BUILTIN_VARIABLES),
-    analysis: { status: 'idle', nibConfidence: 0, gapConfidence: 0, threshold: null }
+    analysis: {
+      status: 'idle',
+      nibConfidence: 0,
+      gapConfidence: 0,
+      threshold: null,
+      roofCandidates: [],
+      textRows: [],
+      interlineProposals: []
+    }
   },
   projectMeta: {
     id: null,
@@ -176,6 +186,13 @@ function imageToScreen(point) {
   return { x: point.x * state.view.scale + state.view.x, y: point.y * state.view.scale + state.view.y };
 }
 function distance(a, b) { return Math.hypot(b.x - a.x, b.y - a.y); }
+function measurementLengthPx(object) {
+  const detected = +object?.gapDetection?.medianPx;
+  if (object?.type === 'gap' && Number.isFinite(detected) && detected > 0 && object.gapDetection?.manualCorrected !== true) {
+    return detected;
+  }
+  return object?.points?.length >= 2 ? distance(object.points[0], object.points[1]) : 0;
+}
 function midpoint(a, b) { return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; }
 function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
 function fmt(value, digits = 2) {
@@ -294,6 +311,7 @@ function restoreSnapshot(snapshotData) {
   state.selectedId = null;
   state.selectedPoint = null;
   state.selectedSegment = null;
+  state.letterVectorSelection = null;
   analysisOverlay.hidden = true;
   renderAll();
 }
@@ -352,11 +370,21 @@ function mergeFormula(saved) {
   return {
     nibPx: Number.isFinite(+saved.nibPx) && +saved.nibPx > 0 ? +saved.nibPx : null,
     commonGapPx: Number.isFinite(+saved.commonGapPx) && +saved.commonGapPx > 0 ? +saved.commonGapPx : null,
+    betweenLinesPx: Number.isFinite(+saved.betweenLinesPx) && +saved.betweenLinesPx > 0 ? +saved.betweenLinesPx : null,
     calibration: saved.calibration || null,
     nibSamples,
     selectedVariable: variables.some(v => v.id === saved.selectedVariable) ? saved.selectedVariable : 'common-gap',
     variables,
-    analysis: { status: 'idle', nibConfidence: 0, gapConfidence: 0, threshold: null, ...(saved.analysis || {}) }
+    analysis: {
+      status: 'idle',
+      nibConfidence: 0,
+      gapConfidence: 0,
+      threshold: null,
+      roofCandidates: [],
+      textRows: [],
+      interlineProposals: [],
+      ...(saved.analysis || {})
+    }
   };
 }
 
@@ -601,6 +629,28 @@ function draw() {
   }
 }
 
+function drawGapDetectionBoundaries(object) {
+  if (!object?.gapDetection || object.gapDetection.manualCorrected === true) return;
+  const boundaries = [
+    object.gapDetection.upperBoundary,
+    object.gapDetection.lowerBoundary
+  ].filter(points => Array.isArray(points) && points.length >= 2);
+  if (!boundaries.length) return;
+  ctx.save();
+  ctx.strokeStyle = object.color || TOOL_COLORS.gap;
+  ctx.globalAlpha = .72;
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([5, 5]);
+  for (const boundary of boundaries) {
+    const screenPoints = boundary.map(imageToScreen);
+    ctx.beginPath();
+    ctx.moveTo(screenPoints[0].x, screenPoints[0].y);
+    for (const point of screenPoints.slice(1)) ctx.lineTo(point.x, point.y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 function drawObject(object, selected, draft) {
   const points = object.points.map(imageToScreen);
   if (!points.length) return;
@@ -660,6 +710,7 @@ function drawObject(object, selected, draft) {
     }
   } else if (['length', 'nib', 'gap'].includes(object.type)) {
     if (points.length > 1) {
+      if (object.type === 'gap') drawGapDetectionBoundaries(object);
       drawLine(points[0], points[1]);
       drawEndCaps(points[0], points[1], object.color);
       if (resultLabelVisible) {

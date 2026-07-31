@@ -1,81 +1,20 @@
 'use strict';
 
 (() => {
+  // Keep the analysis controls single-flight without replacing the image
+  // lifecycle. The current lifecycle intentionally starts local roof
+  // detection after a new image is loaded.
   const originalAnalyzeImage = analyzeImage;
   let analysisRunning = false;
 
-  // הגרסה היציבה אינה מפעילה ניתוח כבד מיד עם העלאת התמונה.
-  // המשתמש יכול להתחיל למדוד מיד ולהפעיל ניתוח נוסחת כתב לפי דרישה.
-  loadImageSource = function loadImageSourceStable(source, resetProject, preparedImage = null) {
-    analysisOverlay.hidden = true;
-    const image = preparedImage || new Image();
-
-    const handleLoad = () => {
-      state.image = image;
-      state.imageSrc = source;
-      emptyState.style.display = 'none';
-
-      if (resetProject) {
-        state.objects = [];
-        state.draft = null;
-        state.draftHistory = [];
-        state.selectedId = null;
-        state.selectedPoint = null;
-        state.selectedSegment = null;
-        state.nextId = 1;
-        state.history = [];
-        state.future = [];
-        state.formula = mergeFormula({});
-        state.activeCalibrationRegionId = null;
-        cancelCalibrationAnalysis();
-        state.pointers.clear();
-        state.pinchStart = null;
-        state.activePointerId = null;
-        state.interactionBefore = null;
-      }
-
-      fitImage();
-      const savedView = !resetProject ? state.projectDocument?.uiState?.view : null;
-      if (savedView && Number.isFinite(+savedView.x) && Number.isFinite(+savedView.y) && Number.isFinite(+savedView.scale)) {
-        state.view = { x: +savedView.x, y: +savedView.y, scale: clamp(+savedView.scale, .03, 12) };
-        zoomText.textContent = `${Math.round(state.view.scale * 100)}%`;
-      }
-      renderAll();
-      for (const kastel of state.objects.filter(item => item.type === 'kastel' && !item.guides)) {
-        initializeKastelGuides(kastel);
-      }
-
-      if (resetProject) {
-        state.formula.analysis.status = 'idle';
-        statusText.textContent = 'התמונה נטענה. אפשר לכייל ידנית, או ליצור קעסטעל ולזהות את הגג.';
-        renderFormulaUI();
-      }
-    };
-
-    image.onerror = () => {
-      analysisOverlay.hidden = true;
-      statusText.textContent = 'לא ניתן לפתוח את התמונה';
-      alert('לא ניתן לפתוח את התמונה');
-    };
-
-    if (preparedImage) {
-      handleLoad();
-      return;
-    }
-    image.onload = handleLoad;
-    image.src = source;
-  };
-
   analyzeImage = async function analyzeImageStable(userInitiated = true) {
     if (analysisRunning) {
-      statusText.textContent = 'הניתוח כבר פועל';
+      statusText.textContent = 'הזיהוי כבר פועל';
       return;
     }
-
     analysisRunning = true;
     const analyzeButton = $('analyzeBtn');
     if (analyzeButton) analyzeButton.disabled = true;
-
     try {
       await originalAnalyzeImage(userInitiated);
     } finally {
@@ -88,11 +27,15 @@
   analysisOverlay.hidden = true;
 
   const emptyCopy = document.querySelector('#emptyState p');
-  if (emptyCopy) emptyCopy.textContent = 'התמונה נטענת מיד. עובי הקולמוס יכול להיקבע מאזור, מקו ידני או מגג שזוהה בקעסטעל.';
+  if (emptyCopy) {
+    emptyCopy.textContent = 'התמונה נטענת ומנותחת מקומית. עובי הקולמוס מזוהה מן הגגות וניתן לתיקון ידני.';
+  }
 
   const analysisNote = $('analysisNote');
-  if (analysisNote) analysisNote.textContent = 'הבדיקה הכללית אינה משנה כיול. כיול פעיל נקבע מאזור, מקו ידני או מגג שזוהה בקעסטעל; כיול ידני נשאר נעול.';
+  if (analysisNote) {
+    analysisNote.textContent = 'המערכת מאתרת גגות ישרים בתמונה, מודדת חתכים יציבים וקובעת את עובי הקולמוס אוטומטית. ערך ידני מאומת נשאר נעול.';
+  }
 
   const analyzeButton = $('analyzeBtn');
-  if (analyzeButton) analyzeButton.textContent = 'בדיקה כללית (ללא כיול)';
+  if (analyzeButton) analyzeButton.textContent = 'זיהוי אוטומטי';
 })();

@@ -19,6 +19,15 @@ if (typeof globalThis.isLetterTemplate !== 'function') {
   globalThis.normalizeLetterTemplateObject = object => object;
   globalThis.drawLetterTemplateForExport = () => {};
 }
+if (typeof globalThis.nearestLetterVectorHandle !== 'function') {
+  globalThis.nearestLetterVectorHandle = () => null;
+}
+if (typeof globalThis.pointInLetterTemplate !== 'function') {
+  globalThis.pointInLetterTemplate = (point, object) => {
+    const rect = globalThis.letterObjectRect(object);
+    return point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom;
+  };
+}
 
 function kastelRegionMetrics(object) {
   if (!object?.guides || object?.points?.length !== 4) return null;
@@ -47,7 +56,7 @@ function measurementResultModel(object) {
   }
 
   if (['length', 'nib', 'gap'].includes(object.type) && object.points.length >= 2) {
-    const px = distance(object.points[0], object.points[1]);
+    const px = object.type === 'gap' ? measurementLengthPx(object) : distance(object.points[0], object.points[1]);
     const ratio = state.formula.nibPx ? px / state.formula.nibPx : null;
     let primaryText = ratio == null ? 'נדרש כיול קולמוס' : `${fmt(ratio, 2)} עובי קולמוס`;
     if (object.type === 'nib' && ratio == null) primaryText = '1 עובי קולמוס';
@@ -186,6 +195,7 @@ function selectObject(id) {
   state.selectedId = id;
   state.selectedPoint = null;
   state.selectedSegment = null;
+  state.letterVectorSelection = null;
   const object = state.objects.find(item => item.id === id);
   if (object) {
     ui.name.value = object.name || '';
@@ -215,9 +225,11 @@ function renderResults() {
   let html = `<p><b>${escapeHtml(object.name)}</b></p>`;
   if (object.type === 'letterTemplate') {
     const rect = letterObjectRect(object);
+    const visual = typeof letterVisualRect === 'function' ? letterVisualRect(object) : rect;
+    const vectorStats = globalThis.MEDIDAOT_VECTOR_ENGINE?.stats?.(object, letterAsset(object));
     html += `<p class="result-emphasis">תבנית ${escapeHtml(object.template?.letter || '')} · ${letterTraditionLabel(object.template?.tradition)}</p>`;
-    html += `<p>${fmt(rect.width, 1)} × ${fmt(rect.height, 1)} פיקסלים</p>`;
-    html += `<p class="result-note">שכבה וקטורית להשוואה; אינה נכללת ברשימת המדידות.</p>`;
+    html += `<p>צורת האות: ${fmt(visual.width, 1)} × ${fmt(visual.height, 1)} פיקסלים · עובי יחסי ${fmt((object.letterWeight || 1) * 100, 0)}%</p>`;
+    html += `<p class="result-note">${vectorStats?.anchors || 0} נקודות עוגן ו־${vectorStats?.controls || 0} ידיות Bézier · שכבה וקטורית שאינה נכללת ברשימת המדידות.</p>`;
   } else if (object.type === 'area') {
     const area = measuredArea(object);
     html += `<p class="result-emphasis">${fmt(area, 0)} פיקסלים²</p>`;
@@ -234,11 +246,16 @@ function renderResults() {
     if (object.sampleAccepted === false) html += '<p class="result-note">הדגימה חריגה ולא שינתה את הכיול הפעיל.</p>';
     if (object.auto) html += '<p class="result-note">הצעה אוטומטית. גרור את הקצוות לאזור מייצג כדי לאמת.</p>';
   } else if (object.type === 'gap') {
-    const px = distance(object.points[0], object.points[1]);
+    const px = measurementLengthPx(object);
     html += state.formula.nibPx
       ? `<p class="result-emphasis">${fmt(px / state.formula.nibPx, 2)} עובי קולמוס</p>${technicalPixelDetails(px)}`
       : `<p class="result-emphasis">נדרש כיול קולמוס</p>${technicalPixelDetails(px)}`;
     if (state.formula.commonGapPx) html += `<p>${fmt(px / state.formula.commonGapPx, 2)} מן המרווח המצוי</p>`;
+    if (object.gapDetection) {
+      html += `<p class="result-note">${object.gapDetection.manualCorrected
+        ? 'גבולות המדידה תוקנו ידנית.'
+        : `זוהה אוטומטית מתחתית השורה העליונה ועד ראש השורה הבאה${Number.isFinite(object.gapDetection.confidence) ? ` · ביטחון ${fmt(object.gapDetection.confidence * 100, 0)}%` : ''}.`}</p>`;
+    }
   } else if (object.type === 'angle') {
     html += `<p class="result-emphasis">${fmt(objectAngle(object), 1)}°</p><p>ייחוס: ${angleReferenceLabel(object.angleRef || ui.angleRef.value)}</p>`;
   } else if (object.type === 'kastel') {
@@ -420,7 +437,7 @@ function renderFormulaUI() {
   const gapGroups = new Map();
   for (const object of state.objects.filter(item => item.type === 'gap')) {
     if (!gapGroups.has(object.formulaKey)) gapGroups.set(object.formulaKey, []);
-    gapGroups.get(object.formulaKey).push(distance(object.points[0], object.points[1]));
+    gapGroups.get(object.formulaKey).push(measurementLengthPx(object));
   }
   const summary = $('formulaSummary');
   summary.replaceChildren();
@@ -621,9 +638,28 @@ function selectedAreaEditHit(imagePoint) {
 function hitTest(imagePoint) {
   const selectedLetter = state.objects.find(item => item.id === state.selectedId && isLetterTemplate(item));
   if (selectedLetter) {
+    const preciseLetterHandle = nearestLetterHandle(selectedLetter, imagePoint, 10);
+    if (preciseLetterHandle) {
+      return {
+        object: selectedLetter,
+        handle: null,
+        segment: null,
+        letterHandle: preciseLetterHandle
+      };
+    }
+    const vectorHandle = nearestLetterVectorHandle(selectedLetter, imagePoint, 16);
+    if (vectorHandle) {
+      return {
+        object: selectedLetter,
+        handle: null,
+        segment: null,
+        letterHandle: null,
+        letterVectorHandle: vectorHandle
+      };
+    }
     const letterHandle = nearestLetterHandle(selectedLetter, imagePoint, 20);
     if (letterHandle) return { object: selectedLetter, handle: null, segment: null, letterHandle };
-    if (pointInPolygon(imagePoint, selectedLetter.points)) {
+    if (pointInLetterTemplate(imagePoint, selectedLetter)) {
       return { object: selectedLetter, handle: null, segment: null, letterHandle: null };
     }
   }
@@ -634,7 +670,7 @@ function hitTest(imagePoint) {
   for (let i = state.objects.length - 1; i >= 0; i--) {
     const object = state.objects[i];
     if (isLetterTemplate(object)) {
-      if (pointInPolygon(imagePoint, object.points)) {
+      if (pointInLetterTemplate(imagePoint, object)) {
         return { object, handle: null, segment: null, letterHandle: null };
       }
       continue;
@@ -676,6 +712,7 @@ function captureInteractionState() {
     selectedId: state.selectedId,
     selectedPoint: structuredCloneSafe(state.selectedPoint),
     selectedSegment: structuredCloneSafe(state.selectedSegment),
+    letterVectorSelection: structuredCloneSafe(state.letterVectorSelection),
     nextId: state.nextId,
     view: { ...state.view },
     history: state.history.slice(),
@@ -693,6 +730,7 @@ function restoreInteractionState(saved) {
   state.selectedId = saved.selectedId;
   state.selectedPoint = structuredCloneSafe(saved.selectedPoint);
   state.selectedSegment = structuredCloneSafe(saved.selectedSegment);
+  state.letterVectorSelection = structuredCloneSafe(saved.letterVectorSelection);
   state.nextId = saved.nextId;
   state.view = { ...saved.view };
   state.history = (saved.history || []).slice();
@@ -779,9 +817,25 @@ function pointerDown(event) {
       historyCommitted: false,
       moved: false
     };
-    if (hit.letterHandle) {
+    if (hit.letterVectorHandle) {
       state.selectedPoint = null;
       state.selectedSegment = null;
+      state.letterVectorSelection = {
+        id: hit.object.id,
+        handleId: hit.letterVectorHandle.id
+      };
+      state.dragging = {
+        ...dragBase,
+        type: 'letterVectorHandle',
+        vectorHandleId: hit.letterVectorHandle.id
+      };
+      statusText.textContent = hit.letterVectorHandle.kind === 'anchor'
+        ? 'גרור את נקודת העוגן; ידיות העקומה הסמוכות ינועו איתה'
+        : 'גרור את ידית ה־Bézier כדי לדייק את העקומה';
+    } else if (hit.letterHandle) {
+      state.selectedPoint = null;
+      state.selectedSegment = null;
+      state.letterVectorSelection = null;
       state.dragging = {
         ...dragBase,
         type: 'letterResize',
@@ -793,16 +847,19 @@ function pointerDown(event) {
         ? 'גרור לשינוי רוחב או גובה'
         : 'גרור להגדלה או הקטנה';
     } else if (hit.handle !== null) {
+      state.letterVectorSelection = null;
       state.selectedPoint = { target: 'object', id: hit.object.id, index: hit.handle };
       state.selectedSegment = null;
       state.dragging = { ...dragBase, type: 'handle', handle: hit.handle };
       statusText.textContent = 'הנקודה נבחרה. גרור למיקום המדויק';
     } else if (Number.isInteger(hit.segment)) {
+      state.letterVectorSelection = null;
       state.selectedPoint = null;
       state.selectedSegment = { target: 'object', id: hit.object.id, index: hit.segment };
       state.dragging = { ...dragBase, type: 'curveHandle', segment: hit.segment };
       statusText.textContent = 'גרור את היהלום כדי לעגל את המקטע';
     } else {
+      state.letterVectorSelection = null;
       state.dragging = {
         ...dragBase,
         type: 'object',
@@ -818,6 +875,7 @@ function pointerDown(event) {
     if (!hit) {
       state.selectedPoint = null;
       state.selectedSegment = null;
+      state.letterVectorSelection = null;
       state.dragging = { type: 'pan', pointerId: event.pointerId, start: screenPoint, view: { ...state.view } };
       renderControls();
     }
