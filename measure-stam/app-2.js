@@ -227,9 +227,15 @@ function renderResults() {
     const rect = letterObjectRect(object);
     const visual = typeof letterVisualRect === 'function' ? letterVisualRect(object) : rect;
     const vectorStats = globalThis.MEDIDAOT_VECTOR_ENGINE?.stats?.(object, letterAsset(object));
+    const weightIntensity = Math.round(((object.letterWeight || 1) - 1) / .45 * 100);
+    const weightLabel = weightIntensity === 0
+      ? 'מקור'
+      : weightIntensity < 0
+        ? `עדין ${Math.abs(weightIntensity)}`
+        : `מודגש ${weightIntensity}`;
     html += `<p class="result-emphasis">תבנית ${escapeHtml(object.template?.letter || '')} · ${letterTraditionLabel(object.template?.tradition)}</p>`;
-    html += `<p>צורת האות: ${fmt(visual.width, 1)} × ${fmt(visual.height, 1)} פיקסלים · עובי יחסי ${fmt((object.letterWeight || 1) * 100, 0)}%</p>`;
-    html += `<p class="result-note">${vectorStats?.anchors || 0} נקודות עוגן ו־${vectorStats?.controls || 0} ידיות Bézier · שכבה וקטורית שאינה נכללת ברשימת המדידות.</p>`;
+    html += `<p>צורת האות: ${fmt(visual.width, 1)} × ${fmt(visual.height, 1)} פיקסלים · עוצמת עובי ${weightLabel}</p>`;
+    html += `<p class="result-note">${vectorStats?.anchors || 0} נקודות עוגן ו־${vectorStats?.controls || 0} ידיות Bézier · מקור וקטורי עריך; שינוי העובי הוא נגזרת תצוגה מוגנת ואינו נכלל ברשימת המדידות.</p>`;
   } else if (object.type === 'area') {
     const area = measuredArea(object);
     html += `<p class="result-emphasis">${fmt(area, 0)} פיקסלים²</p>`;

@@ -3,7 +3,7 @@
   "name": "מדידאות — מראה סופר",
   "short_name": "מדידאות",
   "description": "מדידת שטחים, איזון לובן, עובי קולמוס, מרווחים וגאומטריית האות",
-  "start_url": "./?v=20260731k",
+  "start_url": "./?v=20260731l",
   "scope": "./",
   "display": "standalone",
   "display_override": ["standalone", "fullscreen"],

@@ -1766,7 +1766,7 @@ async function serializeProjectV3() {
       title: captured.projectMeta.title || 'פרויקט מדידאות',
       createdAt: captured.projectMeta.createdAt,
       updatedAt: now,
-      appVersion: '2026.07.31k',
+      appVersion: '2026.07.31l',
       locale: 'he-IL'
     },
     source: {
@@ -1910,6 +1910,9 @@ function measurementMetrics(object) {
       visualHeightPx: visualRect.height,
       mode: object.letterMode || 'solid',
       opacity: object.letterOpacity ?? .62,
+      weightSemantics: 'topology-safe-intensity-v1',
+      weightIntensity: Math.round(((object.letterWeight ?? 1) - 1) / .45 * 100),
+      // Kept for backward compatibility with projects saved before intensity-v1.
       nibFactor: object.letterWeight ?? 1,
       vectorRevision: object.letterVector?.revision ?? 0,
       anchorCount: vectorStats?.anchors ?? null,

@@ -760,6 +760,414 @@
     return Math.max(1, weight);
   }
 
+  function attachmentEvidence(binary, width, height, spans, nibRasterPx, direction) {
+    // A narrow, real stem can occupy too few roof columns to survive a global
+    // bottom quantile.  Measure only ink that is actually connected to each
+    // horizontal track, and score its reach, mass, and breadth independently.
+    const reaches = new Map();
+    for (const span of spans) {
+      const x0 = bound(Math.floor(span.left), 0, width - 1);
+      const x1 = bound(Math.ceil(span.right), x0, width - 1);
+      const top = bound(Math.floor(span.top), 0, height - 1);
+      const bottom = bound(Math.ceil(span.bottom), top, height - 1);
+      for (let x = x0; x <= x1; x++) {
+        let touchesTrack = false;
+        for (let y = top; y <= bottom; y++) {
+          if (binary[y * width + x]) {
+            touchesTrack = true;
+            break;
+          }
+        }
+        if (!touchesTrack) continue;
+        let y = direction > 0 ? bottom + 1 : top - 1;
+        let reach = 0;
+        while (y >= 0 && y < height && binary[y * width + x]) {
+          reach++;
+          y += direction;
+        }
+        if (reach > (reaches.get(x) || 0)) reaches.set(x, reach);
+      }
+    }
+    const positive = [...reaches.values()].filter(value => value > 0);
+    const maximumReach = positive.length ? Math.max(...positive) : 0;
+    const representativeReach = median(positive) || 0;
+    const longTailColumnCount = positive.filter(value =>
+      value >= representativeReach + nibRasterPx * 1.5
+    ).length;
+    const resolvedReach = longTailColumnCount >= Math.max(2, nibRasterPx * .75)
+      ? maximumReach
+      : representativeReach;
+    const inkMass = positive.reduce((sum, value) => sum + value, 0);
+    const attachedColumnCount = positive.length;
+    const reachScore = Math.min(1, maximumReach / Math.max(1, nibRasterPx * 1.5));
+    const massScore = Math.min(
+      1,
+      inkMass / Math.max(1, nibRasterPx * nibRasterPx * 1.5)
+    );
+    const breadthScore = Math.min(
+      1,
+      attachedColumnCount / Math.max(1, nibRasterPx * .75)
+    );
+    return {
+      score: reachScore * Math.sqrt(massScore * breadthScore),
+      maximumReachRasterPx: maximumReach,
+      representativeReachRasterPx: representativeReach,
+      resolvedReachRasterPx: resolvedReach,
+      longTailColumnCount,
+      inkMassRasterPx: inkMass,
+      attachedColumnCount
+    };
+  }
+
+  function horizontalTrackAnchors(prepared, nibRasterPx) {
+    const tracked = trackLongHorizontalRuns(prepared);
+    const samples = tracked.tracks
+      .map(track => roofSampleFromTrack(track, prepared))
+      .filter(Boolean)
+      .map(sample => ({
+        sample,
+        center: (sample.raster.roofTop + sample.raster.roofBottom) / 2,
+        weight: Math.max(1, sample.raster.roofRight - sample.raster.roofLeft + 1)
+      }))
+      .sort((a, b) => a.center - b.center);
+    const groups = [];
+    const mergeDistance = Math.max(1.5, nibRasterPx * .72);
+    for (const item of samples) {
+      const previous = groups[groups.length - 1];
+      if (previous && Math.abs(item.center - previous.center) <= mergeDistance) {
+        previous.items.push(item);
+        const totalWeight = previous.weight + item.weight;
+        previous.center = (
+          previous.center * previous.weight + item.center * item.weight
+        ) / totalWeight;
+        previous.weight = totalWeight;
+      } else {
+        groups.push({ center: item.center, weight: item.weight, items: [item] });
+      }
+    }
+    return groups.map((group, index) => {
+      const spans = group.items.map(item => ({
+        left: item.sample.raster.roofLeft,
+        right: item.sample.raster.roofRight,
+        top: item.sample.raster.roofTop,
+        bottom: item.sample.raster.roofBottom
+      }));
+      const downward = attachmentEvidence(
+        prepared.binary,
+        prepared.width,
+        prepared.height,
+        spans,
+        nibRasterPx,
+        1
+      );
+      const upward = attachmentEvidence(
+        prepared.binary,
+        prepared.width,
+        prepared.height,
+        spans,
+        nibRasterPx,
+        -1
+      );
+      const roleDenominator = downward.score + upward.score + .15;
+      return {
+        index,
+        center: group.center,
+        start: Math.min(...spans.map(span => span.top)),
+        end: Math.max(...spans.map(span => span.bottom)),
+        spans,
+        sampleCount: group.items.length,
+        horizontalWeight: group.weight,
+        downward,
+        upward,
+        roofness: downward.score / roleDenominator,
+        seatness: upward.score / roleDenominator
+      };
+    });
+  }
+
+  function bandPhaseAnchors(bands) {
+    return bands.map((band, index) => ({
+      index,
+      center: (band.start + band.end) / 2,
+      start: band.start,
+      end: band.end,
+      spans: [],
+      sampleCount: 0,
+      horizontalWeight: band.end - band.start + 1,
+      downward: { score: 0 },
+      upward: { score: 0 },
+      roofness: 0,
+      seatness: 0
+    }));
+  }
+
+  function periodLinks(anchors, pitch, nibRasterPx) {
+    const tolerance = Math.max(nibRasterPx * .75, pitch * .045);
+    const proposals = [];
+    for (let first = 0; first < anchors.length; first++) {
+      let best = null;
+      for (let second = first + 1; second < anchors.length; second++) {
+        const difference = anchors[second].center - anchors[first].center;
+        const residual = Math.abs(difference - pitch);
+        if (difference > pitch + tolerance) break;
+        if (residual > tolerance) continue;
+        const roleSimilarity = 1 - Math.min(
+          1,
+          Math.abs((anchors[first].roofness || 0) - (anchors[second].roofness || 0))
+        );
+        const weight = Math.exp(-((residual / Math.max(1e-6, tolerance)) ** 2)) *
+          (.65 + .35 * roleSimilarity);
+        const proposal = { first, second, difference, residual, weight };
+        if (!best || proposal.residual < best.residual - 1e-9 || (
+          Math.abs(proposal.residual - best.residual) <= 1e-9 &&
+          proposal.weight > best.weight
+        )) best = proposal;
+      }
+      if (best) proposals.push(best);
+    }
+    const byDestination = new Map();
+    for (const proposal of proposals) {
+      const existing = byDestination.get(proposal.second);
+      if (!existing || proposal.residual < existing.residual - 1e-9 || (
+        Math.abs(proposal.residual - existing.residual) <= 1e-9 &&
+        proposal.weight > existing.weight
+      )) byDestination.set(proposal.second, proposal);
+    }
+    return [...byDestination.values()].sort((a, b) => a.first - b.first);
+  }
+
+  function phaseChains(anchors, links) {
+    const outgoing = new Map(links.map(link => [link.first, link]));
+    const incoming = new Set(links.map(link => link.second));
+    const chains = [];
+    const visited = new Set();
+    const starts = anchors.map((_, index) => index).filter(index => !incoming.has(index));
+    for (const start of starts) {
+      const nodes = [];
+      const chainLinks = [];
+      let current = start;
+      while (!visited.has(current)) {
+        visited.add(current);
+        nodes.push(current);
+        const link = outgoing.get(current);
+        if (!link) break;
+        chainLinks.push(link);
+        current = link.second;
+      }
+      if (nodes.length > 1) chains.push({ nodes, links: chainLinks });
+    }
+    return chains;
+  }
+
+  function evaluatePhasePeriod(anchors, initialPitch, nibRasterPx) {
+    let pitch = initialPitch;
+    let links = [];
+    for (let pass = 0; pass < 2; pass++) {
+      links = periodLinks(anchors, pitch, nibRasterPx);
+      const refined = median(links.map(link => link.difference));
+      if (!refined) break;
+      pitch = refined;
+    }
+    links = periodLinks(anchors, pitch, nibRasterPx);
+    const chains = phaseChains(anchors, links);
+    const longChains = chains.filter(chain => chain.nodes.length >= 3);
+    const pairedChains = chains.filter(chain => chain.nodes.length >= 2);
+    const bodyBackedChains = pairedChains.filter(chain => chain.nodes.every(index =>
+      (anchors[index].downward?.score || 0) >= .42
+    ));
+    // Same-row roof/seat offsets create disconnected two-node pairs.  A text
+    // line period instead creates a repeated same-phase chain; two-line crops
+    // are admitted only when a second phase corroborates a body-backed chain.
+    const eligible = longChains.length > 0 || (
+      pairedChains.length >= 2 && bodyBackedChains.length > 0
+    );
+    const participatingNodes = new Set(
+      longChains.flatMap(chain => chain.nodes)
+    );
+    const longLinks = longChains.flatMap(chain => chain.links);
+    const consideredLinks = longLinks.length ? longLinks : links;
+    const meanResidual = consideredLinks.length
+      ? consideredLinks.reduce((sum, link) => sum + link.residual, 0) / consideredLinks.length
+      : Infinity;
+    const weight = consideredLinks.reduce((sum, link) => sum + link.weight, 0);
+    const step = median(consideredLinks.map(link => link.second - link.first));
+    return {
+      pitch,
+      eligible,
+      links,
+      chains,
+      longChainCount: longChains.length,
+      longNodeCount: participatingNodes.size,
+      longEdgeCount: longLinks.length,
+      pairedChainCount: pairedChains.length,
+      bodyBackedChainCount: bodyBackedChains.length,
+      maximumChainLength: chains.length
+        ? Math.max(...chains.map(chain => chain.nodes.length))
+        : 0,
+      meanResidual,
+      weight,
+      step: Number.isFinite(step) ? Math.round(step) : null
+    };
+  }
+
+  function phasePeriodIsBetter(candidate, best) {
+    if (!best) return true;
+    const candidateRank = [
+      candidate.longNodeCount,
+      candidate.longChainCount,
+      candidate.longEdgeCount,
+      candidate.bodyBackedChainCount,
+      candidate.weight,
+      -candidate.meanResidual,
+      -candidate.pitch
+    ];
+    const bestRank = [
+      best.longNodeCount,
+      best.longChainCount,
+      best.longEdgeCount,
+      best.bodyBackedChainCount,
+      best.weight,
+      -best.meanResidual,
+      -best.pitch
+    ];
+    for (let index = 0; index < candidateRank.length; index++) {
+      if (candidateRank[index] > bestRank[index] + 1e-9) return true;
+      if (candidateRank[index] < bestRank[index] - 1e-9) return false;
+    }
+    return false;
+  }
+
+  function estimatePhaseLinePitch(anchors, profile, nibRasterPx, height, method) {
+    if (anchors.length < 2) return null;
+    const minimumPitch = Math.max(nibRasterPx * 5.15, 8);
+    const maximumPitch = Math.min(height * .72, nibRasterPx * 28);
+    const candidates = [];
+    for (let first = 0; first < anchors.length; first++) {
+      for (let second = first + 1; second < anchors.length; second++) {
+        const difference = anchors[second].center - anchors[first].center;
+        if (difference >= minimumPitch && difference <= maximumPitch) {
+          candidates.push(difference);
+        }
+      }
+    }
+    let best = null;
+    for (const pitch of candidates) {
+      const proposal = evaluatePhasePeriod(anchors, pitch, nibRasterPx);
+      if (!proposal.eligible) continue;
+      if (phasePeriodIsBetter(proposal, best)) best = proposal;
+    }
+    if (!best) return null;
+    const lag = Math.round(best.pitch);
+    let overlap = 0;
+    let reference = 0;
+    for (let y = 0; y + lag < profile.length; y++) {
+      overlap += Math.min(profile[y], profile[y + lag]);
+      reference += Math.sqrt(Math.max(0, profile[y] * profile[y + lag]));
+    }
+    return {
+      pitch: best.pitch,
+      score: best.weight,
+      step: best.step,
+      relativeSpread: best.meanResidual / Math.max(1, best.pitch),
+      support: best.longEdgeCount || best.links.length,
+      repeatedIntervalCount: best.longEdgeCount || best.links.length,
+      correlation: reference ? overlap / reference : 0,
+      method,
+      phase: best,
+      phaseAnchors: anchors
+    };
+  }
+
+  function physicalLinesFromPhasePitch(pitchInfo) {
+    const phase = pitchInfo?.phase;
+    const anchors = pitchInfo?.phaseAnchors;
+    if (!phase || !anchors?.length) return [];
+    let candidates = phase.chains.filter(chain => chain.nodes.length >= 3);
+    if (!candidates.length) {
+      candidates = phase.chains.filter(chain =>
+        chain.nodes.length >= 2 && chain.nodes.every(index =>
+          (anchors[index]?.downward?.score || 0) >= .42
+        )
+      );
+    }
+    if (!candidates.length) return [];
+    const ranked = candidates.map(chain => {
+      const chainAnchors = chain.nodes.map(index => anchors[index]).filter(Boolean);
+      const downward = chainAnchors.reduce(
+        (sum, anchor) => sum + (anchor.downward?.score || 0),
+        0
+      ) / Math.max(1, chainAnchors.length);
+      const roofness = chainAnchors.reduce(
+        (sum, anchor) => sum + (anchor.roofness || 0),
+        0
+      ) / Math.max(1, chainAnchors.length);
+      return {
+        chain,
+        anchors: chainAnchors,
+        downward,
+        roofness,
+        first: chainAnchors[0]?.center ?? Infinity
+      };
+    }).sort((a, b) =>
+      b.downward - a.downward ||
+      b.roofness - a.roofness ||
+      b.anchors.length - a.anchors.length ||
+      a.first - b.first
+    );
+    return ranked[0].anchors.map(anchor => ({
+      center: anchor.center,
+      energy: anchor.horizontalWeight || 1,
+      bands: [],
+      anchor
+    }));
+  }
+
+  function phaseLineWindows(lines, pitchInfo, nibRasterPx, height) {
+    const anchors = pitchInfo?.phaseAnchors || [];
+    if (!lines.length || !anchors.length) return [];
+    const memberships = lines.map(line => ({
+      line,
+      anchors: [line.anchor].filter(Boolean)
+    }));
+    for (const anchor of anchors) {
+      if (memberships.some(membership => membership.anchors.includes(anchor))) continue;
+      let target = -1;
+      for (let index = 0; index < lines.length; index++) {
+        const next = lines[index + 1];
+        const cutoff = next
+          ? next.center - Math.min(nibRasterPx * .9, pitchInfo.pitch * .15)
+          : Infinity;
+        if (anchor.center >= lines[index].center - nibRasterPx * 1.2 &&
+            anchor.center < cutoff) {
+          target = index;
+          break;
+        }
+      }
+      if (target >= 0) memberships[target].anchors.push(anchor);
+    }
+    const extents = memberships.map(membership => ({
+      top: Math.min(...membership.anchors.map(anchor => anchor.start)),
+      bottom: Math.max(...membership.anchors.map(anchor => anchor.end))
+    }));
+    const boundaries = [];
+    for (let index = 0; index < extents.length - 1; index++) {
+      const upper = extents[index];
+      const lower = extents[index + 1];
+      boundaries.push(
+        lines[index].center <= nibRasterPx * .5
+          ? (lines[index].center + lines[index + 1].center) / 2
+          : upper.bottom < lower.top
+          ? (upper.bottom + lower.top) / 2
+          : (lines[index].center + lines[index + 1].center) / 2
+      );
+    }
+    return lines.map((line, index) => ({
+      start: index ? boundaries[index - 1] : 0,
+      end: index < boundaries.length ? boundaries[index] : height - 1,
+      line
+    }));
+  }
+
   function estimatePhysicalLinePitch(bands, profile, nibRasterPx, height) {
     if (bands.length < 2) return null;
     const centers = bands.map(band => (band.start + band.end) / 2);
@@ -786,7 +1194,14 @@
       if (!best ||
           score > best.score + 1e-9 ||
           (Math.abs(score - best.score) <= 1e-9 && pitch < best.pitch)) {
-        best = { pitch, score, step, relativeSpread, support: differences.length };
+        best = {
+          pitch,
+          score,
+          step,
+          relativeSpread,
+          support,
+          repeatedIntervalCount: differences.length
+        };
       }
     }
     if (!best) return null;
@@ -799,7 +1214,7 @@
       reference += Math.sqrt(Math.max(0, profile[y] * profile[y + lag]));
     }
     best.correlation = reference ? overlap / reference : 0;
-    if (best.support < 2 && bands.length > 2 && best.correlation < .18) return null;
+    if (best.repeatedIntervalCount < 2) return null;
     return best;
   }
 
@@ -808,9 +1223,19 @@
     if (!pitchInfo?.pitch) {
       const groups = [];
       const mergeDistance = nibRasterPx * 4.75;
+      const independentBodyHeight = nibRasterPx * 1.55;
       for (const band of bands) {
         const previous = groups[groups.length - 1];
-        if (previous && band.start - previous.end <= mergeDistance) {
+        const bandHeight = band.end - band.start + 1;
+        const previousHasBody = previous && previous.bands.some(previousBand =>
+          previousBand.end - previousBand.start + 1 >= independentBodyHeight
+        );
+        const currentHasBody = bandHeight >= independentBodyHeight;
+        if (
+          previous &&
+          band.start - previous.end <= mergeDistance &&
+          !(previousHasBody && currentHasBody)
+        ) {
           previous.bands.push(band);
           previous.end = band.end;
         } else {
@@ -1072,25 +1497,110 @@
     active = bridgeBooleanRuns(active, Math.max(1, Math.round(nibRasterPx * .75)));
     const minimumHeight = Math.max(2, Math.round(nibRasterPx * 1.12));
     const broadBands = booleanBands(active, minimumHeight);
-    const pitchInfo = estimatePhysicalLinePitch(broadBands, profile, nibRasterPx, height);
-    const physicalLines = lineEnergyCenters(broadBands, profile, pitchInfo, nibRasterPx);
+    const cleanedPrepared = { ...prepared, binary };
+    const trackAnchors = horizontalTrackAnchors(cleanedPrepared, nibRasterPx);
+    const trackPitchInfo = estimatePhaseLinePitch(
+      trackAnchors,
+      profile,
+      nibRasterPx,
+      height,
+      'horizontal-track-phase-chains'
+    );
+    const bandPitchInfo = estimatePhaseLinePitch(
+      bandPhaseAnchors(broadBands),
+      profile,
+      nibRasterPx,
+      height,
+      'broad-band-phase-chains'
+    );
+    const profilePitchInfo = estimatePhysicalLinePitch(
+      broadBands,
+      profile,
+      nibRasterPx,
+      height
+    );
+    if (profilePitchInfo) profilePitchInfo.method = 'profile-differences';
+    const pitchInfo = trackPitchInfo || bandPitchInfo || profilePitchInfo;
+    const phasePhysicalLines = physicalLinesFromPhasePitch(pitchInfo);
+    const physicalLines = phasePhysicalLines.length
+      ? phasePhysicalLines
+      : lineEnergyCenters(broadBands, profile, pitchInfo, nibRasterPx);
     const fallbackPitch = pitchInfo?.pitch || nibRasterPx * 7;
-    const windows = physicalLines.map((line, index) => {
-      const previous = physicalLines[index - 1];
-      const next = physicalLines[index + 1];
-      const start = previous
-        ? (previous.center + line.center) / 2
-        : line.center - fallbackPitch * .49;
-      const end = next
-        ? (line.center + next.center) / 2
-        : line.center + fallbackPitch * .49;
-      return { start, end, line };
-    });
+    const phaseWindows = phaseLineWindows(
+      phasePhysicalLines,
+      pitchInfo,
+      nibRasterPx,
+      height
+    );
+    const windows = phaseWindows.length
+      ? phaseWindows
+      : physicalLines.map((line, index) => {
+        const previous = physicalLines[index - 1];
+        const next = physicalLines[index + 1];
+        const start = previous
+          ? (previous.center + line.center) / 2
+          : line.center - fallbackPitch * .49;
+        const end = next
+          ? (line.center + next.center) / 2
+          : line.center + fallbackPitch * .49;
+        return { start, end, line };
+      });
     let rows = windows
       .map(window => boundaryForLineWindow(binary, width, height, window, nibRasterPx))
       .filter(Boolean)
       .sort((a, b) => a.rasterRoofTopY - b.rasterRoofTopY);
     rows = mergeOverlappingRows(rows, nibRasterPx);
+    if (phasePhysicalLines.length) {
+      const edgeMargin = Math.max(1, nibRasterPx * .35);
+      rows = rows.filter(row =>
+        row.rasterRoofTopY > edgeMargin &&
+        row.rasterBottomY < height - edgeMargin
+      );
+    }
+    const twoBandSingleInterval =
+      !pitchInfo &&
+      broadBands.length === 2 &&
+      physicalLines.length === 2;
+    const rowAnchorEvidence = rows.map(row => {
+      const nearby = trackAnchors.filter(anchor =>
+        Math.abs(anchor.center - row.rasterRoofTopY) <= nibRasterPx * 1.6
+      );
+      const score = nearby.length
+        ? Math.max(...nearby.map(anchor => anchor.downward.score || 0))
+        : 0;
+      const bodyBottom = nearby
+        .filter(anchor => (anchor.downward.score || 0) >= .42)
+        .reduce((maximum, anchor) => Math.max(
+          maximum,
+          anchor.end + 1 + (anchor.downward.resolvedReachRasterPx || 0)
+        ), row.rasterBottomY);
+      return { score, bodyBottom };
+    });
+    const rowBodyEvidence = rowAnchorEvidence.map(evidence => evidence.score);
+    rows.forEach((row, index) => {
+      const componentBottom = rowAnchorEvidence[index].bodyBottom;
+      if (
+        row.stats.robustBodyHeightRasterPx < nibRasterPx * 1.55 &&
+        componentBottom > row.rasterBottomY
+      ) {
+        row.rasterBottomY = Math.min(height, componentBottom);
+        row.stats.componentBodyBottomRasterPx = row.rasterBottomY;
+        row.stats.robustBodyHeightRasterPx = row.rasterBottomY - row.rasterRoofTopY;
+      }
+    });
+    const independentBodyEvidenceCount = rowBodyEvidence.filter(score => score >= .42).length;
+    // With no repeated period, two horizontal members are intrinsically
+    // ambiguous unless each proposed row has its own connected downward body.
+    // Preserve the candidate rows for diagnostics, but block automatic apply.
+    const unperiodicMemberAmbiguity = !pitchInfo && trackAnchors.length >= 2 && (
+      rows.length < 2 || independentBodyEvidenceCount < rows.length
+    );
+    const ambiguousTwoBandPair = twoBandSingleInterval && unperiodicMemberAmbiguity;
+    const ambiguityReason = unperiodicMemberAmbiguity
+      ? rows.length < 2
+        ? 'unresolved-horizontal-members-in-one-row-window'
+        : 'unresolved-horizontal-members-without-independent-downward-bodies'
+      : null;
     return {
       binary,
       rows,
@@ -1099,10 +1609,19 @@
         smoothingRadius: smoothRadius,
         supportThreshold: threshold,
         detectedBandCount: broadBands.length,
-        physicalLineCount: physicalLines.length,
+        physicalLineCount: rows.length,
         estimatedLinePitchRasterPx: pitchInfo?.pitch || null,
         linePitchStep: pitchInfo?.step || null,
-        linePitchCorrelation: pitchInfo?.correlation || null
+        linePitchCorrelation: pitchInfo?.correlation || null,
+        linePitchMethod: pitchInfo?.method || null,
+        horizontalTrackAnchorCount: trackAnchors.length,
+        phaseMaximumChainLength: pitchInfo?.phase?.maximumChainLength || null,
+        phaseLongChainCount: pitchInfo?.phase?.longChainCount || null,
+        rowBodyEvidence,
+        twoBandSingleInterval,
+        independentBodyEvidenceCount,
+        ambiguousTwoBandPair,
+        ambiguityReason
       }
     };
   }
@@ -1115,6 +1634,9 @@
       throw new Error('Nib thickness is required for stable row detection');
     }
     const detection = detectRowBands(prepared, activeNib, options);
+    if (detection.profile.ambiguityReason) {
+      throw new Error(`Ambiguous row structure: ${detection.profile.ambiguityReason}`);
+    }
     if (detection.rows.length < 2) {
       throw new Error('Fewer than two stable text rows were detected');
     }

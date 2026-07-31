@@ -6,8 +6,8 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
-const TEST_VERSION = '20260731k';
-const TEST_CACHE_DATE = '2026-07-31k';
+const TEST_VERSION = '20260731l';
+const TEST_CACHE_DATE = '2026-07-31l';
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const appDirectory = path.resolve(testDirectory, '..');
 
@@ -146,10 +146,10 @@ function createSyntheticCanvas(width = 400, height = 260) {
   gray.fill(245);
 
   const rectangle = (x, y, rectangleWidth, rectangleHeight, value = 15) => {
-    const firstRow = Math.max(0, y);
-    const lastRow = Math.min(height, y + rectangleHeight);
-    const firstColumn = Math.max(0, x);
-    const lastColumn = Math.min(width, x + rectangleWidth);
+    const firstRow = Math.max(0, Math.floor(y));
+    const lastRow = Math.min(height, Math.ceil(y + rectangleHeight));
+    const firstColumn = Math.max(0, Math.floor(x));
+    const lastColumn = Math.min(width, Math.ceil(x + rectangleWidth));
     for (let row = firstRow; row < lastRow; row++) {
       for (let column = firstColumn; column < lastColumn; column++) {
         gray[row * width + column] = value;
@@ -157,9 +157,22 @@ function createSyntheticCanvas(width = 400, height = 260) {
     }
   };
 
+  const slopedBar = (x, y, barWidth, barHeight, rise, value = 15) => {
+    for (let offset = 0; offset < barWidth; offset++) {
+      rectangle(
+        x + offset,
+        y + rise * offset / Math.max(1, barWidth - 1),
+        1,
+        barHeight,
+        value
+      );
+    }
+  };
+
   return {
     source: { width, height, gray },
-    rectangle
+    rectangle,
+    slopedBar
   };
 }
 
@@ -201,6 +214,87 @@ function makeDetachedRoofSeatRows() {
       canvas.rectangle(x + 5, y + 30, 130, 6);
     }
   }
+  return canvas.source;
+}
+
+function makeDetachedRoofSeatLayout({
+  rowCount = 3,
+  pitch = 75,
+  bodyOffset = 32,
+  nib = 6,
+  seatRise = 0,
+  roofStemHeight = 0
+} = {}) {
+  const width = 400;
+  const height = 20 + Math.max(0, rowCount - 1) * pitch +
+    bodyOffset + Math.abs(seatRise) + nib + 20;
+  const canvas = createSyntheticCanvas(width, height);
+  for (let row = 0; row < rowCount; row++) {
+    const y = 20 + row * pitch;
+    for (const x of [25, 210]) {
+      canvas.rectangle(x, y, 140, nib);
+      if (roofStemHeight > nib) canvas.rectangle(x, y, nib, roofStemHeight);
+      canvas.slopedBar(x + 5, y + bodyOffset, 130, nib, seatRise);
+    }
+  }
+  return canvas.source;
+}
+
+function makeConnectedBodyRows({
+  rowCount = 3,
+  pitch = 36,
+  bodyHeight = 24,
+  nib = 6,
+  stemWidth = 6
+} = {}) {
+  const width = 400;
+  const height = 20 + Math.max(0, rowCount - 1) * pitch + bodyHeight + 30;
+  const canvas = createSyntheticCanvas(width, height);
+  for (let row = 0; row < rowCount; row++) {
+    const y = 20 + row * pitch;
+    for (const x of [25, 210]) {
+      canvas.rectangle(x, y, 140, nib);
+      canvas.rectangle(x, y, stemWidth, bodyHeight);
+      canvas.rectangle(x + 140 - stemWidth, y, stemWidth, bodyHeight);
+      canvas.rectangle(x, y + bodyHeight - nib, 140, nib);
+    }
+  }
+  return canvas.source;
+}
+
+function makeSparseBodyRows({
+  rowCount = 2,
+  pitch = 60,
+  bodyHeight = 24,
+  nib = 6,
+  stemWidth = 3,
+  copies = 1
+} = {}) {
+  const width = 400;
+  const height = 20 + Math.max(0, rowCount - 1) * pitch + bodyHeight + 30;
+  const canvas = createSyntheticCanvas(width, height);
+  for (let row = 0; row < rowCount; row++) {
+    const y = 20 + row * pitch;
+    for (let copy = 0; copy < copies; copy++) {
+      const x = 25 + copy * 185;
+      canvas.rectangle(x, y, 140, nib);
+      canvas.rectangle(x, y, stemWidth, bodyHeight);
+    }
+  }
+  return canvas.source;
+}
+
+function makeWideDescenderRows(width = 48) {
+  const canvas = createSyntheticCanvas(400, 260);
+  for (const y of [20, 96, 172]) {
+    for (const x of [25, 210]) {
+      canvas.rectangle(x, y, 140, 6);
+      canvas.rectangle(x, y, 6, 24);
+      canvas.rectangle(x + 134, y, 6, 24);
+      canvas.rectangle(x, y + 18, 140, 6);
+    }
+  }
+  canvas.rectangle(198, 41, width, 65);
   return canvas.source;
 }
 
@@ -253,7 +347,7 @@ function makeAppState(image, overrides = {}) {
     objects: [],
     nextId: 1,
     selectedId: null,
-    projectMeta: { id: 'medidaot-k-regression' },
+    projectMeta: { id: 'medidaot-l-regression' },
     ...overrides,
     formula
   };
@@ -577,6 +671,178 @@ test('detached roofs and seats are grouped into three physical text rows', () =>
   result.gaps.forEach(gap => closeTo(gap.valuePx, 39, 1));
 });
 
+test('one physical roof/seat row fails safely across offsets and seat slopes', () => {
+  for (const [bodyOffset, seatRise, roofStemHeight = 0] of [
+    [18, 0],
+    [31, 0],
+    [40, 0],
+    [48, 0],
+    [32, -10],
+    [32, 10],
+    [40, 0, 18]
+  ]) {
+    const source = makeDetachedRoofSeatLayout({
+      rowCount: 1,
+      bodyOffset,
+      seatRise,
+      roofStemHeight
+    });
+    const prepared = autoMeasure.helpers.prepareRaster(source);
+    const detection = autoMeasure.helpers.detectRowBands(prepared, 6);
+    assert.match(
+      detection.profile.ambiguityReason || '',
+      /unresolved-horizontal-members/,
+      `offset ${bodyOffset}, rise ${seatRise} must retain an explicit ambiguity reason`
+    );
+    assert.throws(
+      () => autoMeasure.analyzeInterline(source, { nibPx: 6 }),
+      /Ambiguous row structure/,
+      `offset ${bodyOffset}, rise ${seatRise} must not manufacture an interline gap`
+    );
+  }
+});
+
+test('stable same-phase periods group detached 32px roof/seat members by row', () => {
+  const result = autoMeasure.analyzeInterline(
+    makeDetachedRoofSeatLayout({ rowCount: 3, pitch: 75, bodyOffset: 32 }),
+    { nibPx: 6 }
+  );
+  assertThreeRowsAndTwoGaps(result, '32px detached roof/seat rows');
+  assert.equal(result.diagnostics.detectedBandCount, 6);
+  assert.equal(result.diagnostics.linePitchStep, 2);
+  closeTo(result.diagnostics.estimatedLinePitchRasterPx, 75, 1e-9);
+  result.rows.forEach((row, index) => {
+    closeTo(row.roofTopY, 20 + index * 75, 1);
+    closeTo(row.bottomY, 58 + index * 75, 1);
+  });
+  result.gaps.forEach(gap => closeTo(gap.valuePx, 37, 1));
+});
+
+test('genuinely close connected rows remain separate physical lines', () => {
+  for (const pitch of [32, 34, 36]) {
+    const result = autoMeasure.analyzeInterline(
+      makeConnectedBodyRows({ rowCount: 3, pitch, bodyHeight: 24, stemWidth: 6 }),
+      { nibPx: 6 }
+    );
+    assertThreeRowsAndTwoGaps(result, `close connected rows at pitch ${pitch}`);
+    assert.equal(result.diagnostics.linePitchMethod, 'horizontal-track-phase-chains');
+    result.rows.forEach((row, index) => {
+      closeTo(row.roofTopY, 20 + index * pitch, 1);
+      closeTo(row.bottomY, 44 + index * pitch, 1);
+    });
+    result.gaps.forEach(gap => closeTo(gap.valuePx, pitch - 24, 1));
+  }
+});
+
+test('a two-band result needs independent body evidence in both rows', () => {
+  const ambiguousSource = makeDetachedRoofSeatLayout({
+    rowCount: 1,
+    bodyOffset: 40
+  });
+  const ambiguousPrepared = autoMeasure.helpers.prepareRaster(ambiguousSource);
+  const ambiguousDetection = autoMeasure.helpers.detectRowBands(
+    ambiguousPrepared,
+    6
+  );
+  assert.equal(ambiguousDetection.profile.twoBandSingleInterval, true);
+  assert.equal(ambiguousDetection.profile.independentBodyEvidenceCount, 0);
+  assert.equal(ambiguousDetection.profile.ambiguousTwoBandPair, true);
+  assert.equal(
+    ambiguousDetection.rows.length,
+    2,
+    'fail-safe ambiguity must preserve candidate rows for diagnostics'
+  );
+  assert.equal(
+    ambiguousDetection.profile.ambiguityReason,
+    'unresolved-horizontal-members-without-independent-downward-bodies'
+  );
+  assert.throws(
+    () => autoMeasure.analyzeInterline(ambiguousSource, { nibPx: 6 }),
+    /Ambiguous row structure/
+  );
+
+  const supportedSource = makeConnectedBodyRows({
+    rowCount: 2,
+    pitch: 60,
+    bodyHeight: 24,
+    stemWidth: 12
+  });
+  const supported = autoMeasure.analyzeInterline(supportedSource, { nibPx: 6 });
+  assert.equal(supported.diagnostics.detectedBandCount, 2);
+  assert.equal(supported.diagnostics.linePitchMethod, 'horizontal-track-phase-chains');
+  assert.equal(supported.diagnostics.independentBodyEvidenceCount, 2);
+  assert.equal(supported.diagnostics.ambiguousTwoBandPair, false);
+  assert.equal(supported.rows.length, 2);
+  assert.equal(supported.gaps.length, 1);
+  closeTo(supported.gaps[0].valuePx, 36, 1);
+});
+
+test('two genuine sparse-body rows use connected stem evidence, not body quantiles', () => {
+  for (const stemWidth of [3, 6, 12]) {
+    for (const copies of [1, 2]) {
+      const result = autoMeasure.analyzeInterline(
+        makeSparseBodyRows({ stemWidth, copies }),
+        { nibPx: 6 }
+      );
+      assert.equal(result.rows.length, 2);
+      assert.equal(result.gaps.length, 1);
+      assert.equal(result.diagnostics.twoBandSingleInterval, true);
+      assert.equal(result.diagnostics.independentBodyEvidenceCount, 2);
+      assert.equal(result.diagnostics.ambiguityReason, null);
+      closeTo(result.rows[0].roofTopY, 20, 1);
+      closeTo(result.rows[0].bottomY, 44, 1);
+      closeTo(result.rows[1].roofTopY, 80, 1);
+      closeTo(result.gaps[0].valuePx, 36, 1);
+    }
+  }
+});
+
+test('repeated detached roof/seat phases group by line period across offsets and slopes', () => {
+  for (const fixture of [
+    { bodyOffset: 18, pitch: 38, seatRise: 0 },
+    { bodyOffset: 24, pitch: 44, seatRise: 0 },
+    { bodyOffset: 32, pitch: 75, seatRise: 0 },
+    { bodyOffset: 32, pitch: 80, seatRise: -10 },
+    { bodyOffset: 32, pitch: 80, seatRise: 10 },
+    { bodyOffset: 40, pitch: 80, seatRise: 0 },
+    { bodyOffset: 40, pitch: 80, seatRise: -10 },
+    { bodyOffset: 40, pitch: 80, seatRise: 10 }
+  ]) {
+    const result = autoMeasure.analyzeInterline(
+      makeDetachedRoofSeatLayout({ rowCount: 3, ...fixture }),
+      { nibPx: 6 }
+    );
+    assertThreeRowsAndTwoGaps(
+      result,
+      `detached phases ${JSON.stringify(fixture)}`
+    );
+    assert.equal(result.diagnostics.linePitchMethod, 'horizontal-track-phase-chains');
+    closeTo(result.diagnostics.estimatedLinePitchRasterPx, fixture.pitch, 1);
+    result.rows.forEach((row, index) => {
+      closeTo(row.roofTopY, 20 + index * fixture.pitch, 1);
+    });
+  }
+});
+
+test('wide long descenders cannot promote a double-period harmonic', () => {
+  for (const width of [48, 80]) {
+    const result = autoMeasure.analyzeInterline(makeWideDescenderRows(width), { nibPx: 6 });
+    assert.equal(result.rows.length, 3);
+    assert.equal(result.diagnostics.physicalLineCount, 3);
+    assert.equal(result.diagnostics.linePitchMethod, 'horizontal-track-phase-chains');
+    closeTo(result.diagnostics.estimatedLinePitchRasterPx, 76, 1);
+    assert.ok(
+      result.gaps.length >= 1 && result.gaps.length <= 2,
+      'an overlapping descender may suppress only its affected clearance'
+    );
+    assert.ok(
+      result.gaps.every(gap => gap.lowerRowIndex - gap.upperRowIndex === 1),
+      'remaining measurements must stay between adjacent physical rows'
+    );
+    closeTo(result.gaps[result.gaps.length - 1].valuePx, 52, 1.5);
+  }
+});
+
 test('downward stems define row bottoms even when no seats are present', () => {
   const result = autoMeasure.analyzeInterline(makeRoofStemRows(), { nibPx: 6 });
   assertThreeRowsAndTwoGaps(result, 'roof and stem rows');
@@ -764,7 +1030,7 @@ test('a rapid second interline request cancels the stale first apply', async () 
   assert.equal(harness.analysisOverlay.hidden, true);
 });
 
-test('HTML and service worker reference one complete k-version asset set', async () => {
+test('HTML and service worker reference one complete l-version asset set', async () => {
   const expectedScripts = [
     'letter-assets.js',
     'letter-vector-engine.js',
@@ -779,7 +1045,7 @@ test('HTML and service worker reference one complete k-version asset set', async
 
   for (const htmlName of ['medidaot.html', 'index.html']) {
     const html = readAppFile(htmlName);
-    assert.doesNotMatch(html, /20260731j/);
+    assert.doesNotMatch(html, /20260731k/);
     const scripts = [...html.matchAll(/<script\s+src="([^"]+)"/g)]
       .map(match => match[1]);
     assert.deepEqual(scripts, expectedScripts);
@@ -878,7 +1144,7 @@ for (const { name, callback } of tests) {
   }
 }
 
-console.log(`\n${passed}/${tests.length} focused Medidaot k regression groups passed.`);
+console.log(`\n${passed}/${tests.length} focused Medidaot l regression groups passed.`);
 if (passed !== tests.length) {
   throw new Error(`${tests.length - passed} regression group(s) failed`);
 }

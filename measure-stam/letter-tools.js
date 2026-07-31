@@ -1,8 +1,455 @@
 'use strict';
 
 const LETTER_VECTOR_CACHE = new Map();
+const LETTER_MORPH_CACHE = new Map();
+const LETTER_TOPOLOGY_CACHE = new Map();
+const LETTER_WEIGHT_DIAGNOSTICS = new WeakMap();
+const LETTER_MORPH_CACHE_MAX_BYTES = 24 * 1024 * 1024;
+const LETTER_MORPH_PIXELS_PER_NIB = 24;
+const LETTER_EDIT_TOPOLOGY_PIXELS_PER_NIB = 8;
+const LETTER_TOPOLOGY_ANALYZER_BYTES_PER_PIXEL = 44;
+const LETTER_NIB_X_SOURCE = 4.5;
+const LETTER_NIB_Y_SOURCE = 12.5;
+const LETTER_MORPH_PADDING_NIBS = 1.5;
+const LETTER_MAX_OUTLINE_WIDTH = 30;
+/* Exhaustive cross-resolution first-unsafe intensity; null means 100 is safe. */
+const LETTER_SOURCE_FIRST_UNSAFE_INTENSITY = Object.freeze({
+  'beit-yosef:א': [47, 84], 'beit-yosef:ב': [47, null],
+  'beit-yosef:ג': [47, 58], 'beit-yosef:ד': [65, null],
+  'beit-yosef:ה': [47, 98], 'beit-yosef:ו': [null, null],
+  'beit-yosef:ז': [47, 58], 'beit-yosef:ח': [58, null],
+  'beit-yosef:ט': [47, 58], 'beit-yosef:י': [99, null],
+  'beit-yosef:כ': [null, null], 'beit-yosef:ך': [null, null],
+  'beit-yosef:ל': [null, null], 'beit-yosef:מ': [61, null],
+  'beit-yosef:ם': [null, null], 'beit-yosef:נ': [47, 44],
+  'beit-yosef:ן': [47, 58], 'beit-yosef:ס': [null, null],
+  'beit-yosef:ע': [47, 58], 'beit-yosef:פ': [96, null],
+  'beit-yosef:ף': [null, null], 'beit-yosef:צ': [33, 58],
+  'beit-yosef:ץ': [47, 58], 'beit-yosef:ק': [61, null],
+  'beit-yosef:ר': [null, null], 'beit-yosef:ש': [44, 58],
+  'beit-yosef:ת': [null, null],
+  'ari:א': [33, 84], 'ari:ו': [null, null], 'ari:ח': [58, null],
+  'ari:ט': [47, 58], 'ari:צ': [47, 68], 'ari:ק': [47, 58],
+  'ari:ש': [47, 58]
+});
 let activeLetterTradition = 'beitYosef';
 let letterWeightHistoryArmed = false;
+let letterMorphForceExactId = null;
+let letterWeightRenderFrame = null;
+let letterWeightRenderDirty = false;
+let letterWeightPreviewId = null;
+
+/*
+ * Weight is a non-destructive render effect. The source paths stay cubic and
+ * editable; morphology is applied only to the union alpha mask below. Keeping
+ * these helpers independent of Canvas makes the topology rules testable in
+ * Node as well as in the browser.
+ */
+const MEDIDAOT_LETTER_MORPHOLOGY = (() => {
+  function assertMask(alpha, width, height) {
+    if (!alpha || alpha.length !== width * height) {
+      throw new RangeError('Alpha mask dimensions do not match its data.');
+    }
+    if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1) {
+      throw new RangeError('Alpha mask dimensions must be positive integers.');
+    }
+  }
+
+  function distanceTransform1D(source, length, output, sites, breaks) {
+    let last = 0;
+    sites[0] = 0;
+    breaks[0] = -Infinity;
+    breaks[1] = Infinity;
+    for (let q = 1; q < length; q += 1) {
+      let site = sites[last];
+      let intersection = (
+        (source[q] + q * q) - (source[site] + site * site)
+      ) / (2 * (q - site));
+      while (intersection <= breaks[last]) {
+        last -= 1;
+        site = sites[last];
+        intersection = (
+          (source[q] + q * q) - (source[site] + site * site)
+        ) / (2 * (q - site));
+      }
+      last += 1;
+      sites[last] = q;
+      breaks[last] = intersection;
+      breaks[last + 1] = Infinity;
+    }
+    last = 0;
+    for (let q = 0; q < length; q += 1) {
+      while (breaks[last + 1] < q) last += 1;
+      const delta = q - sites[last];
+      output[q] = delta * delta + source[sites[last]];
+    }
+  }
+
+  function squaredDistanceTo(alpha, width, height, featureIsInk) {
+    assertMask(alpha, width, height);
+    const pixelCount = width * height;
+    const far = width * width + height * height + 1;
+    const firstPass = new Float32Array(pixelCount);
+    const result = new Float32Array(pixelCount);
+    const maximum = Math.max(width, height);
+    const source = new Float64Array(maximum);
+    const output = new Float64Array(maximum);
+    const sites = new Int32Array(maximum);
+    const breaks = new Float64Array(maximum + 1);
+
+    for (let x = 0; x < width; x += 1) {
+      for (let y = 0; y < height; y += 1) {
+        const ink = alpha[y * width + x] >= 128;
+        source[y] = ink === featureIsInk ? 0 : far;
+      }
+      distanceTransform1D(source, height, output, sites, breaks);
+      for (let y = 0; y < height; y += 1) firstPass[y * width + x] = output[y];
+    }
+    for (let y = 0; y < height; y += 1) {
+      const row = y * width;
+      for (let x = 0; x < width; x += 1) source[x] = firstPass[row + x];
+      distanceTransform1D(source, width, output, sites, breaks);
+      for (let x = 0; x < width; x += 1) result[row + x] = output[x];
+    }
+    return result;
+  }
+
+  function buildSignedDistance(alpha, width, height) {
+    assertMask(alpha, width, height);
+    const distanceToInk = squaredDistanceTo(alpha, width, height, true);
+    const distanceToClear = squaredDistanceTo(alpha, width, height, false);
+    const signed = new Float32Array(alpha.length);
+    for (let index = 0; index < alpha.length; index += 1) {
+      const coverage = alpha[index] / 255;
+      if (coverage > 0 && coverage < 1) {
+        signed[index] = coverage - .5;
+      } else if (coverage >= .5) {
+        signed[index] = Math.max(.5, Math.sqrt(distanceToClear[index]) - .5);
+      } else {
+        signed[index] = -Math.max(.5, Math.sqrt(distanceToInk[index]) - .5);
+      }
+    }
+    return signed;
+  }
+
+  function renderSignedDistance(signed, offsetPixels = 0, outlineWidthPixels = 0) {
+    const result = new Uint8ClampedArray(signed.length);
+    const offset = Number.isFinite(+offsetPixels) ? +offsetPixels : 0;
+    const outlineHalfWidth = Math.max(0, Number(outlineWidthPixels) || 0) / 2;
+    if (outlineHalfWidth > 0) {
+      for (let index = 0; index < signed.length; index += 1) {
+        const coverage = outlineHalfWidth - Math.abs(signed[index] + offset) + .5;
+        result[index] = Math.round(Math.max(0, Math.min(1, coverage)) * 255);
+      }
+    } else {
+      for (let index = 0; index < signed.length; index += 1) {
+        const coverage = signed[index] + offset + .5;
+        result[index] = Math.round(Math.max(0, Math.min(1, coverage)) * 255);
+      }
+    }
+    return result;
+  }
+
+  function alphaArea(alpha) {
+    let area = 0;
+    for (const value of alpha) area += value / 255;
+    return area;
+  }
+
+  function alphaBounds(alpha, width, height, threshold = 1) {
+    assertMask(alpha, width, height);
+    let left = width;
+    let top = height;
+    let right = -1;
+    let bottom = -1;
+    for (let y = 0; y < height; y += 1) {
+      const row = y * width;
+      for (let x = 0; x < width; x += 1) {
+        if (alpha[row + x] < threshold) continue;
+        left = Math.min(left, x);
+        top = Math.min(top, y);
+        right = Math.max(right, x);
+        bottom = Math.max(bottom, y);
+      }
+    }
+    if (right < left || bottom < top) return null;
+    return { x: left, y: top, left, top, right: right + 1, bottom: bottom + 1,
+      width: right - left + 1, height: bottom - top + 1 };
+  }
+
+  function maskComponents(alpha, width, height, ink = true) {
+    assertMask(alpha, width, height);
+    const labels = new Int32Array(alpha.length);
+    labels.fill(-1);
+    const queue = new Int32Array(alpha.length);
+    const components = [];
+    const offsets = ink
+      ? [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]]
+      : [[0, -1], [-1, 0], [1, 0], [0, 1]];
+    const matches = index => (alpha[index] >= 128) === ink;
+    for (let start = 0; start < alpha.length; start += 1) {
+      if (labels[start] !== -1 || !matches(start)) continue;
+      const label = components.length;
+      let head = 0;
+      let tail = 0;
+      let touchesBorder = false;
+      let left = width;
+      let top = height;
+      let right = -1;
+      let bottom = -1;
+      queue[tail++] = start;
+      labels[start] = label;
+      const pixels = [];
+      while (head < tail) {
+        const index = queue[head++];
+        pixels.push(index);
+        const x = index % width;
+        const y = Math.floor(index / width);
+        left = Math.min(left, x);
+        top = Math.min(top, y);
+        right = Math.max(right, x);
+        bottom = Math.max(bottom, y);
+        if (x === 0 || y === 0 || x === width - 1 || y === height - 1) touchesBorder = true;
+        for (const [dx, dy] of offsets) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+          const next = ny * width + nx;
+          if (labels[next] !== -1 || !matches(next)) continue;
+          labels[next] = label;
+          queue[tail++] = next;
+        }
+      }
+      components.push({ label, pixels, area: pixels.length, touchesBorder,
+        bounds: { left, top, right: right + 1, bottom: bottom + 1,
+          width: right - left + 1, height: bottom - top + 1 } });
+    }
+    return { labels, components };
+  }
+
+  function labelSignedComponents(signed, width, height, offset, ink, labels, queue) {
+    labels.fill(-1);
+    const components = [];
+    const matches = index => (signed[index] + offset >= 0) === ink;
+    for (let start = 0; start < signed.length; start += 1) {
+      if (labels[start] !== -1 || !matches(start)) continue;
+      const label = components.length;
+      let head = 0;
+      let tail = 0;
+      let touchesBorder = false;
+      queue[tail++] = start;
+      labels[start] = label;
+      while (head < tail) {
+        const index = queue[head++];
+        const x = index % width;
+        const y = Math.floor(index / width);
+        if (x === 0 || y === 0 || x === width - 1 || y === height - 1) touchesBorder = true;
+        const minimumY = Math.max(0, y - 1);
+        const maximumY = Math.min(height - 1, y + 1);
+        const minimumX = Math.max(0, x - 1);
+        const maximumX = Math.min(width - 1, x + 1);
+        for (let nextY = minimumY; nextY <= maximumY; nextY += 1) {
+          const row = nextY * width;
+          for (let nextX = minimumX; nextX <= maximumX; nextX += 1) {
+            if (nextX === x && nextY === y) continue;
+            if (!ink && nextX !== x && nextY !== y) continue;
+            const next = row + nextX;
+            if (labels[next] !== -1 || !matches(next)) continue;
+            labels[next] = label;
+            queue[tail++] = next;
+          }
+        }
+      }
+      components.push({ label, area: tail, touchesBorder });
+    }
+    return components;
+  }
+
+  function createTopologySafetyAnalyzer(alpha, signed, width, height) {
+    const inkSet = maskComponents(alpha, width, height, true);
+    const clearSet = maskComponents(alpha, width, height, false);
+    const inkArea = inkSet.components.reduce((sum, component) => sum + component.area, 0);
+    const significantArea = Math.max(3, Math.ceil(inkArea * .001));
+    const majorInk = inkSet.components.filter(component => component.area >= significantArea);
+    const majorHoles = clearSet.components.filter(component =>
+      !component.touchesBorder && component.area >= significantArea
+    );
+    const inkLabels = new Int32Array(alpha.length);
+    const clearLabels = new Int32Array(alpha.length);
+    const queue = new Int32Array(alpha.length);
+    const safeAt = offset => {
+      const eroding = offset < 0;
+      const outputInk = labelSignedComponents(
+        signed, width, height, offset, true, inkLabels, queue
+      );
+      const outputClear = labelSignedComponents(
+        signed, width, height, offset, false, clearLabels, queue
+      );
+      if (eroding) {
+        const occupiedInkLabels = new Set();
+        for (const component of majorInk) {
+          const labelCounts = new Map();
+          let retained = 0;
+          for (const pixel of component.pixels) {
+            const label = inkLabels[pixel];
+            if (label < 0) continue;
+            retained += 1;
+            labelCounts.set(label, (labelCounts.get(label) || 0) + 1);
+          }
+          const significantLabels = [...labelCounts]
+            .filter(([, area]) => area >= significantArea)
+            .map(([label]) => label);
+          const minimumRetained = Math.max(3, Math.ceil(component.area * .025));
+          if (retained < minimumRetained || significantLabels.length !== 1) return false;
+          occupiedInkLabels.add(significantLabels[0]);
+        }
+        if (occupiedInkLabels.size !== majorInk.length) return false;
+        const occupiedHoleLabels = new Set();
+        for (const component of majorHoles) {
+          const outputLabel = clearLabels[component.pixels[0]];
+          const outputComponent = outputClear[outputLabel];
+          if (outputLabel < 0 || outputComponent?.touchesBorder || occupiedHoleLabels.has(outputLabel)) {
+            return false;
+          }
+          occupiedHoleLabels.add(outputLabel);
+        }
+      } else {
+        const occupiedLabels = new Set();
+        for (const component of majorInk) {
+          const outputLabel = inkLabels[component.pixels[0]];
+          if (outputLabel < 0 || occupiedLabels.has(outputLabel)) return false;
+          occupiedLabels.add(outputLabel);
+        }
+        const knownHoleLabels = new Set();
+        for (const component of majorHoles) {
+          const labelCounts = new Map();
+          let retained = 0;
+          for (const pixel of component.pixels) {
+            const label = clearLabels[pixel];
+            if (label < 0) continue;
+            retained += 1;
+            labelCounts.set(label, (labelCounts.get(label) || 0) + 1);
+          }
+          const significantLabels = [...labelCounts]
+            .filter(([, area]) => area >= significantArea)
+            .map(([label]) => label);
+          const minimumRetained = Math.max(3, Math.ceil(component.area * .025));
+          if (retained < minimumRetained || significantLabels.length !== 1) return false;
+          knownHoleLabels.add(significantLabels[0]);
+        }
+        if (knownHoleLabels.size !== majorHoles.length) return false;
+        const outputHoles = outputClear.filter(component =>
+          !component.touchesBorder && component.area >= significantArea
+        );
+        if (outputHoles.some(component => !knownHoleLabels.has(component.label))) return false;
+      }
+      return true;
+    };
+    return {
+      safeAt,
+      inkComponents: majorInk.length,
+      counters: majorHoles.length,
+      significantArea
+    };
+  }
+
+  function topologyLimits(alpha, signed, width, height, maximumOffset) {
+    const analyzer = createTopologySafetyAnalyzer(alpha, signed, width, height);
+    const findLimit = direction => {
+      /*
+       * Topology is not mathematically monotone: a split-off fragment can
+       * disappear at a stronger offset and make a later sample look "safe"
+       * again. Walk out from the master and stop at the first unsafe band.
+       */
+      const intensitySteps = 100;
+      let previousSafe = 0;
+      for (let step = 1; step <= intensitySteps; step += 1) {
+        const probe = maximumOffset * step / intensitySteps;
+        if (!analyzer.safeAt(direction * probe)) return previousSafe;
+        previousSafe = probe;
+      }
+      return maximumOffset;
+    };
+    return {
+      erosion: findLimit(-1),
+      dilation: findLimit(1),
+      inkComponents: analyzer.inkComponents,
+      counters: analyzer.counters,
+      significantArea: analyzer.significantArea
+    };
+  }
+
+  function topologySummary(alpha, width, height) {
+    const inkSet = maskComponents(alpha, width, height, true);
+    const clearSet = maskComponents(alpha, width, height, false);
+    const inkArea = inkSet.components.reduce((sum, component) => sum + component.area, 0);
+    const significantArea = Math.max(3, Math.ceil(inkArea * .001));
+    return {
+      inkComponents: inkSet.components.filter(component => component.area >= significantArea).length,
+      counters: clearSet.components.filter(component =>
+        !component.touchesBorder && component.area >= significantArea
+      ).length,
+      significantArea
+    };
+  }
+
+  function downsampleAlpha(alpha, width, height, factor) {
+    assertMask(alpha, width, height);
+    const step = Math.max(1, Math.round(Number(factor) || 1));
+    if (step === 1) return { alpha: new Uint8ClampedArray(alpha), width, height, factor: 1 };
+    const resultWidth = Math.ceil(width / step);
+    const resultHeight = Math.ceil(height / step);
+    const result = new Uint8ClampedArray(resultWidth * resultHeight);
+    for (let y = 0; y < resultHeight; y += 1) {
+      for (let x = 0; x < resultWidth; x += 1) {
+        let sum = 0;
+        let count = 0;
+        for (let dy = 0; dy < step && y * step + dy < height; dy += 1) {
+          const row = (y * step + dy) * width;
+          for (let dx = 0; dx < step && x * step + dx < width; dx += 1) {
+            sum += alpha[row + x * step + dx];
+            count += 1;
+          }
+        }
+        result[y * resultWidth + x] = Math.round(sum / Math.max(1, count));
+      }
+    }
+    return { alpha: result, width: resultWidth, height: resultHeight, factor: step };
+  }
+
+  function stableEnvelope(bounds, padding) {
+    const pad = Math.max(0, Number(padding) || 0);
+    const left = Math.floor(bounds.left - pad);
+    const top = Math.floor(bounds.top - pad);
+    const right = Math.ceil(bounds.right + pad);
+    const bottom = Math.ceil(bounds.bottom + pad);
+    return {
+      x: left,
+      y: top,
+      left,
+      top,
+      right,
+      bottom,
+      width: Math.max(1, right - left),
+      height: Math.max(1, bottom - top)
+    };
+  }
+
+  return Object.freeze({
+    buildSignedDistance,
+    renderSignedDistance,
+    alphaArea,
+    alphaBounds,
+    maskComponents,
+    createTopologySafetyAnalyzer,
+    topologyLimits,
+    topologySummary,
+    downsampleAlpha,
+    stableEnvelope
+  });
+})();
+
+globalThis.MEDIDAOT_LETTER_MORPHOLOGY = MEDIDAOT_LETTER_MORPHOLOGY;
 
 function letterVectorEngine() {
   return globalThis.MEDIDAOT_VECTOR_ENGINE || null;
@@ -36,6 +483,401 @@ function cachedLetterPaths(asset) {
     })));
   }
   return LETTER_VECTOR_CACHE.get(cacheKey);
+}
+
+function letterMasterSignature(object, asset) {
+  const paths = object?.letterVector?.paths;
+  if (!Array.isArray(paths)) return `${asset?.style || ''}:${asset?.slug || ''}:source`;
+  let hash = 2166136261;
+  const mix = value => {
+    const string = String(value);
+    for (let index = 0; index < string.length; index += 1) {
+      hash ^= string.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+  };
+  for (const entry of paths) {
+    mix(entry.rule || 'nonzero');
+    for (const command of entry.commands || []) {
+      mix(command.type);
+      for (const key of ['x', 'y', 'x1', 'y1', 'x2', 'y2']) {
+        if (Number.isFinite(command[key])) mix(Math.round(command[key] * 10000));
+      }
+    }
+  }
+  return `${asset?.style || ''}:${asset?.slug || ''}:${paths.length}:${(hash >>> 0).toString(36)}`;
+}
+
+function createLetterMaskCanvas(width, height) {
+  if (typeof document !== 'undefined' && typeof document.createElement === 'function') {
+    const canvasElement = document.createElement('canvas');
+    canvasElement.width = width;
+    canvasElement.height = height;
+    return canvasElement;
+  }
+  if (typeof OffscreenCanvas === 'function') return new OffscreenCanvas(width, height);
+  throw new Error('Canvas is unavailable for letter-mask rendering.');
+}
+
+function transformLetterBounds(bounds, matrix) {
+  const points = [
+    { x: bounds.left, y: bounds.top },
+    { x: bounds.right, y: bounds.top },
+    { x: bounds.right, y: bounds.bottom },
+    { x: bounds.left, y: bounds.bottom }
+  ].map(point => ({
+    x: point.x * matrix.a + point.y * matrix.c + matrix.e,
+    y: point.x * matrix.b + point.y * matrix.d + matrix.f
+  }));
+  const xs = points.map(point => point.x);
+  const ys = points.map(point => point.y);
+  const left = Math.min(...xs);
+  const top = Math.min(...ys);
+  const right = Math.max(...xs);
+  const bottom = Math.max(...ys);
+  return { x: left, y: top, left, top, right, bottom, width: right - left, height: bottom - top };
+}
+
+function pruneLetterMorphCache() {
+  const entryBytes = entry => entry.pixelCount * (
+    5
+    + entry.rendered.size * 4
+    + (entry.exactTopologyAnalyzer ? LETTER_TOPOLOGY_ANALYZER_BYTES_PER_PIXEL : 0)
+  );
+  let bytes = 0;
+  for (const entry of LETTER_MORPH_CACHE.values()) bytes += entryBytes(entry);
+  while (bytes > LETTER_MORPH_CACHE_MAX_BYTES && LETTER_MORPH_CACHE.size > 1) {
+    const oldestKey = LETTER_MORPH_CACHE.keys().next().value;
+    const oldest = LETTER_MORPH_CACHE.get(oldestKey);
+    LETTER_MORPH_CACHE.delete(oldestKey);
+    bytes -= oldest ? entryBytes(oldest) : 0;
+  }
+}
+
+function buildLetterUnionMask(
+  object,
+  rect,
+  asset,
+  unitScale,
+  requestedPixelsPerNib = LETTER_MORPH_PIXELS_PER_NIB
+) {
+  const layoutMode = object?.template?.layoutMode || 'tight-v1';
+  const pixelsPerNib = requestedPixelsPerNib >= 48
+    ? 48
+    : requestedPixelsPerNib <= LETTER_EDIT_TOPOLOGY_PIXELS_PER_NIB
+      ? LETTER_EDIT_TOPOLOGY_PIXELS_PER_NIB
+      : LETTER_MORPH_PIXELS_PER_NIB;
+  const masterSignature = letterMasterSignature(object, asset);
+  const cacheKey = [
+    masterSignature,
+    layoutMode,
+    pixelsPerNib,
+    LETTER_NIB_X_SOURCE,
+    LETTER_NIB_Y_SOURCE
+  ].join('|');
+  const cached = LETTER_MORPH_CACHE.get(cacheKey);
+  if (cached) {
+    LETTER_MORPH_CACHE.delete(cacheKey);
+    LETTER_MORPH_CACHE.set(cacheKey, cached);
+    return cached;
+  }
+  const engine = letterVectorEngine();
+  const master = engine?.buildPath2D?.(object, { asset, weight: 1, shared: true });
+  const entries = master?.available ? master.entries : cachedLetterPaths(asset);
+  const [, , viewWidth, viewHeight] = asset.viewBox;
+  const metrics = letterSourceMetrics(object);
+  const layoutWidth = layoutMode === 'source-cell-v2'
+    ? metrics?.sourceCell?.width || viewWidth
+    : viewWidth;
+  const layoutHeight = layoutMode === 'source-cell-v2'
+    ? metrics?.sourceCell?.height || viewHeight
+    : viewHeight;
+  const canonicalRect = { x: 0, y: 0, width: layoutWidth, height: layoutHeight };
+  const transform = engine?.getLayoutTransform?.(object, { rect: canonicalRect, asset });
+  const fallbackMatrix = {
+    a: 1,
+    b: 0,
+    c: 0,
+    d: 1,
+    e: -asset.viewBox[0],
+    f: -asset.viewBox[1]
+  };
+  const matrix = transform?.matrix || fallbackMatrix;
+  const localBounds = master?.bounds || {
+    left: asset.viewBox[0],
+    top: asset.viewBox[1],
+    right: asset.viewBox[0] + viewWidth,
+    bottom: asset.viewBox[1] + viewHeight
+  };
+  const masterBounds = transformLetterBounds(localBounds, matrix);
+  const envelope = {
+    left: Math.floor(masterBounds.left - LETTER_NIB_X_SOURCE * LETTER_MORPH_PADDING_NIBS),
+    top: Math.floor(masterBounds.top - LETTER_NIB_Y_SOURCE * LETTER_MORPH_PADDING_NIBS),
+    right: Math.ceil(masterBounds.right + LETTER_NIB_X_SOURCE * LETTER_MORPH_PADDING_NIBS),
+    bottom: Math.ceil(masterBounds.bottom + LETTER_NIB_Y_SOURCE * LETTER_MORPH_PADDING_NIBS)
+  };
+  envelope.x = envelope.left;
+  envelope.y = envelope.top;
+  envelope.width = Math.max(1, envelope.right - envelope.left);
+  envelope.height = Math.max(1, envelope.bottom - envelope.top);
+  const rasterScaleX = pixelsPerNib / LETTER_NIB_X_SOURCE;
+  const rasterScaleY = pixelsPerNib / LETTER_NIB_Y_SOURCE;
+  const width = Math.max(1, Math.ceil(envelope.width * rasterScaleX));
+  const height = Math.max(1, Math.ceil(envelope.height * rasterScaleY));
+  const maskCanvas = createLetterMaskCanvas(width, height);
+  const maskContext = maskCanvas.getContext('2d', { willReadFrequently: true });
+  maskContext.setTransform(
+    rasterScaleX,
+    0,
+    0,
+    rasterScaleY,
+    -envelope.x * rasterScaleX,
+    -envelope.y * rasterScaleY
+  );
+  maskContext.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f);
+  maskContext.fillStyle = '#fff';
+  maskContext.globalAlpha = 1;
+  for (const entry of entries) maskContext.fill(entry.path, entry.rule);
+  maskContext.setTransform(1, 0, 0, 1, 0, 0);
+  const rgba = maskContext.getImageData(0, 0, width, height).data;
+  const alpha = new Uint8ClampedArray(width * height);
+  for (let index = 0, sourceIndex = 3; index < alpha.length; index += 1, sourceIndex += 4) {
+    alpha[index] = rgba[sourceIndex];
+  }
+  const signed = MEDIDAOT_LETTER_MORPHOLOGY.buildSignedDistance(alpha, width, height);
+  const materializedVector = Array.isArray(object?.letterVector?.paths);
+  const sourceFirstUnsafe = LETTER_SOURCE_FIRST_UNSAFE_INTENSITY[
+    `${asset.style}:${asset.letter}`
+  ];
+  const sourceUnsafe = !materializedVector ? sourceFirstUnsafe : null;
+  const fastMaterializedPreview = materializedVector
+    && pixelsPerNib === LETTER_EDIT_TOPOLOGY_PIXELS_PER_NIB;
+  /*
+   * A materialized master can change after every anchor release. A complete
+   * K24 prefix scan is too costly for that interaction. The transient K8
+   * slider base skips that scan. Edited K24/K48 bases start with the source
+   * letter's exhaustively known cross-resolution range, then validate the
+   * exact current full-resolution offset against the edited master.
+   */
+  const topologyAnalysisPixelsPerNib = Math.min(
+    pixelsPerNib,
+    materializedVector ? LETTER_EDIT_TOPOLOGY_PIXELS_PER_NIB : LETTER_MORPH_PIXELS_PER_NIB
+  );
+  const topologyKey = [
+    masterSignature,
+    layoutMode,
+    sourceUnsafe ? 'source-cross-resolution-prefix-v2' : 'edited-source-hint-v4',
+    topologyAnalysisPixelsPerNib,
+    LETTER_NIB_X_SOURCE,
+    LETTER_NIB_Y_SOURCE
+  ].join('|');
+  let normalizedTopology = LETTER_TOPOLOGY_CACHE.get(topologyKey);
+  if (normalizedTopology) {
+    LETTER_TOPOLOGY_CACHE.delete(topologyKey);
+    LETTER_TOPOLOGY_CACHE.set(topologyKey, normalizedTopology);
+  }
+  if (!normalizedTopology) {
+    const factor = Math.max(1, Math.round(pixelsPerNib / topologyAnalysisPixelsPerNib));
+    const proxy = MEDIDAOT_LETTER_MORPHOLOGY.downsampleAlpha(alpha, width, height, factor);
+    let proxyTopology;
+    if (sourceUnsafe || (materializedVector && sourceFirstUnsafe)) {
+      const summary = MEDIDAOT_LETTER_MORPHOLOGY.topologySummary(
+        proxy.alpha, proxy.width, proxy.height
+      );
+      const firstUnsafe = sourceUnsafe || sourceFirstUnsafe;
+      const safeErosionIntensity = firstUnsafe[0] === null
+        ? 100
+        : Math.max(0, firstUnsafe[0] - 1);
+      const safeDilationIntensity = firstUnsafe[1] === null
+        ? 100
+        : Math.max(0, firstUnsafe[1] - 1);
+      proxyTopology = {
+        erosion: .45 * topologyAnalysisPixelsPerNib / 2 * safeErosionIntensity / 100,
+        dilation: .45 * topologyAnalysisPixelsPerNib / 2 * safeDilationIntensity / 100,
+        ...summary
+      };
+    } else if (fastMaterializedPreview) {
+      proxyTopology = {
+        erosion: .45 * topologyAnalysisPixelsPerNib / 2,
+        dilation: .45 * topologyAnalysisPixelsPerNib / 2,
+        ...MEDIDAOT_LETTER_MORPHOLOGY.topologySummary(
+          proxy.alpha,
+          proxy.width,
+          proxy.height
+        )
+      };
+    } else {
+      const proxySigned = MEDIDAOT_LETTER_MORPHOLOGY.buildSignedDistance(
+        proxy.alpha,
+        proxy.width,
+        proxy.height
+      );
+      proxyTopology = MEDIDAOT_LETTER_MORPHOLOGY.topologyLimits(
+        proxy.alpha,
+        proxySigned,
+        proxy.width,
+        proxy.height,
+        .45 * topologyAnalysisPixelsPerNib / 2
+      );
+    }
+    normalizedTopology = {
+      erosionNib: proxyTopology.erosion / topologyAnalysisPixelsPerNib,
+      dilationNib: proxyTopology.dilation / topologyAnalysisPixelsPerNib,
+      inkComponents: proxyTopology.inkComponents,
+      counters: proxyTopology.counters,
+      significantAreaNib: proxyTopology.significantArea /
+        (topologyAnalysisPixelsPerNib * topologyAnalysisPixelsPerNib),
+      analysisPixelsPerNib: topologyAnalysisPixelsPerNib
+    };
+    LETTER_TOPOLOGY_CACHE.set(topologyKey, normalizedTopology);
+    while (LETTER_TOPOLOGY_CACHE.size > 128) {
+      LETTER_TOPOLOGY_CACHE.delete(LETTER_TOPOLOGY_CACHE.keys().next().value);
+    }
+  }
+  const topology = {
+    erosion: normalizedTopology.erosionNib * pixelsPerNib,
+    dilation: normalizedTopology.dilationNib * pixelsPerNib,
+    inkComponents: normalizedTopology.inkComponents,
+    counters: normalizedTopology.counters,
+    significantArea: Math.max(3, Math.round(
+      normalizedTopology.significantAreaNib * pixelsPerNib * pixelsPerNib
+    )),
+    analysisPixelsPerNib: normalizedTopology.analysisPixelsPerNib
+  };
+  const result = {
+    cacheKey,
+    width,
+    height,
+    pixelCount: width * height,
+    envelope,
+    layoutWidth,
+    layoutHeight,
+    rasterScaleX,
+    rasterScaleY,
+    pixelsPerNib,
+    signed,
+    masterAlpha: alpha,
+    masterInkBounds: MEDIDAOT_LETTER_MORPHOLOGY.alphaBounds(alpha, width, height, 1),
+    topology,
+    requiresExactTopologyValidation: materializedVector,
+    exactTopologyAnalyzer: null,
+    exactTopologyOffsets: new Map(),
+    rendered: new Map()
+  };
+  LETTER_MORPH_CACHE.set(cacheKey, result);
+  pruneLetterMorphCache();
+  return result;
+}
+
+function letterColorChannels(color) {
+  const value = /^#[0-9a-f]{6}$/i.test(color || '') ? color.slice(1) : '2563eb';
+  const number = Number.parseInt(value, 16);
+  return [number >> 16 & 255, number >> 8 & 255, number & 255];
+}
+
+function resolveLetterWeightOffset(base, requestedWeight, options = {}) {
+  const exactTopology = options?.exactTopology !== false;
+  const weight = clamp(Number(requestedWeight) || 1, .55, 1.45);
+  const requestedOffset = (weight - 1) * base.pixelsPerNib / 2;
+  const hintedOffset = requestedOffset < 0
+    ? -Math.min(-requestedOffset, base.topology.erosion)
+    : Math.min(requestedOffset, base.topology.dilation);
+  let appliedOffset = hintedOffset;
+  let exactValidated = false;
+  if (exactTopology
+    && base.requiresExactTopologyValidation
+    && Math.abs(hintedOffset) > .0001) {
+    exactValidated = true;
+    const cacheKey = hintedOffset.toFixed(4);
+    const cached = base.exactTopologyOffsets.get(cacheKey);
+    if (Number.isFinite(cached)) {
+      appliedOffset = cached;
+    } else {
+      const transientAnalyzer = base.pixelsPerNib >= 48;
+      let analyzer = base.exactTopologyAnalyzer;
+      if (!analyzer) {
+        analyzer = MEDIDAOT_LETTER_MORPHOLOGY.createTopologySafetyAnalyzer(
+          base.masterAlpha,
+          base.signed,
+          base.width,
+          base.height
+        );
+        if (!transientAnalyzer) {
+          base.exactTopologyAnalyzer = analyzer;
+          pruneLetterMorphCache();
+        }
+      }
+      const direction = Math.sign(hintedOffset);
+      const intensityStep = .45 * base.pixelsPerNib / 2 / 100;
+      while (
+        Math.abs(appliedOffset) > .0001
+        && !analyzer.safeAt(appliedOffset)
+      ) {
+        appliedOffset = direction * Math.max(0, Math.abs(appliedOffset) - intensityStep);
+      }
+      if (Math.abs(appliedOffset) <= .0001) appliedOffset = 0;
+      base.exactTopologyOffsets.set(cacheKey, appliedOffset);
+      while (base.exactTopologyOffsets.size > 64) {
+        base.exactTopologyOffsets.delete(base.exactTopologyOffsets.keys().next().value);
+      }
+    }
+  }
+  const effectiveWeight = 1 + appliedOffset * 2 / base.pixelsPerNib;
+  return {
+    requested: weight,
+    effective: effectiveWeight,
+    capped: Math.abs(requestedOffset - appliedOffset) > .02,
+    exactValidated,
+    exactBackoff: Math.abs(hintedOffset - appliedOffset) > .0001,
+    requestedOffset,
+    hintedOffset,
+    appliedOffset
+  };
+}
+
+function renderedLetterMask(base, object, unitScale, options = {}) {
+  const weightInfo = resolveLetterWeightOffset(base, object.letterWeight, options);
+  const mode = object.letterMode === 'outline' ? 'outline' : 'solid';
+  const outlineWidth = mode === 'outline'
+    ? clamp(Number(object.letterOutlineWidth) || 2.5, .5, LETTER_MAX_OUTLINE_WIDTH)
+    : 0;
+  const color = object.color || '#2563eb';
+  const outlinePixels = mode === 'outline'
+    ? Math.max(.5, Number(unitScale?.outlinePixels) || outlineWidth)
+    : 0;
+  const renderKey = `${weightInfo.appliedOffset.toFixed(3)}|${mode}|${outlinePixels.toFixed(2)}|${color}`;
+  const cached = base.rendered.get(renderKey);
+  if (cached) {
+    base.rendered.delete(renderKey);
+    base.rendered.set(renderKey, cached);
+    cached.weightInfo = weightInfo;
+    return cached;
+  }
+  const alpha = MEDIDAOT_LETTER_MORPHOLOGY.renderSignedDistance(
+    base.signed,
+    weightInfo.appliedOffset,
+    outlinePixels
+  );
+  const canvasElement = createLetterMaskCanvas(base.width, base.height);
+  const context = canvasElement.getContext('2d');
+  const image = context.createImageData(base.width, base.height);
+  const [red, green, blue] = letterColorChannels(color);
+  for (let index = 0, target = 0; index < alpha.length; index += 1, target += 4) {
+    image.data[target] = red;
+    image.data[target + 1] = green;
+    image.data[target + 2] = blue;
+    image.data[target + 3] = alpha[index];
+  }
+  context.putImageData(image, 0, 0);
+  const rendered = {
+    canvas: canvasElement,
+    inkBounds: MEDIDAOT_LETTER_MORPHOLOGY.alphaBounds(alpha, base.width, base.height, 1),
+    weightInfo
+  };
+  base.rendered.set(renderKey, rendered);
+  while (base.rendered.size > 3) base.rendered.delete(base.rendered.keys().next().value);
+  pruneLetterMorphCache();
+  return rendered;
 }
 
 function letterSourceMetrics(objectOrLetter, tradition = 'beitYosef') {
@@ -134,38 +976,27 @@ function drawLetterGrid(context, rect, color, opacity, unitScale) {
   context.restore();
 }
 
-function drawLetterTemplateShape(context, object, rect, unitScale = 1) {
-  const asset = letterAsset(object);
-  if (!asset || rect.width <= 0 || rect.height <= 0) return;
-  if (object.letterGridVisible) {
-    drawLetterGrid(context, rect, object.color, object.letterOpacity ?? .62, unitScale);
-  }
+function drawLetterEditableMaster(context, object, rect, unitScale, asset) {
   const engine = letterVectorEngine();
   const transform = engine?.getLayoutTransform?.(object, { rect, asset });
-  const [, , viewWidth, viewHeight] = asset.viewBox;
-  const scaleX = transform?.scaleX ?? rect.width / Math.max(.001, viewWidth);
-  const scaleY = transform?.scaleY ?? rect.height / Math.max(.001, viewHeight);
-  const averageScale = (Math.abs(scaleX) + Math.abs(scaleY)) / 2 || 1;
+  const master = engine?.buildPath2D?.(object, { asset, weight: 1, shared: true });
+  const entries = master?.available ? master.entries : cachedLetterPaths(asset);
+  if (!transform || !entries.length) return;
   context.save();
-  if (transform) {
-    const matrix = transform.matrix;
-    context.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f);
-  } else {
-    context.translate(rect.x, rect.y);
-    context.scale(scaleX, scaleY);
-  }
+  const matrix = transform.matrix;
+  context.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f);
   context.globalAlpha = clamp(object.letterOpacity ?? .62, .08, 1);
   context.fillStyle = object.color || '#2563eb';
   context.strokeStyle = object.color || '#2563eb';
+  const averageScale = (
+    Math.hypot(matrix.a, matrix.b) + Math.hypot(matrix.c, matrix.d)
+  ) / 2 || 1;
   context.lineJoin = 'round';
   context.lineCap = 'round';
-  context.lineWidth = Math.max(.35, (object.letterOutlineWidth || 2.5) * unitScale / averageScale);
-  const rendered = engine?.buildPath2D?.(object, {
-    asset,
-    weight: object.letterWeight,
-    shared: true
-  });
-  const entries = rendered?.available ? rendered.entries : cachedLetterPaths(asset);
+  context.lineWidth = Math.max(
+    .35,
+    (object.letterOutlineWidth || 2.5) * unitScale / averageScale
+  );
   for (const entry of entries) {
     if (object.letterMode === 'outline') context.stroke(entry.path);
     else context.fill(entry.path, entry.rule);
@@ -173,11 +1004,114 @@ function drawLetterTemplateShape(context, object, rect, unitScale = 1) {
   context.restore();
 }
 
+function updateLetterWeightReadout(object, weightInfo) {
+  if (!weightInfo) return;
+  LETTER_WEIGHT_DIAGNOSTICS.set(object, weightInfo);
+  if (typeof state === 'undefined' || state.selectedId !== object.id) return;
+  const output = typeof $ === 'function' ? $('letterWeightValue') : null;
+  if (!output) return;
+  const intensity = Math.round((weightInfo.requested - 1) / .45 * 100);
+  const magnitude = Math.abs(intensity);
+  const label = intensity === 0
+    ? 'מקור'
+    : intensity < 0
+      ? magnitude === 100 ? 'עדין ביותר' : `עדין ${magnitude}`
+      : magnitude === 100 ? 'מודגש ביותר' : `מודגש ${magnitude}`;
+  output.value = weightInfo.capped
+    ? intensity < 0 ? 'עדין · מוגבל' : 'מודגש · מוגבל'
+    : label;
+  output.textContent = output.value;
+}
+
+function drawLetterTemplateShape(context, object, rect, unitScale = 1, options = {}) {
+  const asset = letterAsset(object);
+  if (!asset || rect.width <= 0 || rect.height <= 0) return;
+  const suppressWeightReadout = options.exportQuality === true
+    || options.suppressWeightReadout === true;
+  if (object.letterGridVisible) {
+    drawLetterGrid(context, rect, object.color, object.letterOpacity ?? .62, unitScale);
+  }
+  if (Math.abs((Number(object.letterWeight) || 1) - 1) < .0001) {
+    drawLetterEditableMaster(context, object, rect, unitScale, asset);
+    if (!suppressWeightReadout) {
+      updateLetterWeightReadout(object, { requested: 1, effective: 1, capped: false });
+    }
+    if (letterMorphForceExactId === object.id) letterMorphForceExactId = null;
+    return;
+  }
+  const activePreviewDrag = typeof state !== 'undefined'
+    && state.dragging?.id === object.id
+    && (state.dragging.type === 'letterVectorHandle'
+      || (state.dragging.type === 'letterResize' && object.letterMode === 'outline'));
+  if (activePreviewDrag && letterMorphForceExactId !== object.id) {
+    drawLetterEditableMaster(context, object, rect, unitScale, asset);
+    return;
+  }
+  try {
+    const materializedWeightPreview = options.exportQuality !== true
+      && letterWeightPreviewId === object.id
+      && Array.isArray(object?.letterVector?.paths);
+    const base = buildLetterUnionMask(
+      object,
+      rect,
+      asset,
+      unitScale,
+      options.exportQuality === true
+        ? 48
+        : materializedWeightPreview
+          ? LETTER_EDIT_TOPOLOGY_PIXELS_PER_NIB
+          : LETTER_MORPH_PIXELS_PER_NIB
+    );
+    const maskPixelToDisplayX = rect.width / Math.max(.001, base.layoutWidth * base.rasterScaleX);
+    const maskPixelToDisplayY = rect.height / Math.max(.001, base.layoutHeight * base.rasterScaleY);
+    const maskPixelToDisplay = (Math.abs(maskPixelToDisplayX) + Math.abs(maskPixelToDisplayY)) / 2;
+    const rendered = renderedLetterMask(base, object, {
+      outlinePixels: (object.letterOutlineWidth || 2.5) * unitScale /
+        Math.max(.001, maskPixelToDisplay)
+    }, {
+      exactTopology: options.exportQuality === true || letterWeightPreviewId !== object.id
+    });
+    const source = rendered.inkBounds;
+    const target = base.masterInkBounds;
+    if (!source || !target) {
+      if (letterMorphForceExactId === object.id) letterMorphForceExactId = null;
+      return;
+    }
+    const canonicalTarget = {
+      x: base.envelope.x + target.x / base.rasterScaleX,
+      y: base.envelope.y + target.y / base.rasterScaleY,
+      width: target.width / base.rasterScaleX,
+      height: target.height / base.rasterScaleY
+    };
+    context.save();
+    context.globalAlpha = clamp(object.letterOpacity ?? .62, .08, 1);
+    context.drawImage(
+      rendered.canvas,
+      source.x,
+      source.y,
+      source.width,
+      source.height,
+      rect.x + canonicalTarget.x / base.layoutWidth * rect.width,
+      rect.y + canonicalTarget.y / base.layoutHeight * rect.height,
+      canonicalTarget.width / base.layoutWidth * rect.width,
+      canonicalTarget.height / base.layoutHeight * rect.height
+    );
+    context.restore();
+    if (!suppressWeightReadout) updateLetterWeightReadout(object, rendered.weightInfo);
+    if (letterMorphForceExactId === object.id) letterMorphForceExactId = null;
+  } catch (error) {
+    /* A master-only fallback is safer than applying a destructive composite. */
+    drawLetterEditableMaster(context, object, rect, unitScale, asset);
+    if (letterMorphForceExactId === object.id) letterMorphForceExactId = null;
+    console.warn('Letter morphology fell back to the editable master.', error);
+  }
+}
+
 function letterVisualRect(object) {
   if (!isLetterTemplate(object)) return null;
   const visual = letterVectorEngine()?.getVisualBounds?.(object, {
     asset: letterAsset(object),
-    weight: object.letterWeight
+    weight: 1
   })?.image;
   return visual || letterObjectRect(object);
 }
@@ -352,7 +1286,7 @@ function drawLetterTemplateOnScreen(object, selected) {
 
 function drawLetterTemplateForExport(context, object) {
   normalizeLetterTemplateObject(object);
-  drawLetterTemplateShape(context, object, letterObjectRect(object), 1);
+  drawLetterTemplateShape(context, object, letterObjectRect(object), 1, { exportQuality: true });
 }
 
 function nearestLetterHandle(object, imagePoint, thresholdScreen = 20) {
@@ -545,14 +1479,21 @@ function syncLetterControls(object = selectedLetterTemplate()) {
   $('letterOpacityInput').value = Math.round((object.letterOpacity ?? .62) * 100);
   $('letterOutlineWidthInput').value = object.letterOutlineWidth || 2.5;
   $('letterOutlineWidthLabel').hidden = mode !== 'outline';
-  $('letterWeightInput').value = Math.round((object.letterWeight || 1) * 100);
-  $('letterWeightValue').value = `${Math.round((object.letterWeight || 1) * 100)}%`;
+  const weightIntensity = Math.round(((object.letterWeight || 1) - 1) / .45 * 100);
+  $('letterWeightInput').value = clamp(weightIntensity, -100, 100);
+  const cachedWeightInfo = LETTER_WEIGHT_DIAGNOSTICS.get(object);
+  const currentWeight = object.letterWeight || 1;
+  updateLetterWeightReadout(object,
+    cachedWeightInfo && Math.abs(cachedWeightInfo.requested - currentWeight) < .0001
+      ? cachedWeightInfo
+      : { requested: currentWeight, effective: currentWeight, capped: false }
+  );
   $('letterGridInput').checked = object.letterGridVisible !== false;
   $('letterLockAspectInput').checked = object.letterLockAspect !== false;
   $('letterEditAnchorsInput').checked = object.letterEditAnchors === true;
   const vectorStats = letterVectorEngine()?.stats?.(object, letterAsset(object));
   $('letterAnchorReadout').textContent = vectorStats?.available
-    ? `${vectorStats.anchors} נקודות עוגן · ${vectorStats.controls} ידיות Bézier${vectorStats.materialized ? ' · נשמרו עריכות אישיות' : ' · וקטור מקור מלא'}${Math.abs((object.letterWeight || 1) - 1) > .001 ? ' · הקו המקווקו הוא מסלול המקור הנערך' : ''}`
+    ? `${vectorStats.anchors} נקודות עוגן · ${vectorStats.controls} ידיות Bézier${vectorStats.materialized ? ' · נשמרו עריכות אישיות' : ' · מקור Bézier מלא'} · שינוי העובי הוא תצוגה לא־הרסנית עם הגנת רכיבים וחללים${Math.abs((object.letterWeight || 1) - 1) > .001 ? ' · הקו המקווקו הוא מסלול המקור הנערך' : ''}`
     : 'המסלול הווקטורי אינו זמין.';
   const rect = letterObjectRect(object);
   const visual = letterVisualRect(object) || rect;
@@ -613,6 +1554,45 @@ function resetSelectedLetterRatio() {
   statusText.textContent = 'האות הוחזרה לתא וליחסים המקוריים של לוח האותיות';
 }
 
+function runScheduledLetterWeightRender() {
+  letterWeightRenderFrame = null;
+  if (!letterWeightRenderDirty) return;
+  letterWeightRenderDirty = false;
+  draw();
+  renderResults();
+}
+
+function scheduleLetterWeightRender() {
+  letterWeightRenderDirty = true;
+  if (letterWeightRenderFrame !== null) return;
+  if (typeof requestAnimationFrame === 'function') {
+    letterWeightRenderFrame = requestAnimationFrame(runScheduledLetterWeightRender);
+  } else {
+    runScheduledLetterWeightRender();
+  }
+}
+
+function flushLetterWeightRender() {
+  if (!letterWeightRenderDirty) return;
+  if (letterWeightRenderFrame !== null && typeof cancelAnimationFrame === 'function') {
+    cancelAnimationFrame(letterWeightRenderFrame);
+  }
+  letterWeightRenderFrame = null;
+  runScheduledLetterWeightRender();
+}
+
+function commitLetterWeightRender() {
+  const object = selectedLetterTemplate();
+  const exactDrawRequired = !!object && letterWeightPreviewId === object.id;
+  letterWeightPreviewId = null;
+  const pendingDraw = letterWeightRenderDirty;
+  flushLetterWeightRender();
+  if (exactDrawRequired && !pendingDraw) {
+    draw();
+    renderResults();
+  }
+}
+
 $('letterBoardBtn')?.addEventListener('click', () => {
   const drawer = $('letterDrawer');
   drawer.hidden = !drawer.hidden;
@@ -648,33 +1628,35 @@ $('letterWeightInput')?.addEventListener('pointerdown', () => {
 });
 $('letterWeightInput')?.addEventListener('input', event => {
   const object = selectedLetterTemplate();
-  const engine = letterVectorEngine();
-  if (!object || !engine?.setObjectWeight) return;
+  if (!object) return;
   if (!letterWeightHistoryArmed) {
     snapshot();
     letterWeightHistoryArmed = true;
   }
-  const requestedWeight = clamp(+event.target.value / 100, .55, 1.45);
-  engine.setObjectWeight(object, requestedWeight, {
-    asset: letterAsset(object),
-    includeRender: false
-  });
+  const intensity = clamp(+event.target.value, -100, 100);
+  const requestedWeight = 1 + intensity / 100 * .45;
+  object.letterWeight = requestedWeight;
+  if (object.letterVector) object.letterVector.weight = requestedWeight;
+  letterWeightPreviewId = object.id;
   object.auto = false;
   markObjectModified(object);
   syncLetterControls(object);
-  draw();
-  renderResults();
+  scheduleLetterWeightRender();
 });
 $('letterWeightInput')?.addEventListener('change', () => {
+  commitLetterWeightRender();
   letterWeightHistoryArmed = false;
 });
 $('letterWeightInput')?.addEventListener('pointerup', () => {
+  commitLetterWeightRender();
   letterWeightHistoryArmed = false;
 });
 $('letterWeightInput')?.addEventListener('pointercancel', () => {
+  commitLetterWeightRender();
   letterWeightHistoryArmed = false;
 });
 $('letterWeightInput')?.addEventListener('blur', () => {
+  commitLetterWeightRender();
   letterWeightHistoryArmed = false;
 });
 $('letterGridInput')?.addEventListener('change', event => {
@@ -701,5 +1683,21 @@ $('resetLetterRatioBtn')?.addEventListener('click', resetSelectedLetterRatio);
 $('deleteLetterBtn')?.addEventListener('click', () => {
   if (selectedLetterTemplate()) deleteSelectedObject();
 });
+
+/*
+ * app-3 registers its pointer-up handler after this file. Marking the active
+ * vector edit here makes that handler's final render exact, while pointer-move
+ * frames stay on the inexpensive editable Bézier preview.
+ */
+if (typeof canvas !== 'undefined' && canvas?.addEventListener) {
+  canvas.addEventListener('pointerup', () => {
+    if (typeof state !== 'undefined'
+      && (state.dragging?.type === 'letterVectorHandle'
+        || (state.dragging?.type === 'letterResize'
+          && state.objects?.find(object => object.id === state.dragging.id)?.letterMode === 'outline'))) {
+      letterMorphForceExactId = state.dragging.id;
+    }
+  });
+}
 
 renderLetterKeyboard();
