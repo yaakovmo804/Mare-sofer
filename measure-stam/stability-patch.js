@@ -26,6 +26,12 @@
         state.history = [];
         state.future = [];
         state.formula = mergeFormula({});
+        state.activeCalibrationRegionId = null;
+        cancelCalibrationAnalysis();
+        state.pointers.clear();
+        state.pinchStart = null;
+        state.activePointerId = null;
+        state.interactionBefore = null;
       }
 
       fitImage();
@@ -41,7 +47,7 @@
 
       if (resetProject) {
         state.formula.analysis.status = 'idle';
-        statusText.textContent = 'התמונה נטענה. אפשר להתחיל למדוד; ניתוח נוסחת הכתב מופעל לפי דרישה.';
+        statusText.textContent = 'התמונה נטענה. לקביעת 1 עובי קולמוס סמן אזור כיול צר ורציף.';
         renderFormulaUI();
       }
     };
@@ -73,7 +79,7 @@
     try {
       await originalAnalyzeImage(userInitiated);
     } finally {
-      analysisOverlay.hidden = true;
+      if (state.formula.analysis.status !== 'running') analysisOverlay.hidden = true;
       analysisRunning = false;
       if (analyzeButton) analyzeButton.disabled = false;
     }
@@ -82,11 +88,11 @@
   analysisOverlay.hidden = true;
 
   const emptyCopy = document.querySelector('#emptyState p');
-  if (emptyCopy) emptyCopy.textContent = 'התמונה נטענת מיד. ניתוח עובי קולמוס ומרווחים מופעל רק בלחיצה.';
+  if (emptyCopy) emptyCopy.textContent = 'התמונה נטענת מיד. הכיול נקבע רק מאזור מסומן או מקו ידני.';
 
   const analysisNote = $('analysisNote');
-  if (analysisNote) analysisNote.textContent = 'ליציבות, הניתוח אינו מופעל אוטומטית. אפשר להפעילו לפי הצורך או לסמן ידנית.';
+  if (analysisNote) analysisNote.textContent = 'הבדיקה הכללית אינה משנה כיול. לקביעת 1 עובי קולמוס השתמש בכיול מאזור או בקו ידני.';
 
   const analyzeButton = $('analyzeBtn');
-  if (analyzeButton) analyzeButton.textContent = 'ניתוח נוסחת הכתב';
+  if (analyzeButton) analyzeButton.textContent = 'בדיקה כללית (ללא כיול)';
 })();

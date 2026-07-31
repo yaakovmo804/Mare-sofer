@@ -1,52 +1,20 @@
 'use strict';
 function applyAnalysis(analysis) {
-  state.objects = state.objects.filter(object => !object.auto);
+  state.objects = state.objects.filter(object => !['auto-nib', 'auto-gap'].includes(object.role));
   state.formula.analysis = {
     status: analysis.nib ? 'done' : 'failed',
     nibConfidence: analysis.nibConfidence || 0,
     gapConfidence: analysis.gapConfidence || 0,
-    threshold: analysis.threshold
+    threshold: analysis.threshold,
+    suggestedNibPx: analysis.nib?.length || null,
+    suggestedGapPx: analysis.gap?.length || null,
+    proposalOnly: true
   };
-
-  let selected = null;
-  if (analysis.nib) {
-    state.formula.nibPx = analysis.nib.length;
-    const object = makeObject('nib', analysis.nib.points, {
-      color: TOOL_COLORS.nib,
-      lineWidth: 3,
-      name: 'עובי קולמוס — הצעה אוטומטית',
-      auto: true,
-      role: 'auto-nib'
-    });
-    state.objects.push(object);
-    state.formula.calibration = {
-      method: 'global-auto',
-      objectId: object.id,
-      valuePx: analysis.nib.length,
-      confidence: analysis.nibConfidence || null,
-      verified: false
-    };
-    selected = object;
-  }
-  if (analysis.gap) {
-    state.formula.commonGapPx = analysis.gap.length;
-    const object = makeObject('gap', analysis.gap.points, {
-      color: TOOL_COLORS.gap,
-      lineWidth: 3,
-      name: 'מרווח מצוי — הצעה אוטומטית',
-      formulaKey: 'common-gap',
-      auto: true,
-      role: 'auto-gap'
-    });
-    state.objects.push(object);
-  }
-  for (const kastel of state.objects.filter(object => object.type === 'kastel' && object.guides?.source !== 'manual')) {
-    initializeKastelGuides(kastel, true);
-  }
-  if (selected) selectObject(selected.id);
   statusText.textContent = analysis.nib
-    ? 'נוצרה הצעה ראשונית. גרור את קצות הקווים כדי לאמת ולדייק'
-    : 'לא זוהה עובי יציב. עבור לסימון ידני';
+    ? state.formula.nibPx
+      ? 'הבדיקה הכללית הסתיימה ולא שינתה את כיול הקולמוס הפעיל'
+      : 'הבדיקה הכללית הסתיימה. לקביעת 1 עובי קולמוס יש לסמן אזור כיול'
+    : 'לא זוהה מבנה יציב. לקביעת עובי קולמוס יש לסמן אזור כיול';
 }
 
 function computeImageMetrics(image, options = {}) {
@@ -192,13 +160,35 @@ function otsuThreshold(histogram, total) {
   return threshold;
 }
 function smoothMode(histogram, min, max) {
-  let bestIndex = 0, bestValue = 0;
+  const smoothed = new Float64Array(histogram.length);
+  let bestValue = 0;
   for (let i = min; i <= max; i++) {
     let value = 0;
     for (let offset = -2; offset <= 2; offset++) value += histogram[i + offset] || 0;
-    if (value > bestValue) { bestValue = value; bestIndex = i; }
+    smoothed[i] = value;
+    bestValue = Math.max(bestValue, value);
   }
-  return bestValue > 0 ? bestIndex : null;
+  if (!bestValue) return null;
+  let bestRun = null;
+  for (let index = min; index <= max;) {
+    if (smoothed[index] !== bestValue) {
+      index++;
+      continue;
+    }
+    const start = index;
+    while (index + 1 <= max && smoothed[index + 1] === bestValue) index++;
+    const end = index;
+    let mass = 0;
+    let weighted = 0;
+    for (let bin = Math.max(min, start - 2); bin <= Math.min(max, end + 2); bin++) {
+      mass += histogram[bin] || 0;
+      weighted += bin * (histogram[bin] || 0);
+    }
+    if (!bestRun || mass > bestRun.mass) bestRun = { start, end, mass, weighted };
+    index++;
+  }
+  if (bestRun?.mass) return Math.round(bestRun.weighted / bestRun.mass);
+  return Math.round((bestRun.start + bestRun.end) / 2);
 }
 function histogramConcentration(histogram, center, radius) {
   let total = 0, local = 0;
@@ -208,17 +198,344 @@ function histogramConcentration(histogram, center, radius) {
   }
   return total ? local / total : 0;
 }
+function numericMedian(values) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+function medianAbsoluteDeviation(values, center = numericMedian(values)) {
+  if (!values.length || !Number.isFinite(center)) return null;
+  return numericMedian(values.map(value => Math.abs(value - center)));
+}
+
+function stableImageThreshold(image, maxDimension = 900) {
+  const factor = Math.min(1, maxDimension / Math.max(image.width, image.height));
+  const width = Math.max(2, Math.round(image.width * factor));
+  const height = Math.max(2, Math.round(image.height * factor));
+  const raster = document.createElement('canvas');
+  raster.width = width;
+  raster.height = height;
+  const context = raster.getContext('2d', { willReadFrequently: true });
+  context.fillStyle = '#fff';
+  context.fillRect(0, 0, width, height);
+  context.drawImage(image, 0, 0, width, height);
+  const pixels = context.getImageData(0, 0, width, height).data;
+  const histogram = new Uint32Array(256);
+  for (let index = 0; index < pixels.length; index += 4) {
+    const value = Math.round(.2126 * pixels[index] + .7152 * pixels[index + 1] + .0722 * pixels[index + 2]);
+    histogram[value]++;
+  }
+  return clamp(otsuThreshold(histogram, width * height) + 6, 35, 210);
+}
+
+function sourceInkThreshold() {
+  const cached = +state.formula.analysis?.sourceThreshold;
+  if (Number.isFinite(cached) && cached > 0) return cached;
+  const threshold = stableImageThreshold(state.image);
+  state.formula.analysis.sourceThreshold = threshold;
+  return threshold;
+}
+
+function largestInkComponent(binary, width, height) {
+  const visited = new Uint8Array(binary.length);
+  const queue = new Int32Array(binary.length);
+  let best = [];
+  const neighbors = [
+    [-1, -1], [0, -1], [1, -1],
+    [-1, 0],           [1, 0],
+    [-1, 1],  [0, 1],  [1, 1]
+  ];
+  for (let start = 0; start < binary.length; start++) {
+    if (!binary[start] || visited[start]) continue;
+    let head = 0;
+    let tail = 0;
+    queue[tail++] = start;
+    visited[start] = 1;
+    while (head < tail) {
+      const index = queue[head++];
+      const x = index % width;
+      const y = Math.floor(index / width);
+      for (const [dx, dy] of neighbors) {
+        const nextX = x + dx;
+        const nextY = y + dy;
+        if (nextX < 0 || nextX >= width || nextY < 0 || nextY >= height) continue;
+        const next = nextY * width + nextX;
+        if (!binary[next] || visited[next]) continue;
+        visited[next] = 1;
+        queue[tail++] = next;
+      }
+    }
+    if (tail > best.length) best = Array.from(queue.subarray(0, tail));
+  }
+  return best;
+}
+
+function computeRegionNibMetrics(image, options = {}) {
+  const width = image.width;
+  const height = image.height;
+  const context = image.getContext
+    ? image.getContext('2d', { willReadFrequently: true })
+    : null;
+  const raster = context ? image : document.createElement('canvas');
+  const rasterContext = context || raster.getContext('2d', { willReadFrequently: true });
+  if (!context) {
+    raster.width = width;
+    raster.height = height;
+    rasterContext.fillStyle = '#fff';
+    rasterContext.fillRect(0, 0, width, height);
+    rasterContext.drawImage(image, 0, 0);
+  }
+  const pixels = rasterContext.getImageData(0, 0, width, height).data;
+  const gray = new Uint8Array(width * height);
+  const histogram = new Uint32Array(256);
+  for (let source = 0, target = 0; source < pixels.length; source += 4, target++) {
+    const alpha = pixels[source + 3] / 255;
+    const value = Math.round(
+      (.2126 * pixels[source] + .7152 * pixels[source + 1] + .0722 * pixels[source + 2]) * alpha +
+      255 * (1 - alpha)
+    );
+    gray[target] = value;
+    histogram[value]++;
+  }
+  const threshold = Number.isFinite(+options.threshold)
+    ? +options.threshold
+    : clamp(otsuThreshold(histogram, gray.length) + 6, 35, 210);
+  const binary = new Uint8Array(gray.length);
+  let darkCount = 0;
+  for (let index = 0; index < gray.length; index++) {
+    if (gray[index] < threshold) {
+      binary[index] = 1;
+      darkCount++;
+    }
+  }
+  if (darkCount < Math.max(30, gray.length * .006)) throw new Error('Not enough ink in calibration region');
+  const component = largestInkComponent(binary, width, height);
+  if (component.length < Math.max(24, darkCount * .12)) throw new Error('No stable ink component');
+
+  let meanX = 0;
+  let meanY = 0;
+  for (const index of component) {
+    meanX += index % width + .5;
+    meanY += Math.floor(index / width) + .5;
+  }
+  meanX /= component.length;
+  meanY /= component.length;
+  let xx = 0;
+  let xy = 0;
+  let yy = 0;
+  for (const index of component) {
+    const dx = index % width + .5 - meanX;
+    const dy = Math.floor(index / width) + .5 - meanY;
+    xx += dx * dx;
+    xy += dx * dy;
+    yy += dy * dy;
+  }
+  xx /= component.length;
+  xy /= component.length;
+  yy /= component.length;
+  const discriminant = Math.sqrt((xx - yy) ** 2 + 4 * xy ** 2);
+  const majorVariance = (xx + yy + discriminant) / 2;
+  const minorVariance = Math.max(.0001, (xx + yy - discriminant) / 2);
+  const elongation = majorVariance / minorVariance;
+  if (elongation < 3.5) throw new Error('Calibration region must contain one elongated stroke');
+  const angle = .5 * Math.atan2(2 * xy, xx - yy);
+  const major = { x: Math.cos(angle), y: Math.sin(angle) };
+  const minor = { x: -major.y, y: major.x };
+  const projected = component.map(index => {
+    const dx = index % width + .5 - meanX;
+    const dy = Math.floor(index / width) + .5 - meanY;
+    return { u: dx * major.x + dy * major.y, v: dx * minor.x + dy * minor.y };
+  });
+  let minU = Infinity;
+  let maxU = -Infinity;
+  for (const point of projected) {
+    minU = Math.min(minU, point.u);
+    maxU = Math.max(maxU, point.u);
+  }
+  const fullSpan = maxU - minU;
+  if (fullSpan < 12) throw new Error('Calibration stroke is too short');
+  const coreMin = minU + fullSpan * .18;
+  const coreMax = maxU - fullSpan * .18;
+  const coreSpan = coreMax - coreMin;
+  const binCount = clamp(Math.round(coreSpan / 1.7), 12, 31);
+  const binWidth = coreSpan / binCount;
+  const minorIntervalAt = u => {
+    const baseX = meanX + major.x * u;
+    const baseY = meanY + major.y * u;
+    let minimum = -Infinity;
+    let maximum = Infinity;
+    const constrain = (origin, direction, low, high) => {
+      if (Math.abs(direction) < 1e-8) return origin >= low && origin <= high;
+      const first = (low - origin) / direction;
+      const second = (high - origin) / direction;
+      minimum = Math.max(minimum, Math.min(first, second));
+      maximum = Math.min(maximum, Math.max(first, second));
+      return minimum <= maximum;
+    };
+    if (!constrain(baseX, minor.x, .5, width - .5)) return null;
+    if (!constrain(baseY, minor.y, .5, height - .5)) return null;
+    return { minimum, maximum };
+  };
+  const grayAt = (u, v) => {
+    const x = meanX + major.x * u + minor.x * v;
+    const y = meanY + major.y * u + minor.y * v;
+    if (x < .5 || x > width - .5 || y < .5 || y > height - .5) return 255;
+    const pixelX = x - .5;
+    const pixelY = y - .5;
+    const x0 = clamp(Math.floor(pixelX), 0, width - 1);
+    const y0 = clamp(Math.floor(pixelY), 0, height - 1);
+    const x1 = Math.min(width - 1, x0 + 1);
+    const y1 = Math.min(height - 1, y0 + 1);
+    const tx = pixelX - x0;
+    const ty = pixelY - y0;
+    const top = gray[y0 * width + x0] * (1 - tx) + gray[y0 * width + x1] * tx;
+    const bottom = gray[y1 * width + x0] * (1 - tx) + gray[y1 * width + x1] * tx;
+    return top * (1 - ty) + bottom * ty;
+  };
+  const scanCrossSection = (u, interval) => {
+    const step = .25;
+    const startV = interval.minimum + .05;
+    const endV = interval.maximum - .05;
+    if (endV <= startV) return null;
+    const runs = [];
+    let previousV = startV;
+    let previousGray = grayAt(u, previousV);
+    let inside = previousGray < threshold;
+    let runStart = inside ? startV : null;
+    for (let v = startV + step; v <= endV + 1e-9; v += step) {
+      const currentV = Math.min(v, endV);
+      const currentGray = grayAt(u, currentV);
+      const currentInside = currentGray < threshold;
+      if (currentInside !== inside) {
+        const denominator = currentGray - previousGray;
+        const ratio = Math.abs(denominator) > 1e-8
+          ? clamp((threshold - previousGray) / denominator, 0, 1)
+          : .5;
+        const crossing = previousV + (currentV - previousV) * ratio;
+        if (currentInside) runStart = crossing;
+        else if (runStart != null) {
+          runs.push({ start: runStart, end: crossing, width: crossing - runStart });
+          runStart = null;
+        }
+      }
+      inside = currentInside;
+      previousV = currentV;
+      previousGray = currentGray;
+      if (currentV === endV) break;
+    }
+    if (inside && runStart != null) runs.push({ start: runStart, end: endV, width: endV - runStart });
+    const substantial = runs.filter(run => run.width >= 1.5).sort((a, b) => b.width - a.width);
+    if (!substantial.length) return { runs: [], primary: null };
+    const meaningful = substantial.filter(run => run.width >= substantial[0].width * .22);
+    return { runs: meaningful, primary: substantial[0] };
+  };
+  const candidates = [];
+  let multiRunBins = 0;
+  let clippedBins = 0;
+  for (let index = 0; index < binCount; index++) {
+    const u = coreMin + (index + .5) * binWidth;
+    const interval = minorIntervalAt(u);
+    const scan = interval ? scanCrossSection(u, interval) : null;
+    if (!scan?.primary) {
+      clippedBins++;
+      continue;
+    }
+    if (scan.runs.length > 1) {
+      multiRunBins++;
+      continue;
+    }
+    const lowerEdge = scan.primary.start;
+    const upperEdge = scan.primary.end;
+    const backgroundOffsets = [.65, 1.25];
+    const hasOuterBackground =
+      lowerEdge - interval.minimum >= 1.35 &&
+      interval.maximum - upperEdge >= 1.35 &&
+      backgroundOffsets.every(offset => grayAt(u, lowerEdge - offset) >= threshold) &&
+      backgroundOffsets.every(offset => grayAt(u, upperEdge + offset) >= threshold);
+    if (!hasOuterBackground) {
+      clippedBins++;
+      continue;
+    }
+    candidates.push({
+      width: scan.primary.width,
+      u,
+      centerV: (scan.primary.start + scan.primary.end) / 2
+    });
+  }
+  if (clippedBins > Math.max(1, Math.floor(binCount * .10))) {
+    throw new Error('Calibration stroke touches the region boundary');
+  }
+  if (multiRunBins > binCount * .22) throw new Error('Calibration region contains more than one stroke');
+  if (candidates.length < Math.max(9, binCount * .45)) throw new Error('Not enough stable cross-sections');
+  const firstMedian = numericMedian(candidates.map(candidate => candidate.width));
+  const firstMad = medianAbsoluteDeviation(candidates.map(candidate => candidate.width), firstMedian) || 0;
+  const tolerance = Math.max(1.2, firstMedian * .12, firstMad * 3.5);
+  const accepted = candidates.filter(candidate => Math.abs(candidate.width - firstMedian) <= tolerance);
+  if (accepted.length < 9) throw new Error('Cross-sections are inconsistent');
+  const crossSectionMedian = numericMedian(accepted.map(candidate => candidate.width));
+  const majorFootprint = Math.abs(major.x) + Math.abs(major.y);
+  const areaWidth = component.length / Math.max(1, fullSpan + majorFootprint);
+  if (Math.abs(areaWidth - crossSectionMedian) / Math.max(1, crossSectionMedian) > .10) {
+    throw new Error('Stroke area and cross-sections disagree');
+  }
+  const valuePx = crossSectionMedian;
+  const rawMad = medianAbsoluteDeviation(accepted.map(candidate => candidate.width), crossSectionMedian) || 0;
+  const madPx = rawMad;
+  const robustCv = valuePx ? 1.4826 * madPx / valuePx : Infinity;
+  if (!Number.isFinite(valuePx) || valuePx <= 0 || robustCv > .11) throw new Error('Stroke width is not stable');
+  if (valuePx > Math.min(width, height) * .90) throw new Error('Calibration region is too broad');
+  const representative = accepted.reduce((best, candidate) =>
+    Math.abs(candidate.width - crossSectionMedian) < Math.abs(best.width - crossSectionMedian) ? candidate : best
+  );
+  const center = {
+    x: meanX + major.x * representative.u + minor.x * representative.centerV,
+    y: meanY + major.y * representative.u + minor.y * representative.centerV
+  };
+  const points = [
+    { x: center.x - minor.x * valuePx / 2, y: center.y - minor.y * valuePx / 2 },
+    { x: center.x + minor.x * valuePx / 2, y: center.y + minor.y * valuePx / 2 }
+  ];
+  const confidence = clamp(
+    .25 +
+    Math.min(.25, accepted.length / 80) +
+    Math.min(.25, Math.log2(elongation) / 16) +
+    Math.max(0, .25 * (1 - robustCv / .11)),
+    .15,
+    .98
+  );
+  return {
+    threshold,
+    length: valuePx,
+    points,
+    confidence,
+    stats: {
+      estimator: 'pca-subpixel-perpendicular-median-v2',
+      sliceCount: accepted.length,
+      rejectedSliceCount: candidates.length - accepted.length,
+      multiRunBinCount: multiRunBins,
+      clippedBinCount: clippedBins,
+      medianPx: valuePx,
+      crossSectionMedianPx: crossSectionMedian,
+      areaWidthPx: areaWidth,
+      madPx,
+      robustCv,
+      elongation
+    }
+  };
+}
+
 function strokeSegment(binary, width, height, x, y, orientation) {
   if (orientation === 'horizontal') {
     let start = x, end = x;
     while (start > 0 && binary[y * width + start - 1]) start--;
     while (end < width - 1 && binary[y * width + end + 1]) end++;
-    return { points: [{ x: start + 0.5, y: y + 0.5 }, { x: end + 0.5, y: y + 0.5 }] };
+    return { points: [{ x: start, y: y + 0.5 }, { x: end + 1, y: y + 0.5 }] };
   }
   let start = y, end = y;
   while (start > 0 && binary[(start - 1) * width + x]) start--;
   while (end < height - 1 && binary[(end + 1) * width + x]) end++;
-  return { points: [{ x: x + 0.5, y: start + 0.5 }, { x: x + 0.5, y: end + 0.5 }] };
+  return { points: [{ x: x + 0.5, y: start }, { x: x + 0.5, y: end + 1 }] };
 }
 function scanWhiteRuns(binary, width, height, orientation, minLength, maxLength, callback) {
   const outer = orientation === 'horizontal' ? height : width;
@@ -265,6 +582,11 @@ function bestGapSegment(binary, width, height, mode, tolerance, nibMode) {
 }
 
 function rasterizeImageQuad(points, maxDimension = 600) {
+  if (!state.image || points.some(point =>
+    point.x < 0 || point.y < 0 || point.x > state.image.width || point.y > state.image.height
+  )) {
+    throw new Error('Calibration region must stay inside the image');
+  }
   const topWidth = distance(points[0], points[1]);
   const bottomWidth = distance(points[3], points[2]);
   const leftHeight = distance(points[0], points[3]);
@@ -330,21 +652,201 @@ function rasterizeImageQuad(points, maxDimension = 600) {
   return { canvas, mapPoint };
 }
 
-async function analyzeCalibrationRegion(region) {
+function classifyNibSampleCluster(samples, tolerance = .10, currentCanonicalPx = null) {
+  const active = samples.filter(sample =>
+    sample.active !== false && Number.isFinite(+sample.valuePx) && +sample.valuePx > 0
+  );
+  if (!active.length) return { samples, canonicalPx: null, madPx: null, acceptedCount: 0, rejectedCount: 0 };
+  const values = active.map(sample => +sample.valuePx);
+  const locked = active.filter(sample => sample.locked === true);
+  if (locked.length) {
+    const canonicalPx = numericMedian(locked.map(sample => +sample.valuePx));
+    let acceptedCount = 0;
+    let rejectedCount = 0;
+    const classified = samples.map(sample => {
+      if (sample.active === false || !Number.isFinite(+sample.valuePx) || +sample.valuePx <= 0) return sample;
+      const relativeDeviation = Math.abs(+sample.valuePx - canonicalPx) / canonicalPx;
+      const accepted = sample.locked === true || relativeDeviation <= tolerance + 1e-9;
+      accepted ? acceptedCount++ : rejectedCount++;
+      return { ...sample, accepted, relativeDeviation };
+    });
+    const acceptedValues = classified
+      .filter(sample => sample.active !== false && sample.accepted !== false)
+      .map(sample => +sample.valuePx);
+    return {
+      samples: classified,
+      canonicalPx,
+      madPx: medianAbsoluteDeviation(acceptedValues, canonicalPx) || 0,
+      acceptedCount,
+      rejectedCount
+    };
+  }
+  const overallMedian = numericMedian(values);
+  let best = null;
+  active.forEach((candidate, index) => {
+    const center = +candidate.valuePx;
+    const members = active.filter(sample => Math.abs(+sample.valuePx - center) / center <= tolerance + 1e-9);
+    const memberValues = members.map(sample => +sample.valuePx);
+    const memberMedian = numericMedian(memberValues);
+    const relativeMad = (medianAbsoluteDeviation(memberValues, memberMedian) || 0) / memberMedian;
+    const distanceFromOverall = Math.abs(memberMedian - overallMedian) / overallMedian;
+    const distanceFromCurrent = Number.isFinite(+currentCanonicalPx) && +currentCanonicalPx > 0
+      ? Math.abs(memberMedian - +currentCanonicalPx) / +currentCanonicalPx
+      : 0;
+    const proposal = { members, memberMedian, relativeMad, distanceFromOverall, distanceFromCurrent, firstIndex: index };
+    if (!best ||
+        proposal.members.length > best.members.length ||
+        (proposal.members.length === best.members.length && proposal.relativeMad < best.relativeMad - 1e-9) ||
+        (proposal.members.length === best.members.length && Math.abs(proposal.relativeMad - best.relativeMad) <= 1e-9 &&
+          proposal.distanceFromCurrent < best.distanceFromCurrent - 1e-9) ||
+        (proposal.members.length === best.members.length && Math.abs(proposal.relativeMad - best.relativeMad) <= 1e-9 &&
+          Math.abs(proposal.distanceFromCurrent - best.distanceFromCurrent) <= 1e-9 &&
+          proposal.distanceFromOverall < best.distanceFromOverall - 1e-9) ||
+        (proposal.members.length === best.members.length && Math.abs(proposal.relativeMad - best.relativeMad) <= 1e-9 &&
+          Math.abs(proposal.distanceFromCurrent - best.distanceFromCurrent) <= 1e-9 &&
+          Math.abs(proposal.distanceFromOverall - best.distanceFromOverall) <= 1e-9 && proposal.firstIndex < best.firstIndex)) {
+      best = proposal;
+    }
+  });
+  let canonicalPx = best.memberMedian;
+  for (let iteration = 0; iteration < 2; iteration++) {
+    const acceptedValues = values.filter(value => Math.abs(value - canonicalPx) / canonicalPx <= tolerance + 1e-9);
+    if (!acceptedValues.length) break;
+    canonicalPx = numericMedian(acceptedValues);
+  }
+  let acceptedCount = 0;
+  let rejectedCount = 0;
+  const classified = samples.map(sample => {
+    if (sample.active === false || !Number.isFinite(+sample.valuePx) || +sample.valuePx <= 0) return sample;
+    const relativeDeviation = Math.abs(+sample.valuePx - canonicalPx) / canonicalPx;
+    const accepted = relativeDeviation <= tolerance + 1e-9;
+    accepted ? acceptedCount++ : rejectedCount++;
+    return { ...sample, accepted, relativeDeviation };
+  });
+  const acceptedValues = classified
+    .filter(sample => sample.active !== false && sample.accepted !== false)
+    .map(sample => +sample.valuePx);
+  return {
+    samples: classified,
+    canonicalPx,
+    madPx: medianAbsoluteDeviation(acceptedValues, canonicalPx) || 0,
+    acceptedCount,
+    rejectedCount
+  };
+}
+
+function registerRegionNibSample(region, valuePx, analysis) {
+  const sourceUid = region.uid || String(region.id);
+  const previous = (state.formula.nibSamples || []).filter(sample => sample.sourceUid !== sourceUid);
+  const sample = {
+    id: createStableId('nib-sample'),
+    sourceUid,
+    sourceMeasurementId: sourceUid,
+    sourceType: 'region',
+    valuePx,
+    active: true,
+    confidence: analysis.confidence,
+    estimator: analysis.stats?.estimator || 'pca-subpixel-perpendicular-median-v2',
+    threshold: Number.isFinite(+analysis.threshold) ? +analysis.threshold : null,
+    stats: structuredCloneSafe(analysis.stats || {}),
+    geometry: { spaceId: 'image-px', points: structuredCloneSafe(region.points) },
+    representativeSection: {
+      spaceId: 'image-px',
+      points: structuredCloneSafe(analysis.representativePoints || [])
+    },
+    createdAt: new Date().toISOString()
+  };
+  const clustered = classifyNibSampleCluster([...previous, sample].slice(-60), .10, state.formula.nibPx);
+  state.formula.nibSamples = clustered.samples;
+  const classifiedSample = clustered.samples.find(item => item.id === sample.id) || sample;
+  return {
+    sample: classifiedSample,
+    samples: clustered.samples,
+    canonicalPx: clustered.canonicalPx,
+    aggregation: {
+      method: 'densest-relative-cluster-median',
+      toleranceRelative: .10,
+      valuePx: clustered.canonicalPx,
+      madPx: clustered.madPx,
+      acceptedCount: clustered.acceptedCount,
+      rejectedCount: clustered.rejectedCount
+    }
+  };
+}
+
+async function analyzeCalibrationRegion(region, rollbackSnapshot = null) {
   if (!state.image || !region?.points?.length) return;
+  normalizeQuadObject(region);
+  const safeRollback = structuredCloneSafe(rollbackSnapshot || captureSnapshot());
+  const previousActiveRegionId = safeRollback.formula?.calibration?.regionObjectId || null;
+  const token = ++state.calibrationAnalysisToken;
   state.formula.analysis.status = 'running';
   analysisOverlay.hidden = false;
-  statusText.textContent = 'מנתח את עובי הקולמוס באזור שסומן…';
+  statusText.textContent = 'מודד חתכים יציבים בתוך אזור הכיול…';
   renderFormulaUI();
   await new Promise(resolve => setTimeout(resolve, 30));
-  const wasActiveCalibration = state.formula.calibration?.regionObjectId === region.id;
   try {
     const raster = rasterizeImageQuad(region.points, 600);
-    const analysis = computeImageMetrics(raster.canvas, { region: true, maxDimension: 600 });
-    const mappedPoints = analysis.nib.points.map(raster.mapPoint);
+    const analysis = computeRegionNibMetrics(raster.canvas, { threshold: sourceInkThreshold() });
+    if (token !== state.calibrationAnalysisToken) return;
+    const mappedPoints = analysis.points.map(raster.mapPoint);
     const calibratedLength = distance(mappedPoints[0], mappedPoints[1]);
+    const aggregation = registerRegionNibSample(region, calibratedLength, {
+      ...analysis,
+      representativePoints: mappedPoints,
+      stats: {
+        ...analysis.stats,
+        rasterValuePx: analysis.length,
+        sourceValuePx: calibratedLength
+      }
+    });
 
-    state.objects = state.objects.filter(object => !(object.type === 'nib' && object.regionId === region.id));
+    if (!aggregation.sample.accepted || !aggregation.canonicalPx) {
+      const rejectedSample = structuredCloneSafe(aggregation.sample);
+      const deviation = rejectedSample.relativeDeviation;
+      restoreSnapshot(safeRollback);
+      state.formula.nibSamples = [
+        ...(state.formula.nibSamples || []).filter(sample => sample.id !== rejectedSample.id),
+        rejectedSample
+      ].slice(-60);
+      state.activeCalibrationRegionId = previousActiveRegionId || state.formula.calibration?.regionObjectId || null;
+      statusText.textContent = Number.isFinite(deviation)
+        ? `הדגימה שונה מן הכיול היציב ב־${fmt(deviation * 100, 1)}% ולכן לא החליפה אותו`
+        : 'הדגימה לא התאימה לכיול היציב ולכן לא החליפה אותו';
+      renderFormulaUI();
+      return;
+    }
+
+    const hasLockedBaseline =
+      safeRollback.formula?.calibration?.verified === true ||
+      (safeRollback.formula?.nibSamples || []).some(sample => sample.active !== false && sample.locked === true);
+    if (hasLockedBaseline) {
+      const validationSamples = structuredCloneSafe(aggregation.samples);
+      const validationRecord = {
+        sampleId: aggregation.sample.id,
+        valuePx: aggregation.sample.valuePx,
+        accepted: true,
+        confidence: aggregation.sample.confidence ?? null,
+        createdAt: new Date().toISOString()
+      };
+      restoreSnapshot(safeRollback);
+      state.formula.nibSamples = validationSamples;
+      state.formula.calibration = {
+        ...(state.formula.calibration || {}),
+        verified: true,
+        aggregation: aggregation.aggregation,
+        validations: [
+          ...(state.formula.calibration?.validations || []),
+          validationRecord
+        ].slice(-60)
+      };
+      state.activeCalibrationRegionId = state.formula.calibration?.regionObjectId || null;
+      statusText.textContent = 'הדגימה תואמת את הכיול הידני המאומת; מקור הכיול הידני נשאר פעיל';
+      renderFormulaUI();
+      return;
+    }
+
+    replaceCalibrationOverlays(region, false);
     const nibObject = makeObject('nib', mappedPoints, {
       color: TOOL_COLORS.nib,
       lineWidth: 3,
@@ -353,57 +855,94 @@ async function analyzeCalibrationRegion(region) {
       auto: true,
       role: 'region-nib',
       category: 'nib',
-      confidence: analysis.nibConfidence || null
+      confidence: analysis.confidence,
+      sampleId: aggregation.sample.id,
+      sampleAccepted: true
     });
     state.objects.push(nibObject);
     region.calibrationPx = calibratedLength;
-    region.confidence = analysis.nibConfidence || null;
+    region.calibrationCanonicalPx = aggregation.canonicalPx;
+    region.confidence = analysis.confidence;
+    region.sampleId = aggregation.sample.id;
+    region.sampleAccepted = true;
+    region.analysisStats = structuredCloneSafe(analysis.stats);
     region.provenance.modifiedAt = new Date().toISOString();
-    state.formula.nibPx = calibratedLength;
+    state.activeCalibrationRegionId = region.id;
+    state.formula.nibPx = aggregation.canonicalPx;
     state.formula.calibration = {
-      method: 'region',
+      ...(state.formula.calibration || {}),
+      id: state.formula.calibration?.id || `nib-calibration_${state.projectMeta.id || createStableId('project')}`,
+      method: 'region-cross-section-median',
+      algorithmVersion: 'pca-subpixel-perpendicular-median-v2',
       regionObjectId: region.id,
       objectId: nibObject.id,
-      valuePx: calibratedLength,
-      confidence: analysis.nibConfidence || null,
-      verified: false
+      valuePx: aggregation.canonicalPx,
+      confidence: analysis.confidence,
+      verified: false,
+      aggregation: aggregation.aggregation
     };
     state.formula.analysis = {
+      ...state.formula.analysis,
       status: 'done',
-      nibConfidence: analysis.nibConfidence || 0,
+      nibConfidence: analysis.confidence || 0,
       gapConfidence: 0,
       threshold: analysis.threshold
     };
-    for (const kastel of state.objects.filter(object => object.type === 'kastel' && object.guides?.source !== 'manual')) {
-      initializeKastelGuides(kastel, true);
+    for (const kastel of state.objects.filter(object => object.type === 'kastel')) {
+      initializeKastelGuides(kastel);
     }
     state.selectedId = region.id;
-    statusText.textContent = `עובי הקולמוס כויל מן האזור: ${fmt(calibratedLength, 1)} פיקסלים`;
+    statusText.textContent = `הכיול הפעיל נקבע: 1.00 עובי קולמוס · ${aggregation.aggregation.acceptedCount} דגימות עקביות`;
   } catch (error) {
+    if (token !== state.calibrationAnalysisToken) return;
     console.error(error);
-    state.objects = state.objects.filter(object => !(object.type === 'nib' && object.regionId === region.id));
-    region.calibrationPx = null;
-    state.formula.analysis.status = 'failed';
-    const fallback = wasActiveCalibration ? activateFallbackNibCalibration(region.id) : null;
-    statusText.textContent = fallback
-      ? `לא זוהה עובי יציב באזור; הכיול הקודם נשאר פעיל (${fmt(state.formula.nibPx, 1)} פיקסלים)`
-      : wasActiveCalibration
-        ? 'לא זוהה עובי יציב באזור והכיול בוטל. נסה תחום צר ומייצג יותר'
-        : 'לא זוהה עובי יציב באזור. הכיול הפעיל לא השתנה';
+    const hadPreviousCalibration = Number.isFinite(+safeRollback.formula?.nibPx) && +safeRollback.formula.nibPx > 0;
+    restoreSnapshot(safeRollback);
+    state.activeCalibrationRegionId = previousActiveRegionId || state.formula.calibration?.regionObjectId || null;
+    statusText.textContent = hadPreviousCalibration
+      ? 'לא נמצא חתך קולמוס יציב באזור; הכיול הקודם נשאר פעיל. סמן מקטע ישר ורציף בלבד'
+      : 'לא נמצא חתך קולמוס יציב. סמן אזור צר סביב מקטע ישר ורציף, ללא פינה או הסתעפות';
   } finally {
-    analysisOverlay.hidden = true;
-    renderAll();
+    if (token === state.calibrationAnalysisToken) {
+      analysisOverlay.hidden = true;
+      renderAll();
+    }
   }
 }
 
 function activateFallbackNibCalibration(excludedRegionId = null) {
   const fallback = [...state.objects].reverse().find(object =>
-    object.type === 'nib' && (!excludedRegionId || object.regionId !== excludedRegionId)
+    object.type === 'nib' &&
+    object.sampleAccepted !== false &&
+    (!excludedRegionId || object.regionId !== excludedRegionId)
   );
   if (!fallback) {
-    state.formula.nibPx = null;
-    state.formula.calibration = null;
-    return null;
+    const stored = (state.formula.nibSamples || []).filter(sample => sample.active !== false && sample.accepted !== false);
+    const valuePx = numericMedian(stored.map(sample => sample.valuePx));
+    if (!valuePx) {
+      state.formula.nibPx = null;
+      state.formula.calibration = null;
+      return null;
+    }
+    const madPx = medianAbsoluteDeviation(stored.map(sample => sample.valuePx), valuePx) || 0;
+    state.formula.nibPx = valuePx;
+    state.formula.calibration = {
+      ...(state.formula.calibration || {}),
+      method: 'stored-sample-median',
+      regionObjectId: null,
+      objectId: null,
+      valuePx,
+      confidence: numericMedian(stored.map(sample => sample.confidence).filter(Number.isFinite)) || null,
+      verified: stored.every(sample => sample.confidence === 1),
+      aggregation: {
+        method: 'median',
+        valuePx,
+        madPx,
+        acceptedCount: stored.length,
+        rejectedCount: (state.formula.nibSamples || []).filter(sample => sample.active !== false && sample.accepted === false).length
+      }
+    };
+    return { stored: true, valuePx };
   }
   const valuePx = distance(fallback.points[0], fallback.points[1]);
   state.formula.nibPx = valuePx;
@@ -420,15 +959,26 @@ function activateFallbackNibCalibration(excludedRegionId = null) {
 
 function initializeKastelGuides(kastel, force = false) {
   if (!kastel || kastel.type !== 'kastel') return;
-  if (!force && kastel.guides?.source === 'manual') return;
   const heightPx = (distance(kastel.points[0], kastel.points[3]) + distance(kastel.points[1], kastel.points[2])) / 2 || 1;
   const fallbackThickness = state.formula.nibPx
     ? clamp(state.formula.nibPx / heightPx, .005, .46)
     : .18;
+  if (!force && kastelHasManualGuide(kastel.guides)) {
+    if (!Number.isFinite(kastel.guides.roofBottomT)) kastel.guides.suggestedRoofBottomT = fallbackThickness;
+    if (!Number.isFinite(kastel.guides.seatTopT)) kastel.guides.suggestedSeatTopT = 1 - fallbackThickness;
+    kastel.provenance = kastel.provenance || {};
+    kastel.provenance.modifiedAt = new Date().toISOString();
+    renderAll();
+    return;
+  }
   let guides = {
-    roofBottomT: fallbackThickness,
-    seatTopT: 1 - fallbackThickness,
-    source: state.formula.nibPx ? 'nib-default' : 'default',
+    roofBottomT: null,
+    seatTopT: null,
+    suggestedRoofBottomT: fallbackThickness,
+    suggestedSeatTopT: 1 - fallbackThickness,
+    roofSource: null,
+    seatSource: null,
+    source: 'unresolved',
     confidence: 0
   };
   const detected = detectKastelInkBands(kastel);
@@ -544,14 +1094,28 @@ function detectKastelInkBands(kastel) {
     if (active(y)) { seatStart = y; quiet = 0; }
     else if (++quiet >= 3) break;
   }
+  if (seatStart <= roofEnd + 4) return null;
+  const valleyStart = Math.min(height - 1, roofEnd + 2);
+  const valleyEnd = Math.max(valleyStart + 1, seatStart - 1);
+  let valleySum = 0;
+  let valleyCount = 0;
+  for (let y = valleyStart; y < valleyEnd; y++) {
+    valleySum += smooth[y];
+    valleyCount++;
+  }
+  const valleyRatio = valleyCount ? (valleySum / valleyCount) / Math.max(1, peak) : 1;
+  const separation = clamp(1 - valleyRatio, 0, 1);
+  if (separation < .34) return null;
   const roofBottomT = clamp((roofEnd + 1) / height, .03, .46);
   const seatTopT = clamp(seatStart / height, .54, .97);
   const edgeFit = (1 - Math.min(.3, roofStart / height)) * (1 - Math.min(.3, (height - 1 - seatEnd) / height));
   return {
     roofBottomT,
     seatTopT,
+    roofSource: 'auto',
+    seatSource: 'auto',
     source: 'auto',
-    confidence: clamp(edgeFit * (peak / Math.max(1, xEnd - xStart)) * 2.4, .15, .92),
+    confidence: clamp(edgeFit * separation * (peak / Math.max(1, xEnd - xStart)) * 3.2, .15, .92),
     threshold
   };
 }
@@ -566,6 +1130,34 @@ function exportImage() {
   context.drawImage(state.image, 0, 0);
   for (const object of state.objects) drawObjectToContext(context, object);
   out.toBlob(blob => downloadBlob(blob, 'מדידאות-מראה-סופר.png'), 'image/png');
+}
+function exportOverlayUnit() {
+  return Math.max(1, Math.max(state.image?.width || 1, state.image?.height || 1) / 1400);
+}
+function drawExportLine(context, a, b) {
+  context.beginPath();
+  context.moveTo(a.x, a.y);
+  context.lineTo(b.x, b.y);
+  context.stroke();
+}
+function drawExportScaleNote(context, point, text, color, unit) {
+  context.save();
+  context.font = `700 ${11 * unit}px -apple-system, BlinkMacSystemFont, "Segoe UI", Arial`;
+  const width = context.measureText(text).width + 12 * unit;
+  const height = 20 * unit;
+  const x = clamp(point.x - width / 2, 2 * unit, Math.max(2 * unit, state.image.width - width - 2 * unit));
+  const y = clamp(point.y - 28 * unit, 2 * unit, Math.max(2 * unit, state.image.height - height - 2 * unit));
+  context.fillStyle = 'rgba(255,255,255,.94)';
+  context.fillRect(x, y, width, height);
+  context.strokeStyle = color;
+  context.lineWidth = Math.max(1, unit);
+  context.setLineDash([]);
+  context.strokeRect(x, y, width, height);
+  context.fillStyle = '#111827';
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
+  context.fillText(text, x + width / 2, y + height / 2);
+  context.restore();
 }
 function drawObjectToContext(context, object) {
   const points = object.points;
@@ -597,33 +1189,61 @@ function drawObjectToContext(context, object) {
     if (points.length >= 3) context.closePath();
     if (object.fillEnabled && points.length >= 3) context.fill();
     context.stroke();
-    if (object.type === 'kastel' && points.length === 4) {
+    const selectedObject = state.objects.find(item => item.id === state.selectedId);
+    const exportOverlayActive = object.id === state.selectedId ||
+      (selectedObject?.type === 'thirds' && selectedObject.kastelId === object.id);
+    if (object.type === 'kastel' && points.length === 4 && exportOverlayActive) {
+      const unit = exportOverlayUnit();
       context.save();
-      context.setLineDash([10, 8]);
+      context.strokeStyle = object.color;
+      context.lineWidth = 1.5 * unit;
+      context.setLineDash([7 * unit, 6 * unit]);
       for (const t of [1 / 3, 2 / 3]) {
-        let p = interp(points[0], points[3], t), q = interp(points[1], points[2], t);
-        context.beginPath(); context.moveTo(p.x, p.y); context.lineTo(q.x, q.y); context.stroke();
+        const left = interp(points[0], points[3], t);
+        const right = interp(points[1], points[2], t);
+        drawExportLine(context, left, right);
       }
-      if (state.formula.nibPx) {
-        const topWidthPx = distance(points[0], points[1]);
-        const bottomWidthPx = distance(points[3], points[2]);
-        context.globalAlpha = .42;
-        for (let index = 1; index <= Math.floor(Math.min(topWidthPx, bottomWidthPx) / state.formula.nibPx); index++) {
-          const topT = index * state.formula.nibPx / topWidthPx;
-          const bottomT = index * state.formula.nibPx / bottomWidthPx;
-          if (topT >= .995 || bottomT >= .995) break;
-          let p = interp(points[0], points[1], topT), q = interp(points[3], points[2], bottomT);
-          context.beginPath(); context.moveTo(p.x, p.y); context.lineTo(q.x, q.y); context.stroke();
-        }
-      }
-      if (object.guides) {
-        context.globalAlpha = .9;
+      const tickLayout = kastelNibTickLayout(object, 1);
+      if (tickLayout) {
+        const { topWidthImage, divisions, step } = tickLayout;
+        context.save();
+        context.globalAlpha = .68;
+        context.strokeStyle = object.color;
+        context.lineWidth = 1.25 * unit;
         context.setLineDash([]);
-        context.lineWidth *= 1.4;
-        for (const t of [object.guides.roofBottomT, object.guides.seatTopT]) {
-          const p = interp(points[0], points[3], t), q = interp(points[1], points[2], t);
-          context.beginPath(); context.moveTo(p.x, p.y); context.lineTo(q.x, q.y); context.stroke();
+        for (let index = step; index <= divisions; index += step) {
+          const topT = index * state.formula.nibPx / topWidthImage;
+          if (topT >= .995) break;
+          const top = interp(points[0], points[1], topT);
+          const topTarget = interp(points[3], points[2], topT);
+          const tickLength = 8 * unit;
+          const topInside = interp(top, topTarget, Math.min(1, tickLength / Math.max(1, distance(top, topTarget))));
+          drawExportLine(context, top, topInside);
         }
+        context.restore();
+        if (step > 1) {
+          drawExportScaleNote(
+            context,
+            midpoint(points[0], points[1]),
+            `שנתה = ${step} עובי קולמוס`,
+            object.color,
+            unit
+          );
+        }
+      }
+      const guideSpecs = kastelGuideSpecs(object.guides);
+      if (guideSpecs.length) {
+        context.save();
+        context.globalAlpha = .9;
+        context.lineWidth = 2.5 * unit;
+        for (const { t, color, dash } of guideSpecs) {
+          const left = interp(points[0], points[3], t);
+          const right = interp(points[1], points[2], t);
+          context.strokeStyle = color;
+          context.setLineDash(dash.map(value => value * unit));
+          drawExportLine(context, left, right);
+        }
+        context.restore();
       }
       context.restore();
     }
@@ -632,7 +1252,7 @@ function drawObjectToContext(context, object) {
     if (object.type === 'angle' && points.length >= 3) {
       context.beginPath(); context.moveTo(points[1].x, points[1].y); context.lineTo(points[2].x, points[2].y); context.stroke();
     }
-  } else if (object.type === 'thirds') {
+  } else if (object.type === 'thirds' && object.id === state.selectedId) {
     const point = points[0];
     const size = 10;
     context.beginPath();
@@ -719,6 +1339,10 @@ async function serializeProjectV3() {
   const preservedCategories = (base.taxonomy?.categories || []).filter(category =>
     category?.id && !builtInCategories.some(builtIn => builtIn.id === category.id)
   );
+  const activeAcceptedSamples = (captured.formula.nibSamples || []).filter(sample =>
+    sample.active !== false && sample.accepted !== false
+  );
+  const measurementIds = new Set(captured.measurements.map(measurement => String(measurement.id)));
   const activeCalibration = captured.formula.nibPx ? {
     ...((base.calibrations || []).find(item => item.id === calibrationId) || {}),
     id: calibrationId,
@@ -727,8 +1351,23 @@ async function serializeProjectV3() {
     method: captured.formula.calibration?.method || 'legacy',
     regionObjectId: captured.formula.calibration?.regionObjectId || null,
     sampleMeasurementId: captured.formula.calibration?.objectId || null,
+    sampleIds: activeAcceptedSamples.map(sample => sample.id).filter(Boolean),
+    sampleMeasurementIds: [...new Set(activeAcceptedSamples
+      .map(sample => sample.sourceMeasurementId || sample.sourceUid)
+      .filter(identifier => identifier != null && measurementIds.has(String(identifier)))
+      .map(String))],
     confidence: captured.formula.calibration?.confidence ?? null,
     verified: captured.formula.calibration?.verified ?? false,
+    algorithmVersion: captured.formula.calibration?.algorithmVersion || null,
+    validations: structuredCloneSafe(captured.formula.calibration?.validations || []),
+    samples: structuredCloneSafe(captured.formula.nibSamples || []),
+    aggregation: structuredCloneSafe(captured.formula.calibration?.aggregation || {
+      method: 'single',
+      valuePx: captured.formula.nibPx,
+      madPx: 0,
+      acceptedCount: 1,
+      rejectedCount: 0
+    }),
     provenance: {
       ...((base.calibrations || []).find(item => item.id === calibrationId)?.provenance || {}),
       origin: captured.formula.calibration?.verified ? 'human' : 'assisted',
@@ -740,17 +1379,51 @@ async function serializeProjectV3() {
   const preservedCustomVariables = (base.taxonomy?.customVariables || []).filter(variable =>
     variable?.id && !capturedCustomVariables.some(current => current.id === variable.id)
   );
+  const balanceRuleTemplate = {
+    id: 'rule.balance.symmetric-area.10pct.v1',
+    version: '1.0.0',
+    labelHe: 'איזון שטחים — סטייה מותרת עד 10%',
+    status: 'draft',
+    evaluatorAvailable: false,
+    relationType: 'balance-pair',
+    metricId: 'manual-outline-area.v1',
+    scope: {
+      glyph: 'א',
+      requiredRoles: ['aleph.yod.upper', 'aleph.yod.lower']
+    },
+    calculation: {
+      type: 'symmetric-relative-difference',
+      operator: 'symmetric-relative-difference',
+      expression: 'abs(a-b)/((a+b)/2)',
+      formulaDisplay: '|A-B| / ((A+B)/2)'
+    },
+    passWhen: { operator: 'less-than-or-equal', value: .10 },
+    maxInclusive: .10,
+    missingInputResult: 'needs-review',
+    template: true
+  };
+  const existingRuleSets = Array.isArray(base.ruleSets) ? base.ruleSets : [];
+  const ruleSets = existingRuleSets.some(rule => rule?.id === balanceRuleTemplate.id)
+    ? existingRuleSets
+    : [balanceRuleTemplate, ...existingRuleSets];
+  const ruleResults = (Array.isArray(base.ruleResults) ? base.ruleResults : []).map(result => ({
+    ...result,
+    status: 'stale',
+    needsRecompute: true,
+    invalidatedAt: now,
+    invalidationReason: 'project-saved-without-rule-recomputation'
+  }));
   return {
     ...base,
     format: 'mirror-sofer.measure-stam.project',
-    schemaVersion: '3.0.0',
+    schemaVersion: '3.1.0',
     project: {
       ...(base.project || {}),
       id: captured.projectMeta.id,
       title: captured.projectMeta.title || 'פרויקט מדידאות',
       createdAt: captured.projectMeta.createdAt,
       updatedAt: now,
-      appVersion: '2026.07.31d',
+      appVersion: '2026.07.31f',
       locale: 'he-IL'
     },
     source: {
@@ -779,8 +1452,12 @@ async function serializeProjectV3() {
     formula: captured.formula,
     measurements: captured.measurements,
     samples: Array.isArray(base.samples) ? base.samples : [],
-    ruleSets: Array.isArray(base.ruleSets) ? base.ruleSets : [],
+    relations: Array.isArray(base.relations) ? base.relations : [],
+    ruleSets,
+    ruleResults,
+    referenceSets: Array.isArray(base.referenceSets) ? base.referenceSets : [],
     modelRuns: Array.isArray(base.modelRuns) ? base.modelRuns : [],
+    derivedState: { ...(base.derivedState || {}), rulesNeedRecompute: true, updatedAt: now },
     uiState: { ...(base.uiState || {}), view: captured.view },
     legacy: { ...(base.legacy || {}), nextId: captured.nextId }
   };
@@ -803,6 +1480,9 @@ function serializeMeasurementV3(object, stableIdMap = new Map()) {
     formulaKey: object.formulaKey || null
   };
   copy.geometry = { ...(copy.geometry || {}), ...measurementGeometry(object) };
+  delete copy.points;
+  delete copy.segments;
+  delete copy.closed;
   copy.metrics = { ...(copy.metrics || {}), ...measurementMetrics(object) };
   const judgments = Array.isArray(copy.judgments) ? structuredCloneSafe(copy.judgments) : [];
   const primaryHumanIndex = judgments.findIndex(item => item?.source === 'human' && item?.role === 'primary-ui');
@@ -834,7 +1514,13 @@ function serializeMeasurementV3(object, stableIdMap = new Map()) {
 }
 
 function measurementGeometry(object) {
-  const common = { spaceId: 'image-px', points: structuredCloneSafe(object.points || []) };
+  const points = structuredCloneSafe(object.points || []);
+  const width = state.image?.width || 0;
+  const height = state.image?.height || 0;
+  const normalizedPoints = width && height
+    ? points.map(point => ({ x: point.x / width, y: point.y / height }))
+    : null;
+  const common = { spaceId: 'image-px', points, normalizedPoints };
   if (object.type === 'area') {
     return { ...common, type: 'quadratic-path', closed: object.closed !== false, segments: structuredCloneSafe(object.segments || []) };
   }
@@ -850,20 +1536,34 @@ function activeNibCalibrationId() {
 }
 
 function measurementMetrics(object) {
-  if (object.type === 'area') return { areaPx2: measuredArea(object) };
+  if (object.type === 'area') {
+    const areaPx2 = measuredArea(object);
+    return {
+      metricId: 'manual-outline-area.v1',
+      areaPx2,
+      areaNib2: state.formula.nibPx ? areaPx2 / (state.formula.nibPx ** 2) : null,
+      calibrationId: activeNibCalibrationId()
+    };
+  }
   if (['length', 'nib', 'gap'].includes(object.type) && object.points.length >= 2) {
     const lengthPx = distance(object.points[0], object.points[1]);
     return {
+      metricId: object.type === 'nib'
+        ? 'nib-width-line.v1'
+        : object.type === 'gap'
+          ? 'gap-length.v1'
+          : 'line-length.v1',
       lengthPx,
       lengthNib: state.formula.nibPx ? lengthPx / state.formula.nibPx : null,
       calibrationId: activeNibCalibrationId()
     };
   }
-  if (object.type === 'angle') return { angleDeg: objectAngle(object) };
+  if (object.type === 'angle') return { metricId: 'axis-deviation-angle.v1', angleDeg: objectAngle(object) };
   if (object.type === 'kastel' && object.points.length === 4) {
     const widthPx = (distance(object.points[0], object.points[1]) + distance(object.points[3], object.points[2])) / 2;
     const heightPx = (distance(object.points[0], object.points[3]) + distance(object.points[1], object.points[2])) / 2;
     return {
+      metricId: 'kastel-frame.v1',
       widthPx,
       heightPx,
       widthNib: state.formula.nibPx ? widthPx / state.formula.nibPx : null,
@@ -878,13 +1578,20 @@ function measurementMetrics(object) {
     if (kastel) {
       const value = thirdsValues(kastel, object.points[0]);
       return {
+        metricId: 'kastel-position.v1',
         verticalFrameFraction: value.yPct / 100,
         verticalThirdDeviationPct: value.yDev,
         horizontalNibFromRight: value.xNibFromRight
       };
     }
   }
-  if (object.type === 'nibRegion') return { calibratedNibPx: object.calibrationPx || null, confidence: object.confidence || null };
+  if (object.type === 'nibRegion') {
+    return {
+      metricId: 'nib-region-calibration.v2',
+      calibratedNibPx: object.calibrationPx || null,
+      confidence: object.confidence || null
+    };
+  }
   return {};
 }
 
@@ -935,6 +1642,20 @@ $('projectInput').addEventListener('change', event => {
           if (translated) nextFormula.calibration[key] = translated;
         }
       }
+      const activeCalibrationObjectId = nextFormula.calibration?.objectId || null;
+      const activeCalibrationRegionId = nextFormula.calibration?.regionObjectId || null;
+      let visibleCalibrationRegionId = activeCalibrationRegionId;
+      if (prepared.objects.some(object => ['nib', 'nibRegion'].includes(object.type))) {
+        const fallbackCalibration = [...prepared.objects].reverse().find(object => object.type === 'nib');
+        const keepNibId = activeCalibrationObjectId || fallbackCalibration?.id || null;
+        const keepRegionId = activeCalibrationRegionId || fallbackCalibration?.regionId || null;
+        visibleCalibrationRegionId = keepRegionId;
+        prepared.objects = prepared.objects.filter(object => {
+          if (!['nib', 'nibRegion'].includes(object.type)) return true;
+          if (object.type === 'nibRegion') return object.id === keepRegionId;
+          return object.id === keepNibId || (keepRegionId && object.regionId === keepRegionId);
+        });
+      }
       const importedNextId = Number.isSafeInteger(+migrated.nextId) && +migrated.nextId > 0
         ? +migrated.nextId
         : 0;
@@ -948,6 +1669,12 @@ $('projectInput').addEventListener('change', event => {
       state.projectMeta = migrated.projectMeta;
       state.sourceMeta = migrated.sourceMeta;
       state.projectDocument = migrated.projectDocument;
+      state.activeCalibrationRegionId = visibleCalibrationRegionId || null;
+      cancelCalibrationAnalysis();
+      state.pointers.clear();
+      state.pinchStart = null;
+      state.activePointerId = null;
+      state.interactionBefore = null;
       state.draft = null;
       state.draftHistory = [];
       state.selectedId = null;
@@ -985,6 +1712,9 @@ function migrateProjectData(data) {
     const image = data.source?.image;
     const calibration = data.calibrations?.find(item => item.id === data.activeNibCalibrationId) || data.calibrations?.[0];
     const formulaSeed = structuredCloneSafe(data.formula || {});
+    if (!formulaSeed.nibSamples?.length && Array.isArray(calibration?.samples)) {
+      formulaSeed.nibSamples = structuredCloneSafe(calibration.samples);
+    }
     formulaSeed.variables = [
       ...(formulaSeed.variables || []),
       ...(data.taxonomy?.customVariables || [])
@@ -999,7 +1729,9 @@ function migrateProjectData(data) {
         objectId: calibration.sampleMeasurementId,
         valuePx: calibration.valuePx,
         confidence: calibration.confidence,
-        verified: calibration.verified
+        verified: calibration.verified,
+        algorithmVersion: calibration.algorithmVersion,
+        aggregation: calibration.aggregation
       };
     }
     return {
@@ -1102,7 +1834,7 @@ function normalizeLoadedObject(object) {
   if (normalized.geometry?.type && !supportedGeometryTypes.has(normalized.geometry.type)) {
     throw new Error('Unsupported measurement geometry type');
   }
-  if (!Array.isArray(normalized.points) && Array.isArray(normalized.geometry?.points)) {
+  if (Array.isArray(normalized.geometry?.points)) {
     normalized.points = structuredCloneSafe(normalized.geometry.points);
   }
   if (!Array.isArray(normalized.points)) throw new Error('Invalid measurement geometry');
@@ -1111,6 +1843,9 @@ function normalizeLoadedObject(object) {
     : { x: +point?.x, y: +point?.y });
   if (normalized.points.some(point => !Number.isFinite(point.x) || !Number.isFinite(point.y))) {
     throw new Error('Invalid measurement geometry');
+  }
+  if (['kastel', 'nibRegion'].includes(normalized.type) && normalized.points.length === 4) {
+    normalized.points = normalizeQuadPoints(normalized.points);
   }
   const minimumPoints = { area: 3, length: 2, angle: 2, kastel: 4, thirds: 1, nib: 2, nibRegion: 4, gap: 2 };
   if (normalized.points.length < minimumPoints[normalized.type]) throw new Error('Incomplete measurement geometry');
@@ -1130,11 +1865,38 @@ function normalizeLoadedObject(object) {
     modifiedAt: new Date().toISOString()
   };
   if (normalized.type === 'area') {
-    normalized.closed = normalized.closed !== false;
-    if (!Array.isArray(normalized.segments) && Array.isArray(normalized.geometry?.segments)) {
+    normalized.closed = normalized.geometry?.closed ?? normalized.closed ?? true;
+    if (Array.isArray(normalized.geometry?.segments)) {
       normalized.segments = structuredCloneSafe(normalized.geometry.segments);
     }
     ensureAreaSegments(normalized);
+  }
+  if (normalized.type === 'kastel' && normalized.guides) {
+    const guides = normalized.guides;
+    const validSource = source => ['auto', 'manual'].includes(source);
+    const sharedSource = validSource(guides.source) ? guides.source : null;
+    const roofSource = validSource(guides.roofSource) ? guides.roofSource : sharedSource;
+    const seatSource = validSource(guides.seatSource) ? guides.seatSource : sharedSource;
+    const roofResolved = Number.isFinite(guides.roofBottomT) && validSource(roofSource);
+    const seatResolved = Number.isFinite(guides.seatTopT) && validSource(seatSource);
+    const oldRoofValue = Number.isFinite(guides.roofBottomT) ? guides.roofBottomT : null;
+    const oldSeatValue = Number.isFinite(guides.seatTopT) ? guides.seatTopT : null;
+    guides.suggestedRoofBottomT = Number.isFinite(guides.suggestedRoofBottomT)
+      ? guides.suggestedRoofBottomT
+      : oldRoofValue;
+    guides.suggestedSeatTopT = Number.isFinite(guides.suggestedSeatTopT)
+      ? guides.suggestedSeatTopT
+      : oldSeatValue;
+    guides.roofBottomT = roofResolved ? oldRoofValue : null;
+    guides.seatTopT = seatResolved ? oldSeatValue : null;
+    guides.roofSource = roofResolved ? roofSource : null;
+    guides.seatSource = seatResolved ? seatSource : null;
+    guides.source = roofResolved && seatResolved
+      ? roofSource === seatSource ? roofSource : 'mixed'
+      : roofResolved || seatResolved
+        ? (roofSource || seatSource) === 'manual' ? 'manual-partial' : 'auto-partial'
+        : 'unresolved';
+    if (!roofResolved && !seatResolved) guides.confidence = 0;
   }
   return normalized;
 }

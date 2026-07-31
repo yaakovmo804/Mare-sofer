@@ -12,7 +12,7 @@
   <title>מדידאות — מראה סופר</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="icon.svg" />
-  <link rel="stylesheet" href="styles.css?v=20260731d" />
+  <link rel="stylesheet" href="styles.css?v=20260731f" />
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -61,7 +61,7 @@
           <button class="tool" data-tool="length"><span class="tool-icon">⌁</span><span>אורך חופשי</span></button>
           <button class="tool" data-tool="angle"><span class="tool-icon">∠</span><span>זווית מנקודה לנקודה</span></button>
           <button class="tool" data-tool="kastel"><span class="tool-icon">◇</span><span>קעסטעל</span></button>
-          <button class="tool" data-tool="thirds"><span class="tool-icon">⅓</span><span>נקודת חוק השלישים</span></button>
+          <button class="tool" data-tool="thirds"><span class="tool-icon">⅓</span><span>בדיקת מיקום בקעסטעל</span></button>
         </section>
 
         <section class="tool-section edit-tools">
@@ -82,11 +82,11 @@
         <div id="emptyState" class="empty-state">
           <div class="empty-icon">✦</div>
           <h2>העלה צילום של אות, מילה או שורה</h2>
-          <p>התמונה נטענת מיד. ניתוח עובי קולמוס ומרווחים מופעל רק בלחיצה.</p>
+          <p>התמונה נטענת מיד. הכיול נקבע רק מאזור מסומן או מקו ידני.</p>
         </div>
         <div id="analysisOverlay" class="analysis-overlay" hidden>
           <div class="spinner" aria-hidden="true"></div>
-          <span>מנתח עובי קולמוס ומרווחים…</span>
+          <span>מבצע בדיקה כללית — ללא שינוי כיול…</span>
         </div>
         <canvas id="canvas"></canvas>
         <div class="statusbar">
@@ -108,15 +108,18 @@
 
           <div id="nibTab" class="tab-panel active">
             <div class="metric-grid">
-              <div class="metric"><span>עובי מכויל</span><strong id="nibMetric">—</strong></div>
+              <div class="metric"><span>יחידת היסוד</span><strong id="nibMetric">—</strong><small id="nibMetricDetail">טרם כויל</small></div>
               <div class="metric"><span>מרווח מצוי</span><strong id="commonGapMetric">—</strong></div>
             </div>
-            <p id="analysisNote" class="microcopy">ליציבות, הניתוח אינו מופעל אוטומטית. אפשר להפעילו לפי הצורך או לסמן ידנית.</p>
-            <label>עובי קולמוס בפיקסלים
-              <input id="nibPxInput" type="number" min="0.1" step="0.1" placeholder="טרם כויל" />
-            </label>
+            <p id="analysisNote" class="microcopy">הבדיקה הכללית אינה משנה כיול. לקביעת 1 עובי קולמוס השתמש בכיול מאזור או בקו ידני.</p>
+            <details class="technical-details calibration-details">
+              <summary>ערך חישובי מתקדם</summary>
+              <label>עובי הקולמוס בפיקסלים
+                <input id="nibPxInput" type="number" min="0.1" step="0.1" placeholder="טרם כויל" />
+              </label>
+            </details>
             <div class="button-row">
-              <button id="analyzeBtn" class="btn compact" type="button">ניתוח נוסחת הכתב</button>
+              <button id="analyzeBtn" class="btn compact" type="button">בדיקה כללית (ללא כיול)</button>
               <button id="startNibRegionBtn" class="btn compact primary" type="button">כיול מאזור</button>
               <button id="startNibBtn" class="btn compact" type="button">קו ידני</button>
             </div>
@@ -170,7 +173,7 @@
           </div>
           <label>שקיפות מילוי<input id="fillAlphaInput" type="range" min="0" max="80" value="18" /></label>
           <label class="check"><input id="fillEnabledInput" type="checkbox" checked /> מילוי פנימי</label>
-          <p class="microcopy">אורכים ומרווחים מוצגים קודם ביחידות עובי קולמוס, ובמקביל בפיקסלים. שטחים נשמרים בפיקסלים².</p>
+          <p class="microcopy">אורכים ומרווחים מוצגים ביחידות עובי קולמוס. ערך הפיקסלים נשמר רק לצורך החישוב. שטחים נשמרים בפיקסלים².</p>
           <div hidden aria-hidden="true">
             <select id="unitSelect"><option value="kulmus" selected>עובי קולמוס</option></select>
             <label id="scaleLabel">פיקסלים ליחידה ידנית<input id="scaleInput" type="number" min="0.001" step="0.1" value="1" /></label>
@@ -186,7 +189,13 @@
 
         <section id="kastelGuidesPanel" class="property-section" hidden>
           <h2>גג, מושב וחוק השלישים</h2>
-          <p class="microcopy">המסגרת קובעת את ראש הגג ותחתית המושב. הקווים הפנימיים מזוהים כהצעה וניתנים לדייק.</p>
+          <p class="microcopy">שני הקווים המקווקווים מחלקים את הגובה בלבד. שנתות הרוחב מופיעות לאורך השפה העליונה לפי עובי הקולמוס.</p>
+          <p id="guideStatus" class="microcopy">הקווים טרם זוהו.</p>
+          <div class="guide-legend" aria-label="מקרא קווי הקעסטעל">
+            <span class="thirds">⅓ / ⅔</span>
+            <span class="roof">תחתית הגג</span>
+            <span class="seat">ראש המושב</span>
+          </div>
           <label>תחתית הגג<input id="roofGuideInput" type="range" min="20" max="700" value="180" /></label>
           <label>ראש המושב<input id="seatGuideInput" type="range" min="300" max="980" value="820" /></label>
         </section>
@@ -208,19 +217,21 @@
       <p><b>שטח ואיזון לובן:</b> אפשר להוסיף עשרות נקודות סביב התחום וללחוץ „סגירת השטח”. נגיעה בכל נקודה קיימת מאפשרת לגרור אותה, לרבות הנקודה הראשונה.</p>
       <p><b>עיגול מקטע:</b> גע ביהלום שבין שתי נקודות וגרור אותו, או בחר מקטע ולחץ „עיגול המקטע”.</p>
       <p><b>מחיקת נקודה:</b> גע בנקודה כדי לבחור אותה, ולאחר מכן לחץ „מחיקת נקודה”. במצב בחירה ניתן גם לגרור נקודה למקום מדויק.</p>
-      <p><b>עובי קולמוס:</b> גרור אזור צר סביב מקטע מייצג. האפליקציה תחלץ ממנו את עובי הקולמוס; אפשר גם לסמן קו ידני.</p>
-      <p><b>מרווחים:</b> בחר משתנה, סמן שתי נקודות, וקבל את המרחק בפיקסלים וביחידות קולמוס.</p>
+      <p><b>מגע:</b> מדידה ועריכת נקודות נעשות ב־Apple Pencil בלבד. הזזה וזום נעשים בשתי אצבעות. במחשב אפשר לעבוד בעכבר.</p>
+      <p><b>עובי קולמוס:</b> גרור אזור צר סביב מקטע ישר ורציף, כך שייראה מעט נייר משני צדי הדיו. אזור שנחתך בתוך הדיו, פינה או הסתעפות יידחו. האפליקציה מודדת חתכים רבים, קובעת חציון יציב ומסמנת דגימה שחורגת ביותר מ־10% בלי לשנות את הכיול הפעיל; סימון הכיול החדש מחליף את הקודם.</p>
+      <p><b>מרווחים:</b> בחר משתנה, סמן שתי נקודות, וקבל את המרחק ביחידות עובי קולמוס. ערך הפיקסלים נשאר זמין תחת „פרטים חישוביים”.</p>
       <p><b>זווית:</b> שתי נקודות. ברירת המחדל מציגה את הסטייה מן הציר הקרוב, ולכן מתקבלים ערכים כגון 0°, 12° ו־13° ולא זווית משלימה.</p>
-      <p><b>קעסטעל:</b> גרור מסגרת סביב האות. חוק השלישים מוצג בגובה בלבד; לרוחב מופיעים סימונים לפי עובי הקולמוס. קווי תחתית הגג וראש המושב ניתנים לדייק.</p>
+      <p><b>קעסטעל:</b> גרור מסגרת סביב האות. רק הקעסטעל הנבחר מציג את שני קווי השליש בגובה ואת שנתות עובי הקולמוס בשפה העליונה. קווי תחתית הגג וראש המושב מוצגים רק לאחר זיהוי או קביעה ידנית.</p>
+      <p><b>שמירת נתונים:</b> קובץ JSON שומר תמונה, כיול, גאומטריה, מדדים וסיווגים. הוא כולל תבנית לכלל איזון של 10%, אך אינו מאמן מנוע בינה לבדו; לשם כך צריך לתייג רכיבים מאומתים ולאגד קבצים במסד נתונים.</p>
       <button id="closeHelp" class="btn primary">סגור</button>
     </dialog>
 
     <button id="helpBtn" class="floating-help" aria-label="עזרה">?</button>
   </div>
-  <script src="app-1.js?v=20260731d"></script>
-  <script src="app-2.js?v=20260731d"></script>
-  <script src="app-3.js?v=20260731d"></script>
-  <script src="app-4.js?v=20260731d"></script>
-  <script src="stability-patch.js?v=20260731d"></script>
+  <script src="app-1.js?v=20260731f"></script>
+  <script src="app-2.js?v=20260731f"></script>
+  <script src="app-3.js?v=20260731f"></script>
+  <script src="app-4.js?v=20260731f"></script>
+  <script src="stability-patch.js?v=20260731f"></script>
 </body>
 </html>

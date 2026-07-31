@@ -64,10 +64,15 @@ const state = {
   nextId: 1,
   pointers: new Map(),
   pinchStart: null,
+  activePointerId: null,
+  interactionBefore: null,
+  calibrationAnalysisToken: 0,
+  activeCalibrationRegionId: null,
   formula: {
     nibPx: null,
     commonGapPx: null,
     calibration: null,
+    nibSamples: [],
     selectedVariable: 'common-gap',
     variables: structuredCloneSafe(BUILTIN_VARIABLES),
     analysis: { status: 'idle', nibConfidence: 0, gapConfidence: 0, threshold: null }
@@ -102,6 +107,7 @@ const ui = {
 };
 
 let dpr = Math.max(1, window.devicePixelRatio || 1);
+const TOUCH_CAPABLE_DEVICE = (navigator.maxTouchPoints || 0) > 0 || 'ontouchstart' in window;
 
 function structuredCloneSafe(value) {
   return typeof structuredClone === 'function' ? structuredClone(value) : JSON.parse(JSON.stringify(value));
@@ -211,6 +217,19 @@ function pointLineDistance(point, a, b) {
   return distance(point, { x: a.x + t * (b.x - a.x), y: a.y + t * (b.y - a.y) });
 }
 function interp(a, b, t) { return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }; }
+function normalizeQuadPoints(points) {
+  if (!Array.isArray(points) || points.length !== 4) return points;
+  const sorted = points.map(point => ({ x: +point.x, y: +point.y })).sort((a, b) => a.y - b.y || a.x - b.x);
+  const top = sorted.slice(0, 2).sort((a, b) => a.x - b.x);
+  const bottom = sorted.slice(2).sort((a, b) => a.x - b.x);
+  return [top[0], top[1], bottom[1], bottom[0]];
+}
+function normalizeQuadObject(object) {
+  if (object && ['kastel', 'nibRegion'].includes(object.type) && object.points?.length === 4) {
+    object.points = normalizeQuadPoints(object.points);
+  }
+  return object;
+}
 function hexToRgba(hex, alpha) {
   const clean = hex.replace('#', '');
   const n = Number.parseInt(clean, 16);
@@ -245,13 +264,21 @@ function captureSnapshot() {
     nextId: state.nextId
   };
 }
+function cancelCalibrationAnalysis() {
+  state.calibrationAnalysisToken++;
+  analysisOverlay.hidden = true;
+  if (state.formula.analysis?.status === 'running') state.formula.analysis.status = 'idle';
+}
 function restoreSnapshot(snapshotData) {
   state.objects = structuredCloneSafe(snapshotData.objects || []);
   state.formula = mergeFormula(snapshotData.formula || {});
+  cancelCalibrationAnalysis();
+  state.activeCalibrationRegionId = state.formula.calibration?.regionObjectId || null;
   state.nextId = snapshotData.nextId || nextAvailableId();
   state.selectedId = null;
   state.selectedPoint = null;
   state.selectedSegment = null;
+  analysisOverlay.hidden = true;
   renderAll();
 }
 function snapshot() {
@@ -302,10 +329,15 @@ function mergeFormula(saved) {
   for (const variable of saved.variables || []) {
     if (!variables.some(v => v.id === variable.id)) variables.push(variable);
   }
+  const nibSamples = (saved.nibSamples || saved.calibration?.samples || [])
+    .filter(sample => Number.isFinite(+sample?.valuePx) && +sample.valuePx > 0)
+    .map(sample => ({ ...sample, valuePx: +sample.valuePx }))
+    .slice(-60);
   return {
     nibPx: Number.isFinite(+saved.nibPx) && +saved.nibPx > 0 ? +saved.nibPx : null,
     commonGapPx: Number.isFinite(+saved.commonGapPx) && +saved.commonGapPx > 0 ? +saved.commonGapPx : null,
     calibration: saved.calibration || null,
+    nibSamples,
     selectedVariable: variables.some(v => v.id === saved.selectedVariable) ? saved.selectedVariable : 'common-gap',
     variables,
     analysis: { status: 'idle', nibConfidence: 0, gapConfidence: 0, threshold: null, ...(saved.analysis || {}) }
@@ -315,14 +347,14 @@ function mergeFormula(saved) {
 function defaultName(type) {
   const names = {
     area: 'שטח ואיזון לובן', length: 'אורך', angle: 'זווית', kastel: 'קעסטעל',
-    thirds: 'נקודת חוק השלישים', nib: 'עובי קולמוס', nibRegion: 'אזור כיול קולמוס',
+    thirds: 'בדיקת מיקום בקעסטעל', nib: 'עובי קולמוס', nibRegion: 'אזור כיול קולמוס',
     gap: selectedVariableName()
   };
   return names[type] || 'מדידה';
 }
 function typeLabel(type) {
   const names = {
-    area: 'שטח', length: 'אורך', angle: 'זווית', kastel: 'קעסטעל', thirds: 'שלישים',
+    area: 'שטח', length: 'אורך', angle: 'זווית', kastel: 'קעסטעל', thirds: 'מיקום בקעסטעל',
     nib: 'קולמוס', nibRegion: 'אזור כיול', gap: 'מרווח'
   };
   return names[type] || 'מדידה';
@@ -575,7 +607,7 @@ function drawObject(object, selected, draft) {
     if ((!draft || object.closed) && points.length >= 3) ctx.closePath();
     if (object.fillEnabled && points.length >= 3) ctx.fill();
     ctx.stroke();
-    if (!draft && points.length >= 3) {
+    if (selected && !draft && points.length >= 3) {
       const center = imageToScreen(polygonCentroid(flattenedAreaPoints(object)));
       label(center, areaLabel(object), object.color);
     }
@@ -586,30 +618,33 @@ function drawObject(object, selected, draft) {
     if (points.length >= 3) ctx.closePath();
     if (object.fillEnabled && points.length >= 3) ctx.fill();
     ctx.stroke();
-    if (object.type === 'kastel' && !draft && points.length === 4) drawKastelGrid(points, object, object.color);
-    if (!draft && points.length >= 3) {
-      const center = imageToScreen(centroid(object.points));
-      label(center, object.type === 'kastel' ? 'קעסטעל' : 'אזור כיול', object.color);
+    const selectedObject = state.objects.find(item => item.id === state.selectedId);
+    const linkedProbeSelected = selectedObject?.type === 'thirds' && selectedObject.kastelId === object.id;
+    if (object.type === 'kastel' && (selected || linkedProbeSelected) && !draft && points.length === 4) {
+      drawKastelGrid(points, object, object.color);
     }
   } else if (['length', 'nib', 'gap'].includes(object.type)) {
     if (points.length > 1) {
       drawLine(points[0], points[1]);
       drawEndCaps(points[0], points[1], object.color);
-      label(midpoint(points[0], points[1]), lineLabel(object), object.color);
+      if (selected || draft) label(midpoint(points[0], points[1]), lineLabel(object), object.color);
     }
   } else if (object.type === 'angle') {
     if (points.length > 1) {
       drawLine(points[0], points[1]);
       drawEndCaps(points[0], points[1], object.color);
-      label(midpoint(points[0], points[1]), `${fmt(objectAngle(object), 1)}°`, object.color);
+      if (selected || draft) label(midpoint(points[0], points[1]), `${fmt(objectAngle(object), 1)}°`, object.color);
     }
     if (points.length > 2) drawLine(points[1], points[2]);
   } else if (object.type === 'thirds') {
-    drawCross(points[0], object.color);
+    if (selected) drawCross(points[0], object.color);
+    else drawProbeDot(points[0], object.color);
     const kastel = state.objects.find(item => item.id === object.kastelId);
-    if (kastel) {
+    if (selected && kastel) {
       const value = thirdsValues(kastel, object.points[0]);
-      const horizontal = state.formula.nibPx ? `${fmt(value.xNibFromRight, 2)} עובי קולמוס מימין` : `${fmt(value.xPct, 1)}%`;
+      const horizontal = state.formula.nibPx
+        ? `${fmt(value.xNibFromRight, 2)} עובי קולמוס מימין`
+        : 'רוחב: נדרש כיול';
       label(points[0], `גובה ${fmt(value.yPct, 1)}% · ${horizontal}`, object.color);
     }
   }
@@ -696,6 +731,15 @@ function drawCross(point, color) {
   drawLine({ x: point.x, y: point.y - 10 }, { x: point.x, y: point.y + 10 });
   ctx.restore();
 }
+function drawProbeDot(point, color) {
+  ctx.save();
+  ctx.fillStyle = color;
+  ctx.globalAlpha = .72;
+  ctx.beginPath();
+  ctx.arc(point.x, point.y, 3.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
 function label(point, text, color) {
   ctx.save();
   ctx.font = '700 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Arial';
@@ -713,52 +757,101 @@ function label(point, text, color) {
   ctx.fillText(text, point.x, y + 11.5);
   ctx.restore();
 }
+function kastelNibTickLayout(object, displayScale = state.view.scale) {
+  if (!state.formula.nibPx || !object?.points?.length) return null;
+  const topWidthImage = distance(object.points[0], object.points[1]);
+  if (!topWidthImage) return null;
+  const divisions = Math.floor(topWidthImage / state.formula.nibPx);
+  const screenSpacing = state.formula.nibPx * displayScale;
+  const step = Math.max(1, Math.ceil(18 / Math.max(1, screenSpacing)), Math.ceil(divisions / 12));
+  return { topWidthImage, divisions, step };
+}
+function kastelHasManualGuide(guides) {
+  if (!guides) return false;
+  if (guides.source === 'manual') return true;
+  return guides.roofSource === 'manual' || guides.seatSource === 'manual';
+}
+function kastelGuideSpecs(guides) {
+  if (!guides) return [];
+  const sharedSource = ['auto', 'manual'].includes(guides.source) ? guides.source : null;
+  const roofSource = guides.roofSource || sharedSource;
+  const seatSource = guides.seatSource || sharedSource;
+  return [
+    {
+      t: guides.roofBottomT,
+      color: '#0f766e',
+      dash: roofSource === 'manual' ? [] : [5, 5],
+      label: `תחתית הגג${roofSource === 'auto' ? ' — הצעה' : ''}`,
+      source: roofSource
+    },
+    {
+      t: guides.seatTopT,
+      color: '#2563eb',
+      dash: seatSource === 'manual' ? [] : [5, 5],
+      label: `ראש המושב${seatSource === 'auto' ? ' — הצעה' : ''}`,
+      source: seatSource
+    }
+  ].filter(guide => Number.isFinite(guide.t) && ['auto', 'manual'].includes(guide.source));
+}
 function drawKastelGrid(points, object, color) {
   ctx.save();
   ctx.setLineDash([7, 6]);
   ctx.strokeStyle = color;
   ctx.lineWidth = 1.5;
   for (const t of [1 / 3, 2 / 3]) {
-    drawLine(interp(points[0], points[3], t), interp(points[1], points[2], t));
+    const left = interp(points[0], points[3], t);
+    const right = interp(points[1], points[2], t);
+    drawLine(left, right);
   }
-  if (state.formula.nibPx) {
-    const topWidthImage = distance(object.points[0], object.points[1]);
-    const bottomWidthImage = distance(object.points[3], object.points[2]);
-    const divisions = Math.floor(Math.min(topWidthImage, bottomWidthImage) / state.formula.nibPx);
+  const tickLayout = kastelNibTickLayout(object);
+  if (tickLayout) {
+    const { topWidthImage, divisions, step } = tickLayout;
     ctx.save();
-    ctx.globalAlpha = .42;
-    ctx.setLineDash([3, 7]);
-    for (let index = 1; index <= divisions; index++) {
+    ctx.globalAlpha = .68;
+    ctx.setLineDash([]);
+    ctx.lineWidth = 1.25;
+    for (let index = step; index <= divisions; index += step) {
       const topT = index * state.formula.nibPx / topWidthImage;
-      const bottomT = index * state.formula.nibPx / bottomWidthImage;
-      if (topT >= .995 || bottomT >= .995) break;
-      drawLine(interp(points[0], points[1], topT), interp(points[3], points[2], bottomT));
+      if (topT >= .995) break;
+      const top = interp(points[0], points[1], topT);
+      const topTarget = interp(points[3], points[2], topT);
+      const topInside = interp(top, topTarget, Math.min(1, 8 / Math.max(1, distance(top, topTarget))));
+      drawLine(top, topInside);
     }
     ctx.restore();
+    if (step > 1) {
+      label(midpoint(points[0], points[1]), `שנתה = ${step} עובי קולמוס`, color);
+    }
   }
-  if (object.guides) {
+  const guideSpecs = kastelGuideSpecs(object.guides);
+  if (guideSpecs.length) {
     ctx.save();
-    ctx.setLineDash([]);
     ctx.lineWidth = 2.5;
     ctx.globalAlpha = .9;
-    for (const t of [object.guides.roofBottomT, object.guides.seatTopT]) {
-      if (!Number.isFinite(t)) continue;
-      drawLine(interp(points[0], points[3], t), interp(points[1], points[2], t));
+    for (const { t, color: guideColor, dash } of guideSpecs) {
+      const left = interp(points[0], points[3], t);
+      const right = interp(points[1], points[2], t);
+      ctx.strokeStyle = guideColor;
+      ctx.setLineDash(dash);
+      drawLine(left, right);
     }
     ctx.restore();
   }
   ctx.restore();
 }
 function areaLabel(object) {
-  return `${fmt(measuredArea(object), 0)} px²`;
+  return `${fmt(measuredArea(object), 0)} פיקסלים²`;
 }
 function lineLabel(object) {
   const px = distance(object.points[0], object.points[1]);
-  if (object.type === 'nib') return `עובי קולמוס: ${fmt(px, 1)} px`;
+  if (object.type === 'nib') {
+    const ratio = state.formula.nibPx ? px / state.formula.nibPx : 1;
+    return `${fmt(ratio, 2)} עובי קולמוס${object.sampleAccepted === false ? ' · דגימה חריגה' : ''}`;
+  }
   if (object.type === 'gap') {
     const ratio = state.formula.nibPx ? px / state.formula.nibPx : null;
-    return ratio ? `${variableName(object.formulaKey)}: ${fmt(ratio, 2)} עובי קולמוס` : `${fmt(px, 1)} px`;
+    return ratio ? `${variableName(object.formulaKey)}: ${fmt(ratio, 2)} עובי קולמוס` : 'נדרש כיול קולמוס';
   }
   if (state.formula.nibPx) return `${fmt(px / state.formula.nibPx, 2)} עובי קולמוס`;
-  return `${fmt(px, 1)} פיקסלים`;
+  return 'נדרש כיול קולמוס';
 }

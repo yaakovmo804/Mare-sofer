@@ -5,6 +5,7 @@ function commitDraft(message) {
   const object = state.draft;
   if (object.type === 'area') ensureAreaSegments(object);
   state.objects.push(object);
+  if (object.type === 'nib' && !object.regionId) replaceCalibrationOverlays(object);
   state.draft = null;
   state.draftHistory = [];
   state.selectedPoint = null;
@@ -13,6 +14,22 @@ function commitDraft(message) {
   statusText.textContent = message;
   selectObject(object.id);
   return object;
+}
+
+function replaceCalibrationOverlays(activeObject, cancelPending = true) {
+  if (!activeObject || !['nib', 'nibRegion'].includes(activeObject.type)) return;
+  if (cancelPending) cancelCalibrationAnalysis();
+  const removedIds = new Set(state.objects
+    .filter(object => object.id !== activeObject.id && ['nib', 'nibRegion'].includes(object.type))
+    .map(object => object.id));
+  state.objects = state.objects.filter(object =>
+    object.id === activeObject.id || !['nib', 'nibRegion'].includes(object.type)
+  );
+  if (state.formula.calibration) {
+    if (removedIds.has(state.formula.calibration.objectId)) state.formula.calibration.objectId = null;
+    if (removedIds.has(state.formula.calibration.regionObjectId)) state.formula.calibration.regionObjectId = null;
+  }
+  state.activeCalibrationRegionId = activeObject.type === 'nibRegion' ? activeObject.id : null;
 }
 
 function commitDragHistory(drag) {
@@ -42,27 +59,37 @@ function markObjectModified(object) {
   object.provenance.modifiedAt = new Date().toISOString();
 }
 
-function pointerMove(event) {
+function handleTouchPointerMove(event) {
   event.preventDefault();
   if (!state.pointers.has(event.pointerId)) return;
   state.pointers.set(event.pointerId, getPos(event));
-
-  if (state.pointers.size === 2 && state.pinchStart) {
-    const points = [...state.pointers.values()];
-    const ratio = distance(points[0], points[1]) / (state.pinchStart.distance || 1);
-    const newScale = clamp(state.pinchStart.scale * ratio, 0.03, 12);
-    const mid = state.pinchStart.midpoint;
-    const imageX = (mid.x - state.pinchStart.view.x) / state.pinchStart.scale;
-    const imageY = (mid.y - state.pinchStart.view.y) / state.pinchStart.scale;
-    state.view.scale = newScale;
-    state.view.x = mid.x - imageX * newScale;
-    state.view.y = mid.y - imageY * newScale;
-    zoomText.textContent = `${Math.round(newScale * 100)}%`;
-    draw();
+  if (state.pointers.size < 2) return;
+  const ids = state.pinchStart?.pointerIds || [];
+  if (ids.length !== 2 || !ids.every(id => state.pointers.has(id))) {
+    rebaseTouchGesture();
     return;
   }
+  const first = state.pointers.get(ids[0]);
+  const second = state.pointers.get(ids[1]);
+  const currentMidpoint = midpoint(first, second);
+  const ratio = distance(first, second) / Math.max(1, state.pinchStart.distance);
+  const newScale = clamp(state.pinchStart.scale * ratio, 0.03, 12);
+  state.view.scale = newScale;
+  state.view.x = currentMidpoint.x - state.pinchStart.anchorImage.x * newScale;
+  state.view.y = currentMidpoint.y - state.pinchStart.anchorImage.y * newScale;
+  zoomText.textContent = `${Math.round(newScale * 100)}%`;
+  draw();
+}
 
+function pointerMove(event) {
+  event.preventDefault();
+  if (event.pointerType === 'touch') {
+    handleTouchPointerMove(event);
+    return;
+  }
+  if (!isMeasurementPointer(event) || state.activePointerId !== event.pointerId) return;
   if (!state.dragging) return;
+  if (state.dragging.pointerId !== event.pointerId) return;
   const screenPoint = getPos(event);
   const imagePoint = screenToImage(screenPoint);
   const drag = state.dragging;
@@ -139,20 +166,35 @@ function pointerMove(event) {
   renderFormulaUI();
 }
 
-function pointerUp(event) {
+function endTouchPointer(event) {
   event.preventDefault();
   state.pointers.delete(event.pointerId);
-  if (state.pointers.size < 2) state.pinchStart = null;
+  try { canvas.releasePointerCapture(event.pointerId); } catch {}
+  if (state.pointers.size >= 2) rebaseTouchGesture();
+  else state.pinchStart = null;
+}
+
+function pointerUp(event) {
+  event.preventDefault();
+  if (event.pointerType === 'touch') {
+    endTouchPointer(event);
+    return;
+  }
+  if (!isMeasurementPointer(event) || state.activePointerId !== event.pointerId) return;
 
   const completedDrag = state.dragging;
   if (completedDrag?.type === 'drawRect' && state.draft) {
     const objectType = state.dragging.objectType;
+    state.draft.points = normalizeQuadPoints(state.draft.points);
     const width = distance(state.draft.points[0], state.draft.points[1]);
     const height = distance(state.draft.points[0], state.draft.points[3]);
     if (width * state.view.scale < 12 || height * state.view.scale < 12) {
       state.draft = null;
       statusText.textContent = objectType === 'kastel' ? 'הקעסטעל קטן מדי ובוטל' : 'אזור הכיול קטן מדי ובוטל';
       state.dragging = null;
+      state.interactionBefore = null;
+      state.activePointerId = null;
+      try { canvas.releasePointerCapture(event.pointerId); } catch {}
       renderAll();
       return;
     }
@@ -161,28 +203,56 @@ function pointerUp(event) {
       ? 'הקעסטעל נוצר. חוק השלישים והמדדים הותאמו'
       : 'אזור הכיול נוצר ומנותח כעת');
     if (objectType === 'kastel') initializeKastelGuides(object);
-    if (objectType === 'nibRegion') analyzeCalibrationRegion(object);
+    if (objectType === 'nibRegion') {
+      const rollbackSnapshot = state.interactionBefore;
+      analyzeCalibrationRegion(object, rollbackSnapshot);
+    }
   }
   if (completedDrag?.moved && ['handle', 'object'].includes(completedDrag.type)) {
     const movedObject = state.objects.find(item => item.id === completedDrag.id);
-    if (movedObject?.type === 'nibRegion') analyzeCalibrationRegion(movedObject);
-    if (movedObject?.type === 'kastel' && movedObject.guides?.source !== 'manual') {
-      initializeKastelGuides(movedObject, true);
+    if (movedObject?.type === 'nibRegion') {
+      const rollbackSnapshot = completedDrag.before;
+      normalizeQuadObject(movedObject);
+      analyzeCalibrationRegion(movedObject, rollbackSnapshot);
+    }
+    if (movedObject?.type === 'kastel') {
+      normalizeQuadObject(movedObject);
+      initializeKastelGuides(movedObject);
     }
   }
   if (completedDrag?.moved) renderAll();
   state.dragging = null;
+  state.interactionBefore = null;
+  state.activePointerId = null;
+  try { canvas.releasePointerCapture(event.pointerId); } catch {}
 }
 function pointerCancel(event) {
-  state.pointers.delete(event.pointerId);
-  if (state.pointers.size < 2) state.pinchStart = null;
+  if (event.pointerType === 'touch') {
+    endTouchPointer(event);
+    return;
+  }
+  if (state.activePointerId !== event.pointerId) return;
+  restoreInteractionState(state.interactionBefore);
+  cancelCalibrationAnalysis();
   state.dragging = null;
+  state.interactionBefore = null;
+  state.activePointerId = null;
+  statusText.textContent = 'הפעולה בוטלה ללא שינוי במדידות';
+  zoomText.textContent = `${Math.round(state.view.scale * 100)}%`;
+  renderAll();
 }
 
 canvas.addEventListener('pointerdown', pointerDown, { passive: false });
 canvas.addEventListener('pointermove', pointerMove, { passive: false });
 canvas.addEventListener('pointerup', pointerUp, { passive: false });
 canvas.addEventListener('pointercancel', pointerCancel, { passive: false });
+canvas.addEventListener('lostpointercapture', event => {
+  if (event.pointerType === 'touch') {
+    if (state.pointers.has(event.pointerId)) endTouchPointer(event);
+    return;
+  }
+  if (state.activePointerId === event.pointerId && state.interactionBefore) pointerCancel(event);
+});
 canvas.addEventListener('wheel', event => {
   if (!state.image) return;
   event.preventDefault();
@@ -210,13 +280,46 @@ function syncFormulaFromObject(object) {
       parentRegion.confidence = object.auto ? object.confidence ?? null : 1;
       markObjectModified(parentRegion);
     }
+    if (!object.auto) {
+      const sourceUid = object.uid || String(object.id);
+      const existing = (state.formula.nibSamples || []).find(sample => sample.sourceUid === sourceUid);
+      state.formula.nibSamples = [
+        ...(state.formula.nibSamples || [])
+          .filter(sample => sample.sourceUid !== sourceUid)
+          .map(sample => ({ ...sample, active: false })),
+        {
+          id: existing?.id || createStableId('nib-sample'),
+          sourceUid,
+          sourceMeasurementId: sourceUid,
+          sourceType: object.regionId ? 'region-corrected' : 'manual-line',
+          valuePx: value,
+          accepted: true,
+          active: true,
+          locked: true,
+          confidence: 1,
+          estimator: 'human-line-v1',
+          createdAt: existing?.createdAt || new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        }
+      ].slice(-60);
+      object.sampleAccepted = true;
+    }
     state.formula.calibration = {
+      ...(state.formula.calibration || {}),
+      id: state.formula.calibration?.id || `nib-calibration_${state.projectMeta.id || 'project'}`,
       method: object.regionId ? (object.auto ? 'region' : 'region-corrected') : object.auto ? 'global-auto' : 'manual-line',
       regionObjectId: object.regionId || null,
       objectId: object.id,
       valuePx: value,
       confidence: object.auto ? state.formula.analysis.nibConfidence || null : 1,
-      verified: !object.auto
+      verified: !object.auto,
+      aggregation: {
+        method: object.auto ? 'automatic-single' : 'human-verified-single',
+        valuePx: value,
+        madPx: 0,
+        acceptedCount: 1,
+        rejectedCount: 0
+      }
     };
   }
   if (object.type === 'gap' && object.formulaKey === 'common-gap' && value > 0) state.formula.commonGapPx = value;
@@ -227,15 +330,15 @@ function setTool(tool) {
   document.querySelectorAll('.tool[data-tool]').forEach(button => button.classList.toggle('active', button.dataset.tool === tool));
   if (TOOL_COLORS[tool]) ui.color.value = TOOL_COLORS[tool];
   const messages = {
-    pan: 'בחירה ועריכה: גע במדידה או בנקודה וגרור',
-    area: 'מדידת שטח ואיזון לובן: סמן נקודות סביב התחום',
+    pan: 'בחירה ועריכה ב־Apple Pencil; הזזה וזום בשתי אצבעות',
+    area: 'מדידת שטח ואיזון לובן: סמן נקודות ב־Apple Pencil',
     nib: 'עובי קולמוס: סמן שתי נקודות לרוחב עובי מייצג',
     nibRegion: 'כיול מאזור: גרור מסגרת סביב מקטע קולמוס מייצג',
     gap: `מרווחים: ${selectedVariableName()} — סמן שתי נקודות`,
     length: 'אורך חופשי: סמן שתי נקודות',
     angle: 'זווית: סמן שתי נקודות לאורך הקו',
     kastel: 'קעסטעל: גרור מסגרת סביב האות',
-    thirds: 'חוק השלישים: סמן נקודה בתוך הקעסטעל'
+    thirds: 'בדיקת מיקום: סמן נקודה בתוך הקעסטעל'
   };
   statusText.textContent = messages[tool] || 'מוכן';
   if (tool === 'nib' || tool === 'nibRegion') activateFormulaTab('nib');
@@ -264,6 +367,9 @@ $('clearBtn').addEventListener('click', () => {
   state.formula.nibPx = null;
   state.formula.commonGapPx = null;
   state.formula.calibration = null;
+  state.formula.nibSamples = [];
+  state.activeCalibrationRegionId = null;
+  cancelCalibrationAnalysis();
   statusText.textContent = 'כל הסימונים נוקו';
   renderAll();
 });
@@ -385,12 +491,20 @@ function deleteSelectedObject() {
   const deleted = state.objects.find(item => item.id === state.selectedId);
   state.objects = state.objects.filter(item => item.id !== state.selectedId);
   if (deleted?.type === 'nibRegion') {
+    cancelCalibrationAnalysis();
+    state.formula.nibSamples = (state.formula.nibSamples || []).filter(sample => sample.sourceUid !== (deleted.uid || String(deleted.id)));
     state.objects = state.objects.filter(item => item.regionId !== deleted.id);
+    if (state.activeCalibrationRegionId === deleted.id) state.activeCalibrationRegionId = null;
     if (state.formula.calibration?.regionObjectId === deleted.id) {
       activateFallbackNibCalibration(deleted.id);
     }
   }
   if (deleted?.type === 'nib') {
+    if (deleted.sampleId) {
+      state.formula.nibSamples = (state.formula.nibSamples || []).filter(sample => sample.id !== deleted.sampleId);
+    } else {
+      state.formula.nibSamples = (state.formula.nibSamples || []).filter(sample => sample.sourceUid !== (deleted.uid || String(deleted.id)));
+    }
     if (deleted.regionId) {
       const region = state.objects.find(item => item.id === deleted.regionId && item.type === 'nibRegion');
       if (region) {
@@ -446,11 +560,13 @@ ui.nibPx.addEventListener('change', () => {
   const value = +ui.nibPx.value;
   if (!Number.isFinite(value) || value <= 0) return;
   snapshot();
+  cancelCalibrationAnalysis();
   state.formula.nibPx = value;
   let object = [...state.objects].reverse().find(item => item.type === 'nib');
   if (!object && state.image) {
     object = makeObject('nib', defaultCenteredLine(value), { color: TOOL_COLORS.nib, name: 'עובי קולמוס — כיול ידני' });
     state.objects.push(object);
+    replaceCalibrationOverlays(object);
   } else if (object) {
     resizeLineToLength(object, value);
     object.auto = false;
@@ -464,16 +580,46 @@ ui.nibPx.addEventListener('change', () => {
     parentRegion.confidence = 1;
     markObjectModified(parentRegion);
   }
+  const sourceUid = object?.uid || `manual-value_${state.projectMeta.id || 'project'}`;
+  const existingSample = (state.formula.nibSamples || []).find(sample => sample.sourceUid === sourceUid);
+  state.formula.nibSamples = [
+    ...(state.formula.nibSamples || [])
+      .filter(sample => sample.sourceUid !== sourceUid)
+      .map(sample => ({ ...sample, active: false })),
+    {
+      id: existingSample?.id || createStableId('nib-sample'),
+      sourceUid,
+      sourceMeasurementId: sourceUid,
+      sourceType: parentRegion ? 'region-corrected' : 'manual-value',
+      valuePx: value,
+      accepted: true,
+      active: true,
+      locked: true,
+      confidence: 1,
+      estimator: 'human-value-v1',
+      createdAt: existingSample?.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }
+  ].slice(-60);
   state.formula.calibration = {
+    ...(state.formula.calibration || {}),
+    id: state.formula.calibration?.id || `nib-calibration_${state.projectMeta.id || 'project'}`,
     method: parentRegion ? 'region-corrected' : 'manual-value',
     regionObjectId: parentRegion?.id || null,
     objectId: object?.id || null,
     valuePx: value,
     confidence: 1,
-    verified: true
+    verified: true,
+    aggregation: {
+      method: 'human-verified-single',
+      valuePx: value,
+      madPx: 0,
+      acceptedCount: 1,
+      rejectedCount: 0
+    }
   };
   statusText.textContent = 'עובי הקולמוס עודכן';
-  for (const kastel of state.objects.filter(item => item.type === 'kastel' && item.guides?.source !== 'manual')) {
+  for (const kastel of state.objects.filter(item => item.type === 'kastel')) {
     initializeKastelGuides(kastel);
   }
   renderAll();
@@ -535,12 +681,36 @@ for (const [input, key] of [[ui.roofGuide, 'roofBottomT'], [ui.seatGuide, 'seatT
       input.dataset.editing = '1';
     }
     if (!object.guides) initializeKastelGuides(object);
-    object.guides[key] = clamp(+input.value / 1000, .02, .98);
-    if (object.guides.roofBottomT >= object.guides.seatTopT - .03) {
-      if (key === 'roofBottomT') object.guides.roofBottomT = object.guides.seatTopT - .03;
-      else object.guides.seatTopT = object.guides.roofBottomT + .03;
+    if (['auto', 'manual'].includes(object.guides.source)) {
+      object.guides.roofSource = object.guides.roofSource || object.guides.source;
+      object.guides.seatSource = object.guides.seatSource || object.guides.source;
     }
-    object.guides.source = 'manual';
+    const otherKey = key === 'roofBottomT' ? 'seatTopT' : 'roofBottomT';
+    const sourceKey = key === 'roofBottomT' ? 'roofSource' : 'seatSource';
+    const suggestedOtherKey = key === 'roofBottomT' ? 'suggestedSeatTopT' : 'suggestedRoofBottomT';
+    const otherValue = Number.isFinite(object.guides[otherKey])
+      ? object.guides[otherKey]
+      : object.guides[suggestedOtherKey];
+    let nextValue = clamp(+input.value / 1000, .02, .98);
+    if (Number.isFinite(otherValue)) {
+      nextValue = key === 'roofBottomT'
+        ? Math.min(nextValue, otherValue - .03)
+        : Math.max(nextValue, otherValue + .03);
+    }
+    object.guides[key] = clamp(nextValue, .02, .98);
+    object.guides[sourceKey] = 'manual';
+    const roofResolved = Number.isFinite(object.guides.roofBottomT);
+    const seatResolved = Number.isFinite(object.guides.seatTopT);
+    if (roofResolved && seatResolved) {
+      const sources = [object.guides.roofSource, object.guides.seatSource];
+      object.guides.source = sources.every(source => source === 'manual')
+        ? 'manual'
+        : sources.every(source => source === 'auto')
+          ? 'auto'
+          : 'mixed';
+    } else {
+      object.guides.source = 'manual-partial';
+    }
     markObjectModified(object);
     input.value = Math.round(object.guides[key] * 1000);
     draw();
@@ -599,7 +769,7 @@ function loadImageSource(source, resetProject, preparedImage = null) {
     }
     renderAll();
     for (const kastel of state.objects.filter(item => item.type === 'kastel' && !item.guides)) initializeKastelGuides(kastel);
-    if (resetProject) analyzeImage(false);
+    if (resetProject) statusText.textContent = 'התמונה נטענה. לקביעת 1 עובי קולמוס סמן אזור כיול צר ורציף';
   };
   if (preparedImage) {
     handleLoad();
@@ -616,20 +786,25 @@ async function analyzeImage(userInitiated) {
     return;
   }
   if (userInitiated) snapshot();
+  const token = ++state.calibrationAnalysisToken;
   state.formula.analysis.status = 'running';
   analysisOverlay.hidden = false;
   renderFormulaUI();
-  statusText.textContent = 'מנתח עובי קולמוס ומרווחים…';
+  statusText.textContent = 'מבצע בדיקה כללית — הכיול הפעיל לא ישתנה';
   await new Promise(resolve => setTimeout(resolve, 40));
   try {
     const analysis = computeImageMetrics(state.image);
+    if (token !== state.calibrationAnalysisToken) return;
     applyAnalysis(analysis);
   } catch (error) {
+    if (token !== state.calibrationAnalysisToken) return;
     console.error(error);
     state.formula.analysis.status = 'failed';
-    statusText.textContent = 'הזיהוי האוטומטי לא הצליח. ניתן לסמן ידנית';
+    statusText.textContent = 'הבדיקה הכללית לא הצליחה. לקביעת עובי קולמוס יש לסמן אזור כיול';
   } finally {
-    analysisOverlay.hidden = true;
-    renderAll();
+    if (token === state.calibrationAnalysisToken) {
+      analysisOverlay.hidden = true;
+      renderAll();
+    }
   }
 }

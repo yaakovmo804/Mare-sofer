@@ -65,17 +65,19 @@ function renderResults() {
   } else if (object.type === 'length') {
     const px = distance(object.points[0], object.points[1]);
     html += state.formula.nibPx
-      ? `<p class="result-emphasis">${fmt(px / state.formula.nibPx, 2)} עובי קולמוס</p><p>${fmt(px, 1)} פיקסלים</p>`
-      : `<p class="result-emphasis">${fmt(px, 1)} פיקסלים</p><p class="result-note">כייל עובי קולמוס כדי לקבל את התוצאה בשפת הכתב.</p>`;
+      ? `<p class="result-emphasis">${fmt(px / state.formula.nibPx, 2)} עובי קולמוס</p>${technicalPixelDetails(px)}`
+      : `<p class="result-emphasis">נדרש כיול קולמוס</p>${technicalPixelDetails(px)}`;
   } else if (object.type === 'nib') {
     const px = distance(object.points[0], object.points[1]);
-    html += `<p class="result-emphasis">${fmt(px, 1)} פיקסלים</p><p>כיול: 1 עובי קולמוס</p>`;
+    const ratio = state.formula.nibPx ? px / state.formula.nibPx : 1;
+    html += `<p class="result-emphasis">${fmt(ratio, 2)} עובי קולמוס</p>${technicalPixelDetails(px)}`;
+    if (object.sampleAccepted === false) html += '<p class="result-note">הדגימה חריגה ולא שינתה את הכיול הפעיל.</p>';
     if (object.auto) html += '<p class="result-note">הצעה אוטומטית. גרור את הקצוות לאזור מייצג כדי לאמת.</p>';
   } else if (object.type === 'gap') {
     const px = distance(object.points[0], object.points[1]);
     html += state.formula.nibPx
-      ? `<p class="result-emphasis">${fmt(px / state.formula.nibPx, 2)} עובי קולמוס</p><p>${fmt(px, 1)} פיקסלים</p>`
-      : `<p class="result-emphasis">${fmt(px, 1)} פיקסלים</p><p class="result-note">כייל עובי קולמוס כדי לקבל את המרווח בשפת הכתב.</p>`;
+      ? `<p class="result-emphasis">${fmt(px / state.formula.nibPx, 2)} עובי קולמוס</p>${technicalPixelDetails(px)}`
+      : `<p class="result-emphasis">נדרש כיול קולמוס</p>${technicalPixelDetails(px)}`;
     if (state.formula.commonGapPx) html += `<p>${fmt(px / state.formula.commonGapPx, 2)} מן המרווח המצוי</p>`;
   } else if (object.type === 'angle') {
     html += `<p class="result-emphasis">${fmt(objectAngle(object), 1)}°</p><p>ייחוס: ${angleReferenceLabel(object.angleRef || ui.angleRef.value)}</p>`;
@@ -83,28 +85,40 @@ function renderResults() {
     const widthPx = (distance(object.points[0], object.points[1]) + distance(object.points[3], object.points[2])) / 2;
     const heightPx = (distance(object.points[0], object.points[3]) + distance(object.points[1], object.points[2])) / 2;
     html += state.formula.nibPx
-      ? `<p class="result-emphasis">רוחב ${fmt(widthPx / state.formula.nibPx, 2)} · גובה ${fmt(heightPx / state.formula.nibPx, 2)} עובי קולמוס</p>`
-      : `<p class="result-emphasis">${fmt(widthPx, 1)} × ${fmt(heightPx, 1)} פיקסלים</p><p class="result-note">נדרש כיול קולמוס למדידות המבנה.</p>`;
+      ? `<p class="result-emphasis">רוחב ${fmt(widthPx / state.formula.nibPx, 2)} עובי קולמוס · גובה ${fmt(heightPx / state.formula.nibPx, 2)} עובי קולמוס</p>`
+      : '<p class="result-emphasis">נדרש כיול קולמוס</p>';
+    html += technicalPixelDetails(`${fmt(widthPx, 1)} × ${fmt(heightPx, 1)}`);
     html += '<p>חוק השלישים מחלק את גובה האות בלבד; סימוני הרוחב בנויים לפי עובי הקולמוס.</p>';
-    if (object.guides) {
-      const roofPx = heightPx * object.guides.roofBottomT;
-      const seatPx = heightPx * (1 - object.guides.seatTopT);
-      const innerPx = Math.max(0, heightPx - roofPx - seatPx);
-      const formatGuide = value => state.formula.nibPx ? `${fmt(value / state.formula.nibPx, 2)} עובי קולמוס` : `${fmt(value, 1)} px`;
-      html += `<p>עובי גג: <b>${formatGuide(roofPx)}</b></p>`;
-      html += `<p>חלל גג–מושב: <b>${formatGuide(innerPx)}</b></p>`;
-      html += `<p>עובי מושב: <b>${formatGuide(seatPx)}</b></p>`;
-      const guideNote = object.guides.source === 'auto'
-        ? 'זיהוי מסייע — ניתן לדייק במחוונים.'
-        : object.guides.source === 'manual'
-          ? 'קווי העזר תוקנו ידנית.'
-          : 'הצעת ברירת מחדל לפי עובי הקולמוס — מומלץ לאמת במחוונים.';
+    const guideSpecs = kastelGuideSpecs(object.guides);
+    if (guideSpecs.length) {
+      const roofGuide = guideSpecs.find(guide => guide.label.startsWith('תחתית הגג'));
+      const seatGuide = guideSpecs.find(guide => guide.label.startsWith('ראש המושב'));
+      const roofResolved = !!roofGuide;
+      const seatResolved = !!seatGuide;
+      const roofPx = roofResolved ? heightPx * roofGuide.t : null;
+      const seatPx = seatResolved ? heightPx * (1 - seatGuide.t) : null;
+      const innerPx = roofResolved && seatResolved ? Math.max(0, heightPx - roofPx - seatPx) : null;
+      const formatGuide = value => state.formula.nibPx ? `${fmt(value / state.formula.nibPx, 2)} עובי קולמוס` : 'נדרש כיול';
+      if (roofResolved) html += `<p>עובי גג: <b>${formatGuide(roofPx)}</b></p>`;
+      if (innerPx != null) html += `<p>חלל גג–מושב: <b>${formatGuide(innerPx)}</b></p>`;
+      if (seatResolved) html += `<p>עובי מושב: <b>${formatGuide(seatPx)}</b></p>`;
+      const hasAuto = guideSpecs.some(guide => guide.source === 'auto');
+      const hasManual = guideSpecs.some(guide => guide.source === 'manual');
+      const guideNote = hasAuto && hasManual
+        ? 'קו אחד נקבע ידנית והקו האחר הוא הצעת זיהוי.'
+        : hasAuto
+          ? 'זיהוי מסייע — ניתן לדייק במחוונים.'
+          : roofResolved && seatResolved
+            ? 'שני קווי העזר נקבעו ידנית.'
+            : 'רק קו אחד נקבע. הקו השני עדיין אינו מוצג.';
       html += `<p class="result-note">${guideNote}</p>`;
+    } else {
+      html += '<p class="result-note">תחתית הגג וראש המושב לא זוהו בוודאות. ניתן לקבוע אותם ידנית במחוונים.</p>';
     }
   } else if (object.type === 'nibRegion') {
-    html += '<p class="result-emphasis">אזור כיול קולמוס</p>';
+    const ratio = object.calibrationPx && state.formula.nibPx ? object.calibrationPx / state.formula.nibPx : 1;
     html += object.calibrationPx
-      ? `<p>${fmt(object.calibrationPx, 1)} פיקסלים = 1 עובי קולמוס</p><p class="result-note">הכיול הופק מתוך התחום שסומן.</p>`
+      ? `<p class="result-emphasis">${fmt(ratio, 2)} עובי קולמוס</p>${technicalPixelDetails(object.calibrationPx)}<p class="result-note">${object.sampleAccepted === false ? 'הדגימה חריגה ולא החליפה את הכיול הפעיל.' : 'הכיול הופק מחציון של חתכים יציבים בתוך התחום.'}</p>`
       : '<p class="result-note">מנתח את העובי בתוך האזור…</p>';
   } else if (object.type === 'thirds') {
     const kastel = state.objects.find(item => item.id === object.kastelId);
@@ -122,6 +136,11 @@ function renderResults() {
     html += `<p class="result-note">סיווג: ${object.assessment === 'reference' ? 'דוגמת ייחוס' : object.assessment === 'acceptable' ? 'תקין' : 'חריג'}</p>`;
   }
   results.innerHTML = html;
+}
+
+function technicalPixelDetails(value) {
+  const text = typeof value === 'number' ? `${fmt(value, 1)} פיקסלים` : `${value} פיקסלים`;
+  return `<details class="technical-details"><summary>פרטים חישוביים</summary><p>${text}</p></details>`;
 }
 
 function categoryName(id) {
@@ -190,11 +209,19 @@ function pointToQuadUV(points, point) {
 }
 
 function renderFormulaUI() {
-  $('nibMetric').textContent = state.formula.nibPx ? `${fmt(state.formula.nibPx, 1)} px` : '—';
+  $('nibMetric').textContent = state.formula.nibPx ? '1.00 עובי קולמוס' : '—';
+  const nibMetricDetail = $('nibMetricDetail');
+  if (nibMetricDetail) {
+    const accepted = (state.formula.nibSamples || []).filter(sample => sample.active !== false && sample.accepted !== false);
+    const rejected = (state.formula.nibSamples || []).filter(sample => sample.active !== false && sample.accepted === false);
+    nibMetricDetail.textContent = state.formula.nibPx
+      ? `${accepted.length || 1} דגימות עקביות${rejected.length ? ` · ${rejected.length} חריגות` : ''}`
+      : 'טרם כויל';
+  }
   $('commonGapMetric').textContent = state.formula.commonGapPx
     ? state.formula.nibPx
       ? `${fmt(state.formula.commonGapPx / state.formula.nibPx, 2)} עובי קולמוס`
-      : `${fmt(state.formula.commonGapPx, 1)} px`
+      : 'נדרש כיול'
     : '—';
   if (document.activeElement !== ui.nibPx) ui.nibPx.value = state.formula.nibPx ? state.formula.nibPx.toFixed(1) : '';
 
@@ -247,7 +274,7 @@ function renderFormulaUI() {
       labelText.textContent = variableName(key);
       const valueText = document.createElement('strong');
       const average = values.reduce((sum, value) => sum + value, 0) / values.length;
-      valueText.textContent = state.formula.nibPx ? `${fmt(average / state.formula.nibPx, 2)} עובי קולמוס` : `${fmt(average, 1)} px`;
+      valueText.textContent = state.formula.nibPx ? `${fmt(average / state.formula.nibPx, 2)} עובי קולמוס` : 'נדרש כיול';
       row.append(labelText, valueText);
       summary.append(row);
     }
@@ -267,11 +294,44 @@ function renderControls() {
   if (ui.category) ui.category.disabled = !selected;
   if (ui.assessment) ui.assessment.disabled = !selected;
   if (ui.note) ui.note.disabled = !selected;
+  const activeKastel = selected?.type === 'kastel'
+    ? selected
+    : selected?.type === 'thirds'
+      ? state.objects.find(item => item.id === selected.kastelId && item.type === 'kastel')
+      : null;
   const guidesPanel = $('kastelGuidesPanel');
-  if (guidesPanel) guidesPanel.hidden = selected?.type !== 'kastel';
-  if (selected?.type === 'kastel' && selected.guides) {
-    if (document.activeElement !== ui.roofGuide) ui.roofGuide.value = Math.round(selected.guides.roofBottomT * 1000);
-    if (document.activeElement !== ui.seatGuide) ui.seatGuide.value = Math.round(selected.guides.seatTopT * 1000);
+  if (guidesPanel) guidesPanel.hidden = !activeKastel;
+  if (ui.roofGuide) ui.roofGuide.disabled = selected?.type !== 'kastel';
+  if (ui.seatGuide) ui.seatGuide.disabled = selected?.type !== 'kastel';
+  if (activeKastel?.guides) {
+    const roofValue = Number.isFinite(activeKastel.guides.roofBottomT)
+      ? activeKastel.guides.roofBottomT
+      : activeKastel.guides.suggestedRoofBottomT ?? .18;
+    const seatValue = Number.isFinite(activeKastel.guides.seatTopT)
+      ? activeKastel.guides.seatTopT
+      : activeKastel.guides.suggestedSeatTopT ?? .82;
+    if (document.activeElement !== ui.roofGuide) ui.roofGuide.value = Math.round(roofValue * 1000);
+    if (document.activeElement !== ui.seatGuide) ui.seatGuide.value = Math.round(seatValue * 1000);
+    const guideStatus = $('guideStatus');
+    if (guideStatus) {
+      const specs = kastelGuideSpecs(activeKastel.guides);
+      const roofResolved = specs.some(guide => guide.label.startsWith('תחתית הגג'));
+      const seatResolved = specs.some(guide => guide.label.startsWith('ראש המושב'));
+      const status = !specs.length
+        ? 'הקווים טרם זוהו. כל מחוון קובע רק את הקו שלו.'
+        : roofResolved && seatResolved
+          ? specs.every(guide => guide.source === 'manual')
+            ? 'שני הקווים נקבעו ידנית.'
+            : specs.every(guide => guide.source === 'auto')
+              ? 'שני הקווים זוהו אוטומטית — מומלץ לאמת.'
+              : 'קו אחד ידני והקו האחר הוא הצעת זיהוי.'
+          : roofResolved
+            ? 'תחתית הגג נקבעה; ראש המושב טרם נקבע.'
+            : 'ראש המושב נקבע; תחתית הגג טרם נקבעה.';
+      guideStatus.textContent = selected?.type === 'thirds'
+        ? `${status} כדי לערוך, בחר את מסגרת הקעסטעל.`
+        : status;
+    }
   }
   $('scaleLabel').firstChild.textContent = ui.unit.value === 'kulmus'
     ? 'פיקסלים לקולמוס — גיבוי ידני'
@@ -365,25 +425,104 @@ function ensureCompatibleDraft(type) {
   return true;
 }
 
-function pointerDown(event) {
-  event.preventDefault();
-  if (event.button !== undefined && event.button !== 0) return;
-  try { canvas.setPointerCapture(event.pointerId); } catch {}
-  const screenPoint = getPos(event);
-  state.pointers.set(event.pointerId, screenPoint);
+function captureInteractionState() {
+  return {
+    objects: structuredCloneSafe(state.objects),
+    formula: structuredCloneSafe(state.formula),
+    draft: structuredCloneSafe(state.draft),
+    draftHistory: structuredCloneSafe(state.draftHistory),
+    selectedId: state.selectedId,
+    selectedPoint: structuredCloneSafe(state.selectedPoint),
+    selectedSegment: structuredCloneSafe(state.selectedSegment),
+    nextId: state.nextId,
+    view: { ...state.view },
+    history: state.history.slice(),
+    future: state.future.slice(),
+    activeCalibrationRegionId: state.activeCalibrationRegionId
+  };
+}
 
-  if (state.pointers.size === 2) {
-    const points = [...state.pointers.values()];
-    state.dragging = null;
-    state.pinchStart = {
-      distance: distance(points[0], points[1]),
-      scale: state.view.scale,
-      midpoint: midpoint(points[0], points[1]),
-      view: { ...state.view }
-    };
+function restoreInteractionState(saved) {
+  if (!saved) return;
+  state.objects = structuredCloneSafe(saved.objects);
+  state.formula = mergeFormula(saved.formula || {});
+  state.draft = structuredCloneSafe(saved.draft);
+  state.draftHistory = structuredCloneSafe(saved.draftHistory || []);
+  state.selectedId = saved.selectedId;
+  state.selectedPoint = structuredCloneSafe(saved.selectedPoint);
+  state.selectedSegment = structuredCloneSafe(saved.selectedSegment);
+  state.nextId = saved.nextId;
+  state.view = { ...saved.view };
+  state.history = (saved.history || []).slice();
+  state.future = (saved.future || []).slice();
+  state.activeCalibrationRegionId = saved.activeCalibrationRegionId || null;
+}
+
+function isMeasurementPointer(event) {
+  if (event.pointerType === 'pen') return true;
+  return event.pointerType === 'mouse' && !TOUCH_CAPABLE_DEVICE;
+}
+
+function clearIdleTouchesForPen() {
+  if (state.pinchStart || state.pointers.size !== 1) return false;
+  for (const pointerId of state.pointers.keys()) {
+    try { canvas.releasePointerCapture(pointerId); } catch {}
+  }
+  state.pointers.clear();
+  return true;
+}
+
+function rebaseTouchGesture() {
+  if (state.pointers.size < 2) {
+    state.pinchStart = null;
     return;
   }
-  if (!state.image) return;
+  const entries = [...state.pointers.entries()].slice(0, 2);
+  const startMidpoint = midpoint(entries[0][1], entries[1][1]);
+  state.pinchStart = {
+    pointerIds: entries.map(entry => entry[0]),
+    distance: Math.max(1, distance(entries[0][1], entries[1][1])),
+    scale: state.view.scale,
+    anchorImage: screenToImage(startMidpoint)
+  };
+}
+
+function handleTouchPointerDown(event) {
+  event.preventDefault();
+  if (state.activePointerId !== null) return;
+  try { canvas.setPointerCapture(event.pointerId); } catch {}
+  state.pointers.set(event.pointerId, getPos(event));
+  if (state.pointers.size === 2) {
+    rebaseTouchGesture();
+    statusText.textContent = 'הזזה וזום בשתי אצבעות';
+  } else if (state.pointers.size === 1) {
+    statusText.textContent = 'מדידה ב־Apple Pencil; הזזה וזום בשתי אצבעות';
+  }
+}
+
+function pointerDown(event) {
+  event.preventDefault();
+  if (event.pointerType === 'touch') {
+    handleTouchPointerDown(event);
+    return;
+  }
+  if (event.pointerType === 'pen') clearIdleTouchesForPen();
+  if (!isMeasurementPointer(event)) return;
+  if (event.pointerType === 'mouse' && event.button !== 0) return;
+  if (state.pointers.size || state.activePointerId !== null) return;
+  if (state.formula.analysis.status === 'running') {
+    statusText.textContent = 'הכיול עדיין נבדק; אפשר להמשיך מיד בסיום הבדיקה';
+    return;
+  }
+  try { canvas.setPointerCapture(event.pointerId); } catch {}
+  state.activePointerId = event.pointerId;
+  const screenPoint = getPos(event);
+  if (!state.image) {
+    state.activePointerId = null;
+    try { canvas.releasePointerCapture(event.pointerId); } catch {}
+    return;
+  }
+  state.interactionBefore = captureInteractionState();
 
   const imagePoint = screenToImage(screenPoint);
   const hit = hitTest(imagePoint);
@@ -393,6 +532,7 @@ function pointerDown(event) {
     const dragBase = {
       id: hit.object.id,
       originScreen: screenPoint,
+      pointerId: event.pointerId,
       before: captureSnapshot(),
       historyCommitted: false,
       moved: false
@@ -423,7 +563,7 @@ function pointerDown(event) {
     if (!hit) {
       state.selectedPoint = null;
       state.selectedSegment = null;
-      state.dragging = { type: 'pan', start: screenPoint, view: { ...state.view } };
+      state.dragging = { type: 'pan', pointerId: event.pointerId, start: screenPoint, view: { ...state.view } };
       renderControls();
     }
     return;
@@ -437,6 +577,7 @@ function pointerDown(event) {
   else if (state.tool === 'angle') handleFixedPointTool('angle', imagePoint, 2);
   else if (state.tool === 'kastel') handleRectPointer('kastel', imagePoint);
   else if (state.tool === 'thirds') handleThirdsPointer(imagePoint);
+  if (state.dragging && state.dragging.pointerId == null) state.dragging.pointerId = event.pointerId;
 }
 
 function handleAreaPointer(imagePoint) {
@@ -496,7 +637,13 @@ function handleFixedPointTool(type, imagePoint, count) {
   const index = nearestPointIndex(state.draft.points, imagePoint, 19);
   if (index >= 0) {
     state.selectedPoint = { target: 'draft', index };
-    state.dragging = { type: 'draftHandle', handle: index };
+    state.dragging = {
+      type: 'draftHandle',
+      handle: index,
+      originScreen: imageToScreen(imagePoint),
+      beforeDraft: structuredCloneSafe(state.draft),
+      moved: false
+    };
     statusText.textContent = 'הנקודה נבחרה. גרור לתיקון או לחץ מחיקת נקודה';
     renderAll();
     return;
@@ -520,7 +667,9 @@ function handleRectPointer(type, imagePoint) {
   if (!ensureCompatibleDraft(type)) return;
   state.draft = makeObject(type, [imagePoint, imagePoint, imagePoint, imagePoint], {
     color: TOOL_COLORS[type],
-    closed: false
+    closed: false,
+    fillEnabled: false,
+    fillAlpha: 0
   });
   state.dragging = { type: 'drawRect', objectType: type, start: imagePoint };
   state.selectedPoint = null;
@@ -541,7 +690,7 @@ function handleThirdsPointer(imagePoint) {
   );
   if (!kastel) {
     statusText.textContent = state.objects.some(item => item.type === 'kastel')
-      ? 'יש לסמן את נקודת השלישים בתוך הקעסטעל'
+      ? 'יש לסמן את נקודת הבדיקה בתוך הקעסטעל'
       : 'יש ליצור קעסטעל תחילה';
     return;
   }
@@ -549,5 +698,5 @@ function handleThirdsPointer(imagePoint) {
   const object = makeObject('thirds', [imagePoint], { color: TOOL_COLORS.thirds, kastelId: kastel.id });
   state.objects.push(object);
   selectObject(object.id);
-  statusText.textContent = 'נמדד מיקום הנקודה ביחס לחוק השלישים';
+  statusText.textContent = 'נמדד מיקום בגובה ביחס לשלישים, וברוחב ביחידות עובי קולמוס';
 }
