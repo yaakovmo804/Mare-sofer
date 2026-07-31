@@ -6,8 +6,8 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
-const TEST_VERSION = '20260731l';
-const TEST_CACHE_DATE = '2026-07-31l';
+const TEST_VERSION = '20260731m';
+const TEST_CACHE_DATE = '2026-07-31m';
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const appDirectory = path.resolve(testDirectory, '..');
 
@@ -538,6 +538,35 @@ test('anchor editing is copy-on-write and does not mutate the canonical asset', 
   assert.equal(JSON.stringify(canonicalAsset), canonicalBefore);
 });
 
+test('a selected anchor group translates atomically without double-moving shared controls', () => {
+  const object = makeLetterObject('ש');
+  const before = vector.enumerateHandles(object, { coordinateSpace: 'image' });
+  const anchorIds = before.filter(handle => handle.kind === 'anchor').slice(0, 4).map(handle => handle.id);
+  assert.equal(anchorIds.length, 4);
+  const beforeById = new Map(before.map(handle => [handle.id, handle.point]));
+  const delta = { x: 19, y: -13 };
+
+  const result = vector.translateObjectHandles(object, anchorIds, delta, {
+    moveAdjacentControls: true
+  });
+  assert.equal(Array.from(result.ids).join('|'), anchorIds.join('|'));
+  assert.ok(result.movedCoordinateCount >= anchorIds.length);
+  const after = vector.enumerateHandles(object, { coordinateSpace: 'image' });
+  let movedControlCount = 0;
+  for (const handle of after) {
+    const previous = beforeById.get(handle.id);
+    assert.ok(previous, `missing previous handle ${handle.id}`);
+    const dx = handle.point.x - previous.x;
+    const dy = handle.point.y - previous.y;
+    const unchanged = Math.abs(dx) < 1e-7 && Math.abs(dy) < 1e-7;
+    const movedOnce = Math.abs(dx - delta.x) < 1e-7 && Math.abs(dy - delta.y) < 1e-7;
+    assert.ok(unchanged || movedOnce, `${handle.id} must move zero or one group delta, received ${dx},${dy}`);
+    if (handle.kind === 'control' && movedOnce) movedControlCount++;
+    if (anchorIds.includes(handle.id)) assert.ok(movedOnce, `${handle.id} must move with the group`);
+  }
+  assert.ok(movedControlCount > 0, 'adjacent Bézier controls must follow selected anchors');
+});
+
 test('weight changes ink while preserving the glyph outer size at .55, 1, and 1.45', () => {
   assert.deepEqual(
     { ...vector.weightRange },
@@ -624,6 +653,8 @@ test('automatic CV detects nib thickness and bottom-to-next-roof interline gaps'
   closeTo(interline.medianPx, 54, 0.5, 'median interline gap');
   closeTo(interline.medianNib, 9, 0.1, 'median interline nib units');
 
+  const prepared = autoMeasure.helpers.prepareRaster(source);
+
   for (const gap of interline.gaps) {
     closeTo(
       gap.points[1].y - gap.points[0].y,
@@ -639,11 +670,64 @@ test('automatic CV detects nib thickness and bottom-to-next-roof interline gaps'
       'gap must be defined from upper ink bottom to the next roof'
     );
     closeTo(gap.valueNib, gap.valuePx / nib.valuePx, 1e-9);
+    const evidence = gap.boundaries.raster;
+    assert.equal(gap.boundaries.zeroMargin, true);
+    assert.ok(evidence, 'zero-margin gaps must retain their raster evidence');
+    assert.equal(
+      prepared.binary[evidence.upperInkY * prepared.width + evidence.x],
+      1,
+      'the upper endpoint must follow the last real ink pixel'
+    );
+    assert.equal(
+      prepared.binary[evidence.lowerRoofY * prepared.width + evidence.x],
+      1,
+      'the lower endpoint must touch the next real roof pixel'
+    );
+    assert.equal(
+      prepared.binary[evidence.upperBoundaryY * prepared.width + evidence.x],
+      0,
+      'the measured clearance must begin immediately after the upper ink'
+    );
+  }
+
+  const signature = JSON.stringify(interline.gaps.map(gap => ({
+    valuePx: gap.valuePx,
+    points: gap.points,
+    raster: gap.boundaries.raster
+  })));
+  for (let repetition = 0; repetition < 5; repetition++) {
+    const repeated = autoMeasure.analyzeInterline(source, { nibPx: nib.valuePx });
+    assert.equal(
+      JSON.stringify(repeated.gaps.map(gap => ({
+        valuePx: gap.valuePx,
+        points: gap.points,
+        raster: gap.boundaries.raster
+      }))),
+      signature,
+      'automatic interline placement must be deterministic'
+    );
   }
 
   const selfCalibrating = autoMeasure.analyzeInterline(source);
   closeTo(selfCalibrating.nibPx, 6, 0.25);
   closeTo(selfCalibrating.medianPx, 54, 0.5);
+});
+
+test('tiny ink inside a larger component bounding box stays removed', () => {
+  const width = 24;
+  const height = 24;
+  const binary = new Uint8Array(width * height);
+  const put = (x, y) => { binary[y * width + x] = 1; };
+  for (let y = 3; y <= 18; y++) {
+    put(3, y);
+    put(18, y);
+  }
+  for (let x = 3; x <= 18; x++) put(x, 18);
+  put(10, 10);
+
+  const cleaned = autoMeasure.helpers.removeTinyInk(binary, width, height, 8);
+  assert.equal(cleaned[10 * width + 10], 0, 'the isolated grain must not be revived by a bounding box');
+  assert.equal(cleaned[18 * width + 3], 1, 'the large connected component must remain');
 });
 
 test('connected bet-like roof, stems, and seat resolve as one row, not cavity gaps', () => {
@@ -870,6 +954,122 @@ test('tagin and an isolated descender do not bridge or manufacture rows', () => 
   result.gaps.forEach(gap => closeTo(gap.valuePx, 43, 1.5));
 });
 
+test('gap ratios retain their measurement-time calibration and source', () => {
+  const appSource = readAppFile('app-1.js');
+  const helpersStart = appSource.indexOf('function measurementLengthPx(');
+  const helpersEnd = appSource.indexOf('\nfunction midpoint(', helpersStart);
+  assert.ok(helpersStart >= 0 && helpersEnd > helpersStart, 'measurement helper block must be present');
+  const helperState = {
+    formula: {
+      nibPx: 10,
+      calibration: { id: 'calibration-a', method: 'manual-line' }
+    }
+  };
+  const helperContext = vm.createContext({
+    state: helperState,
+    distance: (first, second) => Math.hypot(second.x - first.x, second.y - first.y),
+    Date,
+    Number,
+    Object
+  });
+  vm.runInContext(appSource.slice(helpersStart, helpersEnd), helperContext, { filename: 'app-1-measurement-helpers.js' });
+
+  const manualGap = {
+    type: 'gap',
+    points: [{ x: 0, y: 0 }, { x: 0, y: 30 }],
+    provenance: { origin: 'human' }
+  };
+  helperContext.captureGapNormalization(manualGap, helperState.formula.nibPx, 'manual-measurement');
+  assert.equal(helperContext.gapMeasurementSource(manualGap), 'manual');
+  closeTo(helperContext.measurementRatioNib(manualGap), 3);
+  helperState.formula.nibPx = 5;
+  closeTo(
+    helperContext.measurementRatioNib(manualGap),
+    3,
+    1e-12,
+    'manual ratio must remain tied to the captured 10px nib'
+  );
+
+  const automaticGap = {
+    type: 'gap',
+    points: [{ x: 0, y: 0 }, { x: 0, y: 34 }],
+    gapDetection: { medianPx: 34, manualCorrected: false },
+    autoMeasurement: { valuePx: 34, valueNib: 3.4 },
+    provenance: { origin: 'automatic' }
+  };
+  assert.equal(helperContext.gapMeasurementSource(automaticGap), 'automatic');
+  closeTo(helperContext.measurementRatioNib(automaticGap), 3.4);
+  automaticGap.gapDetection.manualCorrected = true;
+  automaticGap.points[1].y = 20;
+  helperContext.captureGapNormalization(automaticGap, helperState.formula.nibPx, 'manual-endpoint-correction');
+  assert.equal(helperContext.gapMeasurementSource(automaticGap), 'manual');
+  closeTo(helperContext.measurementRatioNib(automaticGap), 4);
+
+  helperState.formula.nibPx = null;
+  const uncalibratedGap = {
+    type: 'gap',
+    points: [{ x: 0, y: 0 }, { x: 0, y: 16 }],
+    provenance: { origin: 'human' }
+  };
+  helperContext.captureGapNormalization(uncalibratedGap, null, 'manual-measurement');
+  helperState.formula.nibPx = 8;
+  assert.equal(
+    helperContext.measurementRatioNib(uncalibratedGap),
+    null,
+    'a later calibration must not retroactively normalize an uncalibrated measurement'
+  );
+
+  manualGap.formulaKey = 'between-lines';
+  const freshAutomaticGap = {
+    id: 2,
+    uid: 'automatic-gap',
+    type: 'gap',
+    formulaKey: 'between-lines',
+    points: [{ x: 10, y: 0 }, { x: 10, y: 34 }],
+    gapDetection: { medianPx: 34, manualCorrected: false, confidence: .9 },
+    normalization: { nibPxAtMeasurement: 10 },
+    autoMeasurement: { valuePx: 34, valueNib: 3.4 },
+    provenance: { origin: 'automatic' }
+  };
+  manualGap.id = 1;
+  manualGap.uid = 'manual-gap';
+  helperState.objects = [freshAutomaticGap, manualGap];
+  helperState.formula.analysis = {};
+  helperContext.structuredCloneSafe = value => JSON.parse(JSON.stringify(value));
+  const app3Source = readAppFile('app-3.js');
+  const summaryStart = app3Source.indexOf('function refreshBetweenLinesSummary(');
+  const summaryEnd = app3Source.indexOf('\nfunction clearDraftState(', summaryStart);
+  assert.ok(summaryStart >= 0 && summaryEnd > summaryStart, 'interline summary function must be present');
+  vm.runInContext(app3Source.slice(summaryStart, summaryEnd), helperContext, {
+    filename: 'app-3-interline-summary.js'
+  });
+  helperContext.refreshBetweenLinesSummary();
+  assert.equal(helperState.formula.analysis.interlineSummaries.manual.count, 1);
+  assert.equal(helperState.formula.analysis.interlineSummaries.automatic.count, 1);
+  assert.equal(helperState.formula.analysis.interlineSummaries.activeSource, 'manual');
+  closeTo(helperState.formula.analysis.manualInterlineMedianNib, 3);
+  closeTo(helperState.formula.analysis.autoInterlineMedianNib, 3.4);
+  closeTo(helperState.formula.analysis.betweenLinesMedianNib, 3);
+  closeTo(helperState.formula.betweenLinesPx, 30);
+
+  helperState.formula.calibration = { id: 'calibration-b', method: 'manual-line' };
+  helperState.projectMeta = { id: 'measurement-ratio-test' };
+  const app4Source = readAppFile('app-4.js');
+  const metricsStart = app4Source.indexOf('function activeNibCalibrationId(');
+  const metricsEnd = app4Source.indexOf('\nfunction createStableId(', metricsStart);
+  assert.ok(metricsStart >= 0 && metricsEnd > metricsStart, 'measurement metrics function must be present');
+  vm.runInContext(app4Source.slice(metricsStart, metricsEnd), helperContext, {
+    filename: 'app-4-measurement-metrics.js'
+  });
+  const persistedMetrics = helperContext.measurementMetrics(manualGap);
+  closeTo(persistedMetrics.lengthNib, 3);
+  assert.equal(
+    persistedMetrics.calibrationId,
+    'calibration-a',
+    'exported metrics must retain the measurement-time calibration id'
+  );
+});
+
 test('runInterline installs a detected nib and both measurement families atomically', async () => {
   const state = makeAppState(makeBetLikeRows());
   const harness = createAppHarness(state);
@@ -891,6 +1091,25 @@ test('runInterline installs a detected nib and both measurement families atomica
   );
   assert.ok(nibObjects.length >= 2 && nibObjects.length <= 10);
   assert.equal(gapObjects.length, 2);
+  const capturedRatios = gapObjects.map(object => object.autoMeasurement.valueNib);
+  for (const [index, object] of gapObjects.entries()) {
+    closeTo(object.normalization.nibPxAtMeasurement, state.formula.nibPx, 1e-9);
+    closeTo(
+      capturedRatios[index],
+      object.autoMeasurement.valuePx / object.normalization.nibPxAtMeasurement,
+      1e-9,
+      'automatic gap ratio must use its captured calibration'
+    );
+  }
+  state.formula.nibPx *= 1.75;
+  gapObjects.forEach((object, index) => {
+    closeTo(
+      object.autoMeasurement.valueNib,
+      capturedRatios[index],
+      1e-12,
+      'later calibration changes must not rewrite an existing gap ratio'
+    );
+  });
   assert.equal(harness.calls.snapshots, 1, 'batched nib and gap apply should use one undo snapshot');
   assert.equal(harness.analysisOverlay.hidden, true);
 });
@@ -1030,11 +1249,90 @@ test('a rapid second interline request cancels the stale first apply', async () 
   assert.equal(harness.analysisOverlay.hidden, true);
 });
 
-test('HTML and service worker reference one complete l-version asset set', async () => {
+test('photographed vector source links round-trip through stable project identifiers', () => {
+  const noop = () => {};
+  const element = { addEventListener: noop, showModal: noop, close: noop };
+  const persistenceContext = vm.createContext({
+    console,
+    Map,
+    Set,
+    Date,
+    Math,
+    JSON,
+    Object,
+    Array,
+    Number,
+    String,
+    Boolean,
+    RegExp,
+    Error,
+    TypeError,
+    RangeError,
+    TextEncoder,
+    Uint8Array,
+    structuredClone,
+    $: () => element,
+    window: { addEventListener: noop },
+    renderFormulaUI: noop,
+    renderControls: noop,
+    resizeCanvas: noop,
+    structuredCloneSafe: structuredClone,
+    createStableId: () => 'generated-measurement-id',
+    defaultCategory: () => 'reference-template',
+    defaultName: () => 'measurement',
+    isResultLabelVisible: () => false,
+    state: { image: null, formula: {} },
+    SEMANTIC_CATEGORIES: [],
+    BUILTIN_VARIABLES: []
+  });
+  persistenceContext.globalThis = persistenceContext;
+  vm.runInContext(readAppFile('app-4.js'), persistenceContext, { filename: 'app-4.js' });
+  persistenceContext.measurementGeometry = () => ({ type: 'polygon', points: [] });
+  persistenceContext.measurementMetrics = () => ({});
+
+  const frame = {
+    id: 41,
+    uid: 'frame-stable-id',
+    type: 'area',
+    points: [],
+    linkedVectorId: 42
+  };
+  const vectorObject = {
+    id: 42,
+    uid: 'vector-stable-id',
+    type: 'letterTemplate',
+    points: [],
+    template: { kind: 'image-region-vector' },
+    sourceSelection: { frameId: 41 }
+  };
+  const stableIdMap = new Map([
+    [frame.id, frame.uid],
+    [vectorObject.id, vectorObject.uid]
+  ]);
+  const serializedFrame = persistenceContext.serializeMeasurementV3(frame, stableIdMap);
+  const serializedVector = persistenceContext.serializeMeasurementV3(vectorObject, stableIdMap);
+
+  assert.equal(serializedFrame.linkedVectorId, vectorObject.uid);
+  assert.equal(serializedFrame.legacy.linkedVectorIdRuntime, vectorObject.id);
+  assert.equal(serializedVector.sourceFrameId, frame.uid);
+  assert.equal(serializedVector.sourceSelection.frameId, frame.uid);
+  assert.equal(serializedVector.legacy.sourceFrameIdRuntime, frame.id);
+
+  persistenceContext.normalizeLoadedObject = object => structuredClone(object);
+  const prepared = persistenceContext.prepareLoadedObjects([serializedFrame, serializedVector]);
+  const loadedFrame = prepared.objects.find(object => object.uid === frame.uid);
+  const loadedVector = prepared.objects.find(object => object.uid === vectorObject.uid);
+  assert.equal(loadedFrame.linkedVectorId, loadedVector.id);
+  assert.equal(loadedVector.sourceFrameId, loadedFrame.id);
+  assert.equal(loadedVector.sourceSelection.frameId, loadedFrame.id);
+});
+
+test('HTML, manifests, and service worker reference one complete m-version asset set', async () => {
   const expectedScripts = [
     'letter-assets.js',
     'letter-vector-engine.js',
     'app-1.js',
+    'region-vector.js',
     'letter-tools.js',
     'app-2.js',
     'app-3.js',
@@ -1045,7 +1343,7 @@ test('HTML and service worker reference one complete l-version asset set', async
 
   for (const htmlName of ['medidaot.html', 'index.html']) {
     const html = readAppFile(htmlName);
-    assert.doesNotMatch(html, /20260731k/);
+    assert.doesNotMatch(html, /20260731[kl]/);
     const scripts = [...html.matchAll(/<script\s+src="([^"]+)"/g)]
       .map(match => match[1]);
     assert.deepEqual(scripts, expectedScripts);
@@ -1066,6 +1364,13 @@ test('HTML and service worker reference one complete l-version asset set', async
       );
     }
   }
+
+  for (const manifestName of ['manifest.webmanifest', 'manifest-medidaot.webmanifest']) {
+    const manifest = JSON.parse(readAppFile(manifestName));
+    assert.match(manifest.start_url, new RegExp(`(?:\\?|&)v=${TEST_VERSION}(?:&|$)`));
+  }
+
+  assert.match(readAppFile('app-4.js'), /appVersion:\s*'2026\.07\.31m'/);
 
   const serviceWorker = readAppFile('sw.js');
   const cacheNameMatch = serviceWorker.match(/const CACHE_NAME = '([^']+)'/);
@@ -1144,7 +1449,7 @@ for (const { name, callback } of tests) {
   }
 }
 
-console.log(`\n${passed}/${tests.length} focused Medidaot l regression groups passed.`);
+console.log(`\n${passed}/${tests.length} focused Medidaot m regression groups passed.`);
 if (passed !== tests.length) {
   throw new Error(`${tests.length - passed} regression group(s) failed`);
 }

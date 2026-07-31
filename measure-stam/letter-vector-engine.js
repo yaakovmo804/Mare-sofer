@@ -195,13 +195,16 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
   }
 
   function normalizeTradition(value) {
+    if (value === 'custom') return 'custom';
     return value === 'ari' || value === 'ארי' || value === 'כתב האר״י'
       ? 'ari'
       : 'beitYosef';
   }
 
   function traditionToStyle(value) {
-    return normalizeTradition(value) === 'ari' ? 'ari' : 'beit-yosef';
+    const tradition = normalizeTradition(value);
+    if (tradition === 'custom') return 'custom';
+    return tradition === 'ari' ? 'ari' : 'beit-yosef';
   }
 
   function identityFrom(input, tradition) {
@@ -1515,6 +1518,71 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
     };
   }
 
+  function translateObjectHandles(object, handleIds, deltaImage, options = {}) {
+    const ids = [...new Set((handleIds || []).map(String))];
+    if (!ids.length) throw new TypeError('At least one vector handle id is required.');
+    const vector = materializeObjectVector(object, options);
+    const transform = getLayoutTransform(object, { ...options, vector });
+    const localOrigin = transform.imageToLocal({ x: 0, y: 0 });
+    const localTarget = transform.imageToLocal({
+      x: finiteNumber(deltaImage?.x),
+      y: finiteNumber(deltaImage?.y)
+    });
+    const delta = {
+      x: localTarget.x - localOrigin.x,
+      y: localTarget.y - localOrigin.y
+    };
+    const coordinates = new Map();
+    const addCoordinate = (pathIndex, commandIndex, role) => {
+      const entry = vector.paths[pathIndex];
+      const command = entry?.commands?.[commandIndex];
+      if (!command) return;
+      let xKey;
+      let yKey;
+      if (role === 'anchor' && ['M', 'L', 'C'].includes(command.type)) {
+        xKey = 'x';
+        yKey = 'y';
+      } else if (role === 'control-out' && command.type === 'C') {
+        xKey = 'x1';
+        yKey = 'y1';
+      } else if (role === 'control-in' && command.type === 'C') {
+        xKey = 'x2';
+        yKey = 'y2';
+      } else {
+        return;
+      }
+      coordinates.set(`${pathIndex}:${commandIndex}:${xKey}`, { command, xKey, yKey });
+    };
+
+    for (const id of ids) {
+      const handle = parseHandleId(id);
+      addCoordinate(handle.pathIndex, handle.commandIndex, handle.role);
+      if (handle.role === 'anchor' && options.moveAdjacentControls !== false) {
+        const commands = vector.paths[handle.pathIndex]?.commands || [];
+        for (const control of adjacentControls(commands, handle.commandIndex)) {
+          addCoordinate(handle.pathIndex, control.commandIndex, control.coordinate);
+        }
+      }
+    }
+    for (const coordinate of coordinates.values()) {
+      coordinate.command[coordinate.xKey] += delta.x;
+      coordinate.command[coordinate.yKey] += delta.y;
+    }
+    touchVector(vector);
+    return {
+      ids,
+      movedCoordinateCount: coordinates.size,
+      delta,
+      deltaImage: {
+        x: finiteNumber(deltaImage?.x),
+        y: finiteNumber(deltaImage?.y)
+      },
+      revision: vector.revision,
+      counts: { ...vector.handleCounts },
+      vector
+    };
+  }
+
   function hitTestHandle(object, imagePoint, options = {}) {
     const radius = Math.max(1, finiteNumber(options.radius, 14));
     const handles = enumerateHandles(object, {
@@ -1787,6 +1855,7 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
     getHandleCounts,
     moveVectorHandle,
     moveObjectHandle,
+    translateObjectHandles,
     hitTestHandle,
     buildPath2D,
     hitTestFill,

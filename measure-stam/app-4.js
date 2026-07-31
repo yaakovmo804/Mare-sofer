@@ -1766,7 +1766,7 @@ async function serializeProjectV3() {
       title: captured.projectMeta.title || 'פרויקט מדידאות',
       createdAt: captured.projectMeta.createdAt,
       updatedAt: now,
-      appVersion: '2026.07.31l',
+      appVersion: '2026.07.31m',
       locale: 'he-IL'
     },
     source: {
@@ -1811,10 +1811,20 @@ function serializeMeasurementV3(object, stableIdMap = new Map()) {
   copy.uid = copy.uid || createStableId('measurement');
   copy.legacy = { ...(copy.legacy || {}), runtimeId: object.id };
   copy.id = copy.uid;
-  for (const key of ['kastelId', 'regionId']) {
+  for (const key of ['kastelId', 'regionId', 'linkedVectorId']) {
     if (object[key] == null) continue;
     copy.legacy[`${key}Runtime`] = object[key];
     copy[key] = stableIdMap.get(object[key]) || object[key];
+  }
+  const sourceFrameId = object.sourceFrameId ?? object.sourceSelection?.frameId;
+  if (sourceFrameId != null) {
+    const stableSourceFrameId = stableIdMap.get(sourceFrameId) || sourceFrameId;
+    copy.legacy.sourceFrameIdRuntime = sourceFrameId;
+    copy.sourceFrameId = stableSourceFrameId;
+    copy.sourceSelection = {
+      ...(copy.sourceSelection || {}),
+      frameId: stableSourceFrameId
+    };
   }
   copy.semantic = {
     ...(copy.semantic || {}),
@@ -1921,6 +1931,8 @@ function measurementMetrics(object) {
   }
   if (['length', 'nib', 'gap'].includes(object.type) && object.points.length >= 2) {
     const lengthPx = object.type === 'gap' ? measurementLengthPx(object) : distance(object.points[0], object.points[1]);
+    const hasCapturedGapCalibration = object.type === 'gap' && object.normalization &&
+      Object.prototype.hasOwnProperty.call(object.normalization, 'nibPxAtMeasurement');
     return {
       metricId: object.type === 'nib'
         ? 'nib-width-line.v1'
@@ -1930,8 +1942,12 @@ function measurementMetrics(object) {
             : 'gap-length.v1'
           : 'line-length.v1',
       lengthPx,
-      lengthNib: state.formula.nibPx ? lengthPx / state.formula.nibPx : null,
-      calibrationId: activeNibCalibrationId(),
+      lengthNib: object.type === 'gap'
+        ? measurementRatioNib(object)
+        : state.formula.nibPx ? lengthPx / state.formula.nibPx : null,
+      calibrationId: hasCapturedGapCalibration
+        ? object.normalization.calibrationId || null
+        : activeNibCalibrationId(),
       ...(object.gapDetection ? {
         confidence: object.gapDetection.confidence ?? null,
         sampleCount: object.gapDetection.sampleCount ?? null,
@@ -2216,10 +2232,19 @@ function prepareLoadedObjects(rawObjects) {
     object.id = runtimeId;
   }
   for (const object of objects) {
-    for (const key of ['kastelId', 'regionId']) {
+    for (const key of ['kastelId', 'regionId', 'linkedVectorId']) {
       if (object[key] == null) continue;
       const translated = referenceMap.get(String(object[key]));
       if (translated) object[key] = translated;
+    }
+    const sourceFrameId = object.sourceFrameId ?? object.sourceSelection?.frameId;
+    if (sourceFrameId != null) {
+      const translated = referenceMap.get(String(sourceFrameId)) || sourceFrameId;
+      object.sourceFrameId = translated;
+      object.sourceSelection = {
+        ...(object.sourceSelection || {}),
+        frameId: translated
+      };
     }
   }
   return { objects, referenceMap };

@@ -459,7 +459,14 @@ function isLetterTemplate(object) {
   return object?.type === 'letterTemplate';
 }
 
+function isPhotographedVector(object) {
+  return isLetterTemplate(object) &&
+    object?.template?.kind === 'image-region-vector' &&
+    Array.isArray(object?.letterVector?.paths);
+}
+
 function letterTraditionLabel(tradition) {
+  if (tradition === 'custom') return 'אות מצולמת';
   return tradition === 'ari' ? 'כתב האר״י' : 'בית יוסף';
 }
 
@@ -917,14 +924,19 @@ function normalizeLetterTemplateObject(object) {
   if (!Array.isArray(object.points) || object.points.length !== 4) return object;
   const rect = letterObjectRect(object);
   object.points = letterRectPoints(rect.x, rect.y, Math.max(.1, rect.width), Math.max(.1, rect.height));
-  const tradition = object.template?.tradition === 'ari' ? 'ari' : 'beitYosef';
-  const letter = globalThis.MEDIDAOT_LETTERS?.order?.includes(object.template?.letter)
-    ? object.template.letter
-    : 'א';
+  const photographed = isPhotographedVector(object);
+  const tradition = photographed
+    ? 'custom'
+    : object.template?.tradition === 'ari' ? 'ari' : 'beitYosef';
+  const letter = photographed
+    ? ''
+    : globalThis.MEDIDAOT_LETTERS?.order?.includes(object.template?.letter)
+      ? object.template.letter
+      : 'א';
   const asset = letterAsset(letter, tradition);
   const previousTemplate = object.template || {};
   object.template = {
-    kind: 'letter',
+    kind: photographed ? 'image-region-vector' : 'letter',
     vectorAssetVersion: 1,
     layoutMode: 'tight-v1',
     ...previousTemplate,
@@ -932,7 +944,7 @@ function normalizeLetterTemplateObject(object) {
     tradition,
     slug: asset?.slug || previousTemplate.slug || 'aleph'
   };
-  if (object.template.layoutMode !== 'source-cell-v2') object.template.layoutMode = 'tight-v1';
+  if (photographed || object.template.layoutMode !== 'source-cell-v2') object.template.layoutMode = 'tight-v1';
   object.template.vectorAssetVersion = object.template.layoutMode === 'source-cell-v2'
     ? Math.max(2, +object.template.vectorAssetVersion || 2)
     : Math.max(1, +object.template.vectorAssetVersion || 1);
@@ -1025,7 +1037,7 @@ function updateLetterWeightReadout(object, weightInfo) {
 
 function drawLetterTemplateShape(context, object, rect, unitScale = 1, options = {}) {
   const asset = letterAsset(object);
-  if (!asset || rect.width <= 0 || rect.height <= 0) return;
+  if ((!asset && !Array.isArray(object?.letterVector?.paths)) || rect.width <= 0 || rect.height <= 0) return;
   const suppressWeightReadout = options.exportQuality === true
     || options.suppressWeightReadout === true;
   if (object.letterGridVisible) {
@@ -1042,6 +1054,7 @@ function drawLetterTemplateShape(context, object, rect, unitScale = 1, options =
   const activePreviewDrag = typeof state !== 'undefined'
     && state.dragging?.id === object.id
     && (state.dragging.type === 'letterVectorHandle'
+      || state.dragging.type === 'letterVectorGroup'
       || (state.dragging.type === 'letterResize' && object.letterMode === 'outline'));
   if (activePreviewDrag && letterMorphForceExactId !== object.id) {
     drawLetterEditableMaster(context, object, rect, unitScale, asset);
@@ -1188,9 +1201,13 @@ function drawLetterVectorHandles(object) {
   for (const list of pathAnchors.values()) {
     list.sort((a, b) => a.commandIndex - b.commandIndex);
   }
-  const selectedHandleId = state.letterVectorSelection?.id === object.id
-    ? state.letterVectorSelection.handleId
-    : null;
+  const selectedHandleIds = state.letterVectorSelection?.id === object.id
+    ? new Set([
+        ...(state.letterVectorSelection.handleIds || []),
+        state.letterVectorSelection.primaryHandleId,
+        state.letterVectorSelection.handleId
+      ].filter(Boolean))
+    : new Set();
 
   ctx.save();
   ctx.lineWidth = 1;
@@ -1217,7 +1234,7 @@ function drawLetterVectorHandles(object) {
 
   for (const handle of handles) {
     const point = imageToScreen(handle.point);
-    const selected = handle.id === selectedHandleId;
+    const selected = selectedHandleIds.has(handle.id);
     ctx.beginPath();
     if (handle.kind === 'anchor') {
       ctx.fillStyle = selected ? '#f59e0b' : '#ffffff';
@@ -1472,7 +1489,10 @@ function syncLetterControls(object = selectedLetterTemplate()) {
   if (!active) return;
   normalizeLetterTemplateObject(object);
   const mode = object.letterMode === 'outline' ? 'outline' : 'solid';
-  $('letterSelectedLabel').textContent = `${object.template.letter} · ${letterTraditionLabel(object.template.tradition)}`;
+  const photographed = isPhotographedVector(object);
+  $('letterSelectedLabel').textContent = photographed
+    ? 'אות מצולמת · וקטור'
+    : `${object.template.letter} · ${letterTraditionLabel(object.template.tradition)}`;
   $('letterModeSolidBtn').classList.toggle('active', mode === 'solid');
   $('letterModeOutlineBtn').classList.toggle('active', mode === 'outline');
   $('letterColorInput').value = object.color || '#2563eb';
@@ -1481,6 +1501,7 @@ function syncLetterControls(object = selectedLetterTemplate()) {
   $('letterOutlineWidthLabel').hidden = mode !== 'outline';
   const weightIntensity = Math.round(((object.letterWeight || 1) - 1) / .45 * 100);
   $('letterWeightInput').value = clamp(weightIntensity, -100, 100);
+  $('letterWeightInput').disabled = photographed;
   const cachedWeightInfo = LETTER_WEIGHT_DIAGNOSTICS.get(object);
   const currentWeight = object.letterWeight || 1;
   updateLetterWeightReadout(object,
@@ -1491,9 +1512,13 @@ function syncLetterControls(object = selectedLetterTemplate()) {
   $('letterGridInput').checked = object.letterGridVisible !== false;
   $('letterLockAspectInput').checked = object.letterLockAspect !== false;
   $('letterEditAnchorsInput').checked = object.letterEditAnchors === true;
+  $('letterAnchorLassoBtn').disabled = object.letterEditAnchors !== true;
   const vectorStats = letterVectorEngine()?.stats?.(object, letterAsset(object));
+  const selectedAnchorCount = state.letterVectorSelection?.id === object.id
+    ? new Set(state.letterVectorSelection.handleIds || []).size
+    : 0;
   $('letterAnchorReadout').textContent = vectorStats?.available
-    ? `${vectorStats.anchors} נקודות עוגן · ${vectorStats.controls} ידיות Bézier${vectorStats.materialized ? ' · נשמרו עריכות אישיות' : ' · מקור Bézier מלא'} · שינוי העובי הוא תצוגה לא־הרסנית עם הגנת רכיבים וחללים${Math.abs((object.letterWeight || 1) - 1) > .001 ? ' · הקו המקווקו הוא מסלול המקור הנערך' : ''}`
+    ? `${vectorStats.anchors} נקודות עוגן · ${vectorStats.controls} ידיות Bézier${vectorStats.materialized ? ' · נשמרו עריכות אישיות' : ' · מקור Bézier מלא'}${selectedAnchorCount ? ` · נבחרו ${selectedAnchorCount} עוגנים להזזה משותפת` : ''}${photographed ? ' · הווקטור נוצר מן האזור המצולם ונשאר עריך' : ` · שינוי העובי הוא תצוגה לא־הרסנית עם הגנת רכיבים וחללים${Math.abs((object.letterWeight || 1) - 1) > .001 ? ' · הקו המקווקו הוא מסלול המקור הנערך' : ''}`}`
     : 'המסלול הווקטורי אינו זמין.';
   const rect = letterObjectRect(object);
   const visual = letterVisualRect(object) || rect;
@@ -1539,6 +1564,10 @@ function duplicateSelectedLetter() {
 function resetSelectedLetterRatio() {
   const object = selectedLetterTemplate();
   if (!object) return;
+  if (isPhotographedVector(object)) {
+    statusText.textContent = 'המסגרת של אות מצולמת נשארת ביחס של אזור המקור';
+    return;
+  }
   const rect = letterObjectRect(object);
   const center = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
   const width = rect.height * letterDesignAspect(object);
@@ -1552,6 +1581,245 @@ function resetSelectedLetterRatio() {
   markObjectModified(object);
   renderAll();
   statusText.textContent = 'האות הוחזרה לתא וליחסים המקוריים של לוח האותיות';
+}
+
+function drawFreeformSelection(points, color) {
+  if (!Array.isArray(points) || points.length < 2) return;
+  const screenPoints = points.map(imageToScreen);
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.fillStyle = hexToRgba(color, .08);
+  ctx.lineWidth = 2;
+  ctx.setLineDash([7, 5]);
+  ctx.beginPath();
+  ctx.moveTo(screenPoints[0].x, screenPoints[0].y);
+  for (const point of screenPoints.slice(1)) ctx.lineTo(point.x, point.y);
+  if (points.length >= 3) {
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawLetterInteractionOverlays() {
+  if (state.vectorizeLasso?.points?.length) {
+    drawFreeformSelection(
+      state.vectorizeLasso.points,
+      $('vectorSourceColorInput')?.value || '#f59e0b'
+    );
+  }
+  if (state.letterVectorLasso?.points?.length) {
+    drawFreeformSelection(state.letterVectorLasso.points, '#0891b2');
+  }
+}
+
+function appendLassoPoint(lasso, imagePoint, minimumScreenDistance = 3) {
+  if (!lasso?.points) return false;
+  const previous = lasso.points[lasso.points.length - 1];
+  if (previous && distance(imageToScreen(previous), imageToScreen(imagePoint)) < minimumScreenDistance) {
+    return false;
+  }
+  lasso.points.push({ x: imagePoint.x, y: imagePoint.y });
+  return true;
+}
+
+function beginVectorizeLasso(imagePoint, pointerId) {
+  state.vectorizeLasso = {
+    pointerId,
+    points: [{ x: imagePoint.x, y: imagePoint.y }]
+  };
+  state.letterVectorLasso = null;
+  state.dragging = { type: 'vectorizeLasso', pointerId, moved: false };
+  statusText.textContent = 'הקף את האות המצולמת וסגור את המסלול';
+  draw();
+}
+
+function photographedSelectionBounds(points) {
+  const xs = points.map(point => point.x);
+  const ys = points.map(point => point.y);
+  const left = clamp(Math.floor(Math.min(...xs)), 0, Math.max(0, state.image.width - 1));
+  const top = clamp(Math.floor(Math.min(...ys)), 0, Math.max(0, state.image.height - 1));
+  const right = clamp(Math.ceil(Math.max(...xs)), left + 1, state.image.width);
+  const bottom = clamp(Math.ceil(Math.max(...ys)), top + 1, state.image.height);
+  return { left, top, right, bottom, width: right - left, height: bottom - top };
+}
+
+function createPhotographedVector(points) {
+  if (!state.image || !globalThis.MEDIDAOT_REGION_VECTOR) {
+    throw new Error('מנוע הווקטוריזציה אינו זמין');
+  }
+  const bounds = photographedSelectionBounds(points);
+  if (bounds.width * state.view.scale < 12 || bounds.height * state.view.scale < 12) {
+    throw new Error('הסימון קטן מדי');
+  }
+  const maximumDimension = 1200;
+  const maximumPixels = 1_600_000;
+  const sampleScale = Math.min(
+    1,
+    maximumDimension / Math.max(bounds.width, bounds.height),
+    Math.sqrt(maximumPixels / Math.max(1, bounds.width * bounds.height))
+  );
+  const sampleWidth = Math.max(1, Math.round(bounds.width * sampleScale));
+  const sampleHeight = Math.max(1, Math.round(bounds.height * sampleScale));
+  const crop = createLetterMaskCanvas(sampleWidth, sampleHeight);
+  const context = crop.getContext('2d', { willReadFrequently: true });
+  if (!context) throw new Error('לא ניתן לקרוא את אזור התמונה');
+  context.drawImage(
+    state.image,
+    bounds.left,
+    bounds.top,
+    bounds.width,
+    bounds.height,
+    0,
+    0,
+    sampleWidth,
+    sampleHeight
+  );
+  const relativePolygon = points.map(point => ({
+    x: (point.x - bounds.left) * sampleScale,
+    y: (point.y - bounds.top) * sampleScale
+  }));
+  const trace = globalThis.MEDIDAOT_REGION_VECTOR.vectorizeImageData(
+    context.getImageData(0, 0, sampleWidth, sampleHeight),
+    relativePolygon,
+    { maximumAnchors: 520 }
+  );
+
+  snapshot();
+  const frame = makeObject('area', points, {
+    name: 'מסגרת מקור — אות מצולמת',
+    color: $('vectorSourceColorInput')?.value || '#f59e0b',
+    lineWidth: 3,
+    fillEnabled: false,
+    fillAlpha: 0,
+    closed: true,
+    role: 'vector-source-frame',
+    category: 'reference-template',
+    display: { resultLabelVisible: false },
+    sourceTrace: {
+      threshold: trace.threshold,
+      sampleScale,
+      selectedPixelCount: trace.selectedPixelCount,
+      inkPixelCount: trace.inkPixelCount
+    }
+  });
+  ensureAreaSegments(frame);
+  const vector = makeObject('letterTemplate', letterRectPoints(
+    bounds.left,
+    bounds.top,
+    bounds.width,
+    bounds.height
+  ), {
+    name: 'אות מצולמת — וקטור עריך',
+    color: $('vectorOverlayColorInput')?.value || '#2563eb',
+    lineWidth: 2.5,
+    fillEnabled: false,
+    fillAlpha: 0,
+    role: 'reference-overlay',
+    category: 'reference-template',
+    template: {
+      kind: 'image-region-vector',
+      letter: '',
+      tradition: 'custom',
+      slug: 'photographed-selection',
+      vectorAssetVersion: 2,
+      layoutMode: 'tight-v1'
+    },
+    letterVector: trace.vector,
+    letterMode: 'solid',
+    letterOpacity: .58,
+    letterOutlineWidth: 2.5,
+    letterWeight: 1,
+    letterEditAnchors: true,
+    letterGridVisible: true,
+    letterLockAspect: true,
+    display: { resultLabelVisible: false },
+    sourceSelection: {
+      frameId: frame.id,
+      sampleScale,
+      threshold: trace.threshold,
+      polygon: structuredCloneSafe(points)
+    }
+  });
+  frame.linkedVectorId = vector.id;
+  normalizeLetterTemplateObject(vector);
+  state.objects.push(frame, vector);
+  state.vectorizeLasso = null;
+  setTool('pan');
+  selectObject(vector.id);
+  statusText.textContent = `נוצר וקטור עריך עם ${trace.vector.handleCounts.anchors} נקודות עוגן; מסגרת המקור נשארה במקומה`;
+  return { frame, vector, trace };
+}
+
+function finishVectorizeLasso() {
+  const points = state.vectorizeLasso?.points || [];
+  state.vectorizeLasso = null;
+  if (points.length < 6 || polygonArea(points) < 16) {
+    statusText.textContent = 'הסימון החופשי קצר מדי ובוטל';
+    draw();
+    return null;
+  }
+  try {
+    return createPhotographedVector(points);
+  } catch (error) {
+    statusText.textContent = `לא נוצר וקטור: ${error.message}`;
+    draw();
+    return null;
+  }
+}
+
+function armLetterAnchorLasso() {
+  const object = selectedLetterTemplate();
+  if (!object?.letterEditAnchors) {
+    statusText.textContent = 'יש להפעיל תחילה עריכת נקודות עוגן';
+    return;
+  }
+  setTool('pan');
+  state.letterVectorLasso = { armed: true, id: object.id, points: [] };
+  state.letterVectorSelection = null;
+  $('letterAnchorLassoBtn')?.classList.add('active');
+  statusText.textContent = 'הקף ב־Apple Pencil את קבוצת נקודות העוגן הרצויה';
+  draw();
+}
+
+function beginLetterAnchorLasso(imagePoint, pointerId) {
+  const lasso = state.letterVectorLasso;
+  if (!lasso?.armed || lasso.id !== state.selectedId) return false;
+  lasso.armed = false;
+  lasso.pointerId = pointerId;
+  lasso.points = [{ x: imagePoint.x, y: imagePoint.y }];
+  state.dragging = { type: 'letterAnchorLasso', pointerId, moved: false };
+  draw();
+  return true;
+}
+
+function finishLetterAnchorLasso() {
+  const lasso = state.letterVectorLasso;
+  const object = state.objects.find(item => item.id === lasso?.id && isLetterTemplate(item));
+  const points = lasso?.points || [];
+  state.letterVectorLasso = null;
+  $('letterAnchorLassoBtn')?.classList.remove('active');
+  if (!object || points.length < 3) {
+    statusText.textContent = 'לא נבחרו נקודות עוגן';
+    draw();
+    return [];
+  }
+  const selected = letterVectorHandles(object)
+    .filter(handle => handle.kind === 'anchor' && pointInPolygon(handle.point, points))
+    .map(handle => handle.id);
+  state.letterVectorSelection = selected.length ? {
+    id: object.id,
+    handleIds: selected,
+    primaryHandleId: selected[0],
+    handleId: selected[0]
+  } : null;
+  syncLetterControls(object);
+  statusText.textContent = selected.length
+    ? `נבחרו ${selected.length} נקודות עוגן; גרור אחת מהן כדי להזיז את הקבוצה`
+    : 'לא נמצאו נקודות עוגן בתוך הסימון';
+  draw();
+  return selected;
 }
 
 function runScheduledLetterWeightRender() {
@@ -1599,6 +1867,8 @@ $('letterBoardBtn')?.addEventListener('click', () => {
   $('letterBoardBtn').classList.toggle('active', !drawer.hidden);
   if (!drawer.hidden) renderLetterKeyboard();
 });
+$('startVectorizeBtn')?.addEventListener('click', () => setTool('vectorize'));
+$('letterAnchorLassoBtn')?.addEventListener('click', armLetterAnchorLasso);
 $('closeLetterDrawerBtn')?.addEventListener('click', () => {
   $('letterDrawer').hidden = true;
   $('letterBoardBtn').classList.remove('active');
@@ -1672,10 +1942,12 @@ $('letterEditAnchorsInput')?.addEventListener('change', event => {
   if (!object) return;
   object.letterEditAnchors = event.target.checked;
   state.letterVectorSelection = null;
+  state.letterVectorLasso = null;
+  $('letterAnchorLassoBtn')?.classList.remove('active');
   syncLetterControls(object);
   draw();
   statusText.textContent = object.letterEditAnchors
-    ? 'מצב עריכת עוגנים פעיל: גע בנקודה או בידית וגרור'
+    ? 'מצב עריכת עוגנים פעיל: גרור נקודה בודדת, או הקף קבוצת עוגנים'
     : 'מצב עריכת העוגנים נסגר; האות נשארה וקטורית';
 });
 $('duplicateLetterBtn')?.addEventListener('click', duplicateSelectedLetter);
@@ -1693,6 +1965,7 @@ if (typeof canvas !== 'undefined' && canvas?.addEventListener) {
   canvas.addEventListener('pointerup', () => {
     if (typeof state !== 'undefined'
       && (state.dragging?.type === 'letterVectorHandle'
+        || state.dragging?.type === 'letterVectorGroup'
         || (state.dragging?.type === 'letterResize'
           && state.objects?.find(object => object.id === state.dragging.id)?.letterMode === 'outline'))) {
       letterMorphForceExactId = state.dragging.id;

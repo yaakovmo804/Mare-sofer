@@ -64,6 +64,8 @@ const state = {
   selectedPoint: null,
   selectedSegment: null,
   letterVectorSelection: null,
+  letterVectorLasso: null,
+  vectorizeLasso: null,
   draftHistory: [],
   view: { x: 0, y: 0, scale: 1 },
   dragging: null,
@@ -73,6 +75,7 @@ const state = {
   pointers: new Map(),
   pinchStart: null,
   activePointerId: null,
+  touchEditPointerId: null,
   interactionBefore: null,
   calibrationAnalysisToken: 0,
   activeCalibrationRegionId: null,
@@ -192,6 +195,53 @@ function measurementLengthPx(object) {
     return detected;
   }
   return object?.points?.length >= 2 ? distance(object.points[0], object.points[1]) : 0;
+}
+function capturedNibPxForMeasurement(object) {
+  const normalization = object?.normalization;
+  if (normalization && Object.prototype.hasOwnProperty.call(normalization, 'nibPxAtMeasurement')) {
+    const captured = +normalization.nibPxAtMeasurement;
+    return Number.isFinite(captured) && captured > 0 ? captured : null;
+  }
+  const automaticPx = +object?.autoMeasurement?.valuePx;
+  const automaticNib = +object?.autoMeasurement?.valueNib;
+  if (object?.type === 'gap' && Number.isFinite(automaticPx) && automaticPx > 0 &&
+      Number.isFinite(automaticNib) && automaticNib > 0) {
+    return automaticPx / automaticNib;
+  }
+  return undefined;
+}
+function measurementRatioNib(object) {
+  const lengthPx = measurementLengthPx(object);
+  if (!Number.isFinite(lengthPx) || lengthPx <= 0) return null;
+  const capturedNibPx = capturedNibPxForMeasurement(object);
+  const nibPx = capturedNibPx === undefined ? +state.formula.nibPx : capturedNibPx;
+  return Number.isFinite(nibPx) && nibPx > 0 ? lengthPx / nibPx : null;
+}
+function captureGapNormalization(object, nibPx = state.formula.nibPx, source = 'measurement') {
+  if (object?.type !== 'gap') return null;
+  const capturedNibPx = Number.isFinite(+nibPx) && +nibPx > 0 ? +nibPx : null;
+  object.normalization = {
+    ...(object.normalization || {}),
+    nibPxAtMeasurement: capturedNibPx,
+    calibrationId: state.formula.calibration?.id || null,
+    calibrationVersion: state.formula.calibration?.algorithmVersion ||
+      state.formula.calibration?.version || null,
+    calibrationMethod: state.formula.calibration?.method || null,
+    measuredAt: new Date().toISOString(),
+    source
+  };
+  return object.normalization;
+}
+function gapMeasurementSource(object) {
+  if (object?.type !== 'gap') return null;
+  if (object.gapDetection?.manualCorrected === true ||
+      object.autoMeasurement?.supersededByManualEndpoints === true) return 'manual';
+  if (object.gapDetection || object.autoMeasurement) return 'automatic';
+  const origin = object.provenance?.origin;
+  const originalOrigin = object.provenance?.originalOrigin;
+  if (object.auto === true || ['automatic', 'assisted'].includes(origin) ||
+      ['automatic', 'assisted'].includes(originalOrigin)) return 'automatic';
+  return 'manual';
 }
 function midpoint(a, b) { return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; }
 function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
@@ -622,6 +672,7 @@ function draw() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   for (const object of state.objects) drawObject(object, object.id === state.selectedId, false);
   if (state.draft) drawObject(state.draft, false, true);
+  if (typeof drawLetterInteractionOverlays === 'function') drawLetterInteractionOverlays();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
 
   if (!state.image) {
@@ -1006,8 +1057,8 @@ function lineLabel(object) {
     return `${fmt(ratio, 2)} עובי קולמוס${object.sampleAccepted === false ? ' · דגימה חריגה' : ''}`;
   }
   if (object.type === 'gap') {
-    const ratio = state.formula.nibPx ? px / state.formula.nibPx : null;
-    return ratio ? `${variableName(object.formulaKey)}: ${fmt(ratio, 2)} עובי קולמוס` : 'נדרש כיול קולמוס';
+    const ratio = measurementRatioNib(object);
+    return ratio != null ? `${variableName(object.formulaKey)}: ${fmt(ratio, 2)} עובי קולמוס` : 'נדרש כיול קולמוס';
   }
   if (state.formula.nibPx) return `${fmt(px / state.formula.nibPx, 2)} עובי קולמוס`;
   return 'נדרש כיול קולמוס';

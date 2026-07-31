@@ -57,7 +57,9 @@ function measurementResultModel(object) {
 
   if (['length', 'nib', 'gap'].includes(object.type) && object.points.length >= 2) {
     const px = object.type === 'gap' ? measurementLengthPx(object) : distance(object.points[0], object.points[1]);
-    const ratio = state.formula.nibPx ? px / state.formula.nibPx : null;
+    const ratio = object.type === 'gap'
+      ? measurementRatioNib(object)
+      : state.formula.nibPx ? px / state.formula.nibPx : null;
     let primaryText = ratio == null ? 'נדרש כיול קולמוס' : `${fmt(ratio, 2)} עובי קולמוס`;
     if (object.type === 'nib' && ratio == null) primaryText = '1 עובי קולמוס';
     if (object.type === 'gap' && ratio != null) primaryText = `${variableName(object.formulaKey)}: ${primaryText}`;
@@ -191,11 +193,13 @@ function renderList() {
   }
 }
 
-function selectObject(id) {
+function selectObject(id, options = {}) {
+  const preserveVectorSelection = options.preserveVectorSelection === true &&
+    state.letterVectorSelection?.id === id;
   state.selectedId = id;
   state.selectedPoint = null;
   state.selectedSegment = null;
-  state.letterVectorSelection = null;
+  if (!preserveVectorSelection) state.letterVectorSelection = null;
   const object = state.objects.find(item => item.id === id);
   if (object) {
     ui.name.value = object.name || '';
@@ -253,8 +257,9 @@ function renderResults() {
     if (object.auto) html += '<p class="result-note">הצעה אוטומטית. גרור את הקצוות לאזור מייצג כדי לאמת.</p>';
   } else if (object.type === 'gap') {
     const px = measurementLengthPx(object);
-    html += state.formula.nibPx
-      ? `<p class="result-emphasis">${fmt(px / state.formula.nibPx, 2)} עובי קולמוס</p>${technicalPixelDetails(px)}`
+    const ratio = measurementRatioNib(object);
+    html += ratio != null
+      ? `<p class="result-emphasis">${fmt(ratio, 2)} עובי קולמוס</p>${technicalPixelDetails(px)}`
       : `<p class="result-emphasis">נדרש כיול קולמוס</p>${technicalPixelDetails(px)}`;
     if (state.formula.commonGapPx) html += `<p>${fmt(px / state.formula.commonGapPx, 2)} מן המרווח המצוי</p>`;
     if (object.gapDetection) {
@@ -442,25 +447,46 @@ function renderFormulaUI() {
 
   const gapGroups = new Map();
   for (const object of state.objects.filter(item => item.type === 'gap')) {
-    if (!gapGroups.has(object.formulaKey)) gapGroups.set(object.formulaKey, []);
-    gapGroups.get(object.formulaKey).push(measurementLengthPx(object));
+    const source = object.formulaKey === 'between-lines' ? gapMeasurementSource(object) : null;
+    const groupId = JSON.stringify([object.formulaKey, source]);
+    if (!gapGroups.has(groupId)) gapGroups.set(groupId, { key: object.formulaKey, source, objects: [] });
+    gapGroups.get(groupId).objects.push(object);
   }
   const summary = $('formulaSummary');
   summary.replaceChildren();
   if (!gapGroups.size) {
     const note = document.createElement('p');
     note.className = 'microcopy';
-    note.textContent = 'לאחר סימון מרווחים יוצג כאן ממוצע לכל משתנה.';
+    note.textContent = 'לאחר סימון מרווחים יוצג כאן סיכום לכל משתנה.';
     summary.append(note);
   } else {
-    for (const [key, values] of gapGroups) {
+    const variableOrder = new Map(state.formula.variables.map((variable, index) => [variable.id, index]));
+    const groups = [...gapGroups.values()].sort((first, second) => {
+      const keyOrder = (variableOrder.get(first.key) ?? Number.MAX_SAFE_INTEGER) -
+        (variableOrder.get(second.key) ?? Number.MAX_SAFE_INTEGER);
+      if (keyOrder) return keyOrder;
+      if (first.source === second.source) return 0;
+      return first.source === 'manual' ? -1 : 1;
+    });
+    for (const { key, source, objects } of groups) {
       const row = document.createElement('div');
       row.className = 'summary-row';
       const labelText = document.createElement('span');
-      labelText.textContent = variableName(key);
+      const sourceLabel = source === 'manual' ? ' — ידני' : source === 'automatic' ? ' — אוטומטי' : '';
+      labelText.textContent = `${variableName(key)}${sourceLabel}`;
       const valueText = document.createElement('strong');
-      const average = values.reduce((sum, value) => sum + value, 0) / values.length;
-      valueText.textContent = state.formula.nibPx ? `${fmt(average / state.formula.nibPx, 2)} עובי קולמוס` : 'נדרש כיול';
+      const ratios = objects.map(measurementRatioNib).filter(value => Number.isFinite(value));
+      let aggregate = null;
+      if (ratios.length) {
+        ratios.sort((a, b) => a - b);
+        if (key === 'between-lines') {
+          const middle = Math.floor(ratios.length / 2);
+          aggregate = ratios.length % 2 ? ratios[middle] : (ratios[middle - 1] + ratios[middle]) / 2;
+        } else {
+          aggregate = ratios.reduce((sum, value) => sum + value, 0) / ratios.length;
+        }
+      }
+      valueText.textContent = aggregate != null ? `${fmt(aggregate, 2)} עובי קולמוס` : 'נדרש כיול';
       row.append(labelText, valueText);
       summary.append(row);
     }
@@ -669,6 +695,15 @@ function hitTest(imagePoint) {
       return { object: selectedLetter, handle: null, segment: null, letterHandle: null };
     }
   }
+  const selectedQuad = state.objects.find(item =>
+    item.id === state.selectedId && ['kastel', 'nibRegion'].includes(item.type)
+  );
+  if (selectedQuad) {
+    const selectedQuadHandle = nearestPointIndex(selectedQuad.points, imagePoint, 24);
+    if (selectedQuadHandle >= 0) {
+      return { object: selectedQuad, handle: selectedQuadHandle, segment: null };
+    }
+  }
   const selectedAreaHit = selectedAreaEditHit(imagePoint);
   if (selectedAreaHit) return selectedAreaHit;
 
@@ -719,6 +754,8 @@ function captureInteractionState() {
     selectedPoint: structuredCloneSafe(state.selectedPoint),
     selectedSegment: structuredCloneSafe(state.selectedSegment),
     letterVectorSelection: structuredCloneSafe(state.letterVectorSelection),
+    letterVectorLasso: structuredCloneSafe(state.letterVectorLasso),
+    vectorizeLasso: structuredCloneSafe(state.vectorizeLasso),
     nextId: state.nextId,
     view: { ...state.view },
     history: state.history.slice(),
@@ -737,6 +774,8 @@ function restoreInteractionState(saved) {
   state.selectedPoint = structuredCloneSafe(saved.selectedPoint);
   state.selectedSegment = structuredCloneSafe(saved.selectedSegment);
   state.letterVectorSelection = structuredCloneSafe(saved.letterVectorSelection);
+  state.letterVectorLasso = structuredCloneSafe(saved.letterVectorLasso);
+  state.vectorizeLasso = structuredCloneSafe(saved.vectorizeLasso);
   state.nextId = saved.nextId;
   state.view = { ...saved.view };
   state.history = (saved.history || []).slice();
@@ -746,15 +785,27 @@ function restoreInteractionState(saved) {
 
 function isMeasurementPointer(event) {
   if (event.pointerType === 'pen') return true;
-  return event.pointerType === 'mouse' && !TOUCH_CAPABLE_DEVICE;
+  return event.pointerType === 'mouse';
+}
+
+function cancelTouchLetterInteraction({ render = true } = {}) {
+  if (state.touchEditPointerId === null || !state.interactionBefore) return false;
+  restoreInteractionState(state.interactionBefore);
+  state.touchEditPointerId = null;
+  state.dragging = null;
+  state.interactionBefore = null;
+  if (render) renderAll();
+  return true;
 }
 
 function clearIdleTouchesForPen() {
   if (state.pinchStart || state.pointers.size !== 1) return false;
+  const restoredLetter = cancelTouchLetterInteraction({ render: false });
   for (const pointerId of state.pointers.keys()) {
     try { canvas.releasePointerCapture(pointerId); } catch {}
   }
   state.pointers.clear();
+  if (restoredLetter) renderAll();
   return true;
 }
 
@@ -777,12 +828,34 @@ function handleTouchPointerDown(event) {
   event.preventDefault();
   if (state.activePointerId !== null) return;
   try { canvas.setPointerCapture(event.pointerId); } catch {}
-  state.pointers.set(event.pointerId, getPos(event));
+  const screenPoint = getPos(event);
+  state.pointers.set(event.pointerId, screenPoint);
   if (state.pointers.size === 2) {
+    const restoredLetter = cancelTouchLetterInteraction({ render: false });
     rebaseTouchGesture();
     statusText.textContent = 'הזזה וזום בשתי אצבעות';
+    if (restoredLetter) renderAll();
   } else if (state.pointers.size === 1) {
-    statusText.textContent = 'מדידה ב־Apple Pencil; הזזה וזום בשתי אצבעות';
+    const imagePoint = state.image ? screenToImage(screenPoint) : null;
+    const hit = imagePoint && state.tool === 'pan' ? hitTest(imagePoint) : null;
+    if (hit && isLetterTemplate(hit.object)) {
+      state.interactionBefore = captureInteractionState();
+      selectObject(hit.object.id);
+      state.touchEditPointerId = event.pointerId;
+      state.dragging = {
+        type: 'touchLetter',
+        id: hit.object.id,
+        pointerId: event.pointerId,
+        originScreen: screenPoint,
+        start: imagePoint,
+        original: structuredCloneSafe(hit.object.points),
+        before: captureSnapshot(),
+        moved: false
+      };
+      statusText.textContent = 'גרור באצבע כדי להזיז את האות; אצבע שנייה עוברת להזזה ולזום';
+    } else {
+      statusText.textContent = 'Pencil לעבודה על התמונה; שתי אצבעות להזזה ולזום';
+    }
   }
 }
 
@@ -811,10 +884,21 @@ function pointerDown(event) {
   state.interactionBefore = captureInteractionState();
 
   const imagePoint = screenToImage(screenPoint);
+  if (state.tool === 'vectorize') {
+    beginVectorizeLasso(imagePoint, event.pointerId);
+    return;
+  }
+  if (state.tool === 'pan' && state.letterVectorLasso?.armed) {
+    if (beginLetterAnchorLasso(imagePoint, event.pointerId)) return;
+  }
   const hit = hitTest(imagePoint);
-  const canEditHit = !!hit && state.tool === 'pan';
+  const selectedKastelHandle = state.tool === 'kastel' &&
+    hit?.object?.id === state.selectedId &&
+    hit.object.type === 'kastel' &&
+    Number.isInteger(hit.handle);
+  const canEditHit = !!hit && (state.tool === 'pan' || selectedKastelHandle);
   if (canEditHit) {
-    selectObject(hit.object.id);
+    selectObject(hit.object.id, { preserveVectorSelection: true });
     const dragBase = {
       id: hit.object.id,
       originScreen: screenPoint,
@@ -826,18 +910,42 @@ function pointerDown(event) {
     if (hit.letterVectorHandle) {
       state.selectedPoint = null;
       state.selectedSegment = null;
-      state.letterVectorSelection = {
-        id: hit.object.id,
-        handleId: hit.letterVectorHandle.id
-      };
-      state.dragging = {
-        ...dragBase,
-        type: 'letterVectorHandle',
-        vectorHandleId: hit.letterVectorHandle.id
-      };
-      statusText.textContent = hit.letterVectorHandle.kind === 'anchor'
-        ? 'גרור את נקודת העוגן; ידיות העקומה הסמוכות ינועו איתה'
-        : 'גרור את ידית ה־Bézier כדי לדייק את העקומה';
+      const groupedIds = state.letterVectorSelection?.id === hit.object.id
+        ? [...new Set(state.letterVectorSelection.handleIds || [])]
+        : [];
+      if (hit.letterVectorHandle.kind === 'anchor' && groupedIds.length > 1 &&
+          groupedIds.includes(hit.letterVectorHandle.id)) {
+        const engine = globalThis.MEDIDAOT_VECTOR_ENGINE;
+        state.dragging = {
+          ...dragBase,
+          type: 'letterVectorGroup',
+          start: imagePoint,
+          vectorHandleIds: groupedIds,
+          originalVector: engine?.cloneVectorData?.(hit.object, { asset: letterAsset(hit.object) }) || null
+        };
+        state.letterVectorSelection = {
+          id: hit.object.id,
+          handleIds: groupedIds,
+          primaryHandleId: hit.letterVectorHandle.id,
+          handleId: hit.letterVectorHandle.id
+        };
+        statusText.textContent = `גרור להזזת ${groupedIds.length} נקודות העוגן יחד`;
+      } else {
+        state.letterVectorSelection = {
+          id: hit.object.id,
+          handleIds: [hit.letterVectorHandle.id],
+          primaryHandleId: hit.letterVectorHandle.id,
+          handleId: hit.letterVectorHandle.id
+        };
+        state.dragging = {
+          ...dragBase,
+          type: 'letterVectorHandle',
+          vectorHandleId: hit.letterVectorHandle.id
+        };
+        statusText.textContent = hit.letterVectorHandle.kind === 'anchor'
+          ? 'גרור את נקודת העוגן; ידיות העקומה הסמוכות ינועו איתה'
+          : 'גרור את ידית ה־Bézier כדי לדייק את העקומה';
+      }
     } else if (hit.letterHandle) {
       state.selectedPoint = null;
       state.selectedSegment = null;

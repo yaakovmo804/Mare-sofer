@@ -1,7 +1,7 @@
 (function installMedidaotAutoMeasure(global) {
   'use strict';
 
-  const ENGINE_VERSION = 'local-roof-row-cv-v1';
+  const ENGINE_VERSION = 'local-roof-row-cv-v2';
   const NIB_ROLE = 'medidaot-auto-roof-nib-v1';
   const GAP_ROLE = 'medidaot-auto-interline-gap-v1';
   const OWN_ROLES = Object.freeze([NIB_ROLE, GAP_ROLE]);
@@ -689,7 +689,14 @@
         }
       }
       if (tail >= minimumArea) {
-        components.push({ area: tail, minX, maxX, minY, maxY });
+        components.push({
+          area: tail,
+          minX,
+          maxX,
+          minY,
+          maxY,
+          pixels: queue.slice(0, tail)
+        });
       }
     }
     return components;
@@ -701,12 +708,7 @@
     if (!components.length) return binary;
     const mask = new Uint8Array(binary.length);
     for (const component of components) {
-      for (let y = component.minY; y <= component.maxY; y++) {
-        for (let x = component.minX; x <= component.maxX; x++) {
-          const index = y * width + x;
-          if (binary[index]) mask[index] = 1;
-        }
-      }
+      for (const index of component.pixels) mask[index] = 1;
     }
     return mask;
   }
@@ -1361,6 +1363,8 @@
       rasterBottomY: bottom,
       rasterXMin: xMin,
       rasterXMax: xMax,
+      rasterInkXMin: occupiedX[0],
+      rasterInkXMax: occupiedX[occupiedX.length - 1],
       confidence: bound(
         (.24 + Math.min(.34, coverage * .88) + consistency * .31) * bodyPlausibility,
         .10,
@@ -1424,6 +1428,8 @@
       rasterBottomY: bottom,
       rasterXMin: xMin,
       rasterXMax: xMax,
+      rasterInkXMin: occupiedX[0],
+      rasterInkXMax: occupiedX[occupiedX.length - 1],
       confidence: bound(.28 + Math.min(.35, coverage * .9) + consistency * .32, .12, .96),
       stats: {
         occupiedColumnCount: occupiedX.length,
@@ -1452,6 +1458,14 @@
         previous.rasterBottomY = Math.max(previous.rasterBottomY, current.rasterBottomY);
         previous.rasterXMin = Math.min(previous.rasterXMin, current.rasterXMin);
         previous.rasterXMax = Math.max(previous.rasterXMax, current.rasterXMax);
+        previous.rasterInkXMin = Math.min(
+          previous.rasterInkXMin ?? previous.rasterXMin,
+          current.rasterInkXMin ?? current.rasterXMin
+        );
+        previous.rasterInkXMax = Math.max(
+          previous.rasterInkXMax ?? previous.rasterXMax,
+          current.rasterInkXMax ?? current.rasterXMax
+        );
         previous.confidence = Math.max(previous.confidence, current.confidence) * .92;
         previous.stats.occupiedColumnCount += current.stats.occupiedColumnCount;
       } else {
@@ -1626,6 +1640,119 @@
     };
   }
 
+  function horizontalInkRunLength(binary, width, height, x, y) {
+    if (x < 0 || x >= width || y < 0 || y >= height || !binary[y * width + x]) return 0;
+    let left = x;
+    let right = x;
+    while (left > 0 && binary[y * width + left - 1]) left--;
+    while (right + 1 < width && binary[y * width + right + 1]) right++;
+    return right - left + 1;
+  }
+
+  function localZeroMarginGap(prepared, detection, upper, lower) {
+    const { binary, nibRasterPx } = detection;
+    const { width, height, scaleX, scaleY } = prepared;
+    const upperInkLeft = upper.rasterInkXMin ?? upper.rasterXMin;
+    const upperInkRight = upper.rasterInkXMax ?? upper.rasterXMax;
+    const lowerInkLeft = lower.rasterInkXMin ?? lower.rasterXMin;
+    const lowerInkRight = lower.rasterInkXMax ?? lower.rasterXMax;
+    const overlapLeft = Math.max(0, Math.ceil(Math.max(upperInkLeft, lowerInkLeft)));
+    const overlapRight = Math.min(width - 1, Math.floor(Math.min(upperInkRight, lowerInkRight)));
+    if (overlapRight < overlapLeft) return null;
+    const upperSearchTop = bound(Math.floor(upper.rasterRoofTopY), 0, height - 1);
+    const gapMidpoint = (upper.rasterBottomY + lower.rasterRoofTopY) / 2;
+    const upperSearchBottom = bound(Math.floor(gapMidpoint), upperSearchTop, height - 1);
+    const lowerSearchTop = bound(
+      Math.floor(lower.rasterRoofTopY - nibRasterPx * 1.15),
+      0,
+      height - 1
+    );
+    const lowerSearchBottom = bound(
+      Math.ceil(lower.rasterRoofTopY + nibRasterPx * 1.25),
+      lowerSearchTop,
+      height - 1
+    );
+    // A genuine terminal stroke can be about half a nib wide. Keep the
+    // component/noise filter as the guard, and do not require a broad seat.
+    const minimumUpperSupport = Math.max(2, Math.ceil(nibRasterPx * .34));
+    const minimumRoofSupport = Math.max(2, Math.ceil(nibRasterPx * .72));
+    const candidates = [];
+
+    for (let x = overlapLeft; x <= overlapRight; x++) {
+      let upperInkY = null;
+      for (let y = upperSearchBottom; y >= upperSearchTop; y--) {
+        if (!binary[y * width + x]) continue;
+        if (horizontalInkRunLength(binary, width, height, x, y) < minimumUpperSupport) continue;
+        upperInkY = y;
+        break;
+      }
+      if (upperInkY == null || upperInkY < upper.rasterBottomY - nibRasterPx * 1.15) continue;
+
+      let lowerRoofY = null;
+      for (let y = lowerSearchTop; y <= lowerSearchBottom; y++) {
+        if (!binary[y * width + x]) continue;
+        if (horizontalInkRunLength(binary, width, height, x, y) < minimumRoofSupport) continue;
+        lowerRoofY = y;
+        break;
+      }
+      if (lowerRoofY == null || Math.abs(lowerRoofY - lower.rasterRoofTopY) > nibRasterPx * 1.15) continue;
+      const upperBoundaryY = upperInkY + 1;
+      const gapRasterPx = lowerRoofY - upperBoundaryY;
+      if (gapRasterPx <= .5) continue;
+      candidates.push({ x, upperInkY, upperBoundaryY, lowerRoofY, gapRasterPx });
+    }
+
+    const runs = [];
+    for (const candidate of candidates) {
+      const previous = runs[runs.length - 1];
+      if (previous && candidate.x === previous.items[previous.items.length - 1].x + 1) {
+        previous.items.push(candidate);
+      } else {
+        runs.push({ items: [candidate] });
+      }
+    }
+    const minimumRunWidth = Math.max(2, Math.ceil(nibRasterPx * .34));
+    const stableRuns = runs.filter(run => run.items.length >= minimumRunWidth);
+    const stableCandidates = stableRuns.flatMap(run => run.items.map((candidate, index) => ({
+      ...candidate,
+      runLeft: run.items[0].x,
+      runRight: run.items[run.items.length - 1].x,
+      edgeDistance: Math.min(index, run.items.length - 1 - index)
+    })));
+    if (!stableCandidates.length) return null;
+    const representativeGap = median(stableCandidates.map(candidate => candidate.gapRasterPx));
+    const overlapCenter = (overlapLeft + overlapRight) / 2;
+    stableCandidates.sort((first, second) =>
+      Math.abs(first.gapRasterPx - representativeGap) - Math.abs(second.gapRasterPx - representativeGap) ||
+      second.edgeDistance - first.edgeDistance ||
+      Math.abs(first.x - overlapCenter) - Math.abs(second.x - overlapCenter) ||
+      first.x - second.x
+    );
+    const chosen = stableCandidates[0];
+    return {
+      x: (chosen.x + .5) * scaleX,
+      upperBoundaryY: chosen.upperBoundaryY * scaleY,
+      lowerBoundaryY: chosen.lowerRoofY * scaleY,
+      valuePx: chosen.gapRasterPx * scaleY,
+      raster: {
+        x: chosen.x,
+        upperInkY: chosen.upperInkY,
+        upperBoundaryY: chosen.upperBoundaryY,
+        lowerRoofY: chosen.lowerRoofY,
+        gapPx: chosen.gapRasterPx,
+        runLeft: chosen.runLeft,
+        runRight: chosen.runRight
+      },
+      support: {
+        left: chosen.runLeft * scaleX,
+        right: (chosen.runRight + 1) * scaleX,
+        candidateCount: stableCandidates.length,
+        runCount: stableRuns.length,
+        minimumRunWidthRasterPx: minimumRunWidth
+      }
+    };
+  }
+
   function analyzeInterlinePrepared(prepared, options = {}) {
     const suppliedNib = finite(options.nibPx);
     const detectedNib = finite(options.nib?.valuePx);
@@ -1663,17 +1790,16 @@
     for (let index = 0; index < rows.length - 1; index++) {
       const upper = rows[index];
       const lower = rows[index + 1];
-      const valuePx = lower.roofTopY - upper.bottomY;
+      const local = localZeroMarginGap(
+        prepared,
+        detection,
+        detection.rows[index],
+        detection.rows[index + 1]
+      );
+      if (!local) continue;
+      const valuePx = local.valuePx;
       if (valuePx <= Math.max(.5, activeNib * .06)) continue;
-      const overlapLeft = Math.max(upper.xMin, lower.xMin);
-      const overlapRight = Math.min(upper.xMax, lower.xMax);
-      const fallbackCenter = (
-        (upper.xMin + upper.xMax) / 2 +
-        (lower.xMin + lower.xMax) / 2
-      ) / 2;
-      const x = overlapRight > overlapLeft
-        ? (overlapLeft + overlapRight) / 2
-        : bound(fallbackCenter, 0, prepared.sourceWidth);
+      const x = local.x;
       const ratio = valuePx / activeNib;
       const plausibility = ratio >= .25 && ratio <= 9
         ? 1
@@ -1693,14 +1819,18 @@
         length: valuePx,
         valueNib: valuePx / activeNib,
         points: [
-          { x, y: upper.bottomY },
-          { x, y: lower.roofTopY }
+          { x, y: local.upperBoundaryY },
+          { x, y: local.lowerBoundaryY }
         ],
         confidence,
         boundaries: {
-          upperBottomInkY: upper.bottomY,
-          lowerReferenceRoofTopY: lower.roofTopY
-        }
+          upperBottomInkY: local.upperBoundaryY,
+          lowerReferenceRoofTopY: local.lowerBoundaryY,
+          zeroMargin: true,
+          raster: local.raster,
+          support: local.support
+        },
+        localSupport: local.support
       });
     }
     if (!gaps.length) throw new Error('No positive adjacent interline clearance was detected');
@@ -2085,19 +2215,22 @@
       const sourceWidth = finite(result.geometry?.sourceWidth) ||
         finite(currentState.image?.width) ||
         Math.max(gap.points[0].x, gap.points[1].x) * 2;
-      const overlapLeft = Math.max(
+      const activeNibPx = finite(result.nibPx) || finite(currentState.formula.nibPx);
+      const supportLeft = finite(gap.localSupport?.left) ??
+        finite(gap.boundaries?.support?.left);
+      const supportRight = finite(gap.localSupport?.right) ??
+        finite(gap.boundaries?.support?.right);
+      const overlapLeft = supportLeft ?? Math.max(
         finite(upperRow?.xMin) ?? gap.points[0].x,
         finite(lowerRow?.xMin) ?? gap.points[0].x
       );
-      const overlapRight = Math.min(
+      const overlapRight = supportRight ?? Math.min(
         finite(upperRow?.xMax) ?? gap.points[0].x,
         finite(lowerRow?.xMax) ?? gap.points[0].x
       );
-      const desiredSpan = Math.max(
-        (finite(result.nibPx) || 1) * 6,
-        sourceWidth * .075,
-        12
-      );
+      // The evidence ticks deliberately stay local. A long global line implies
+      // a statistical row boundary even where no ink exists at that height.
+      const desiredSpan = Math.max((activeNibPx || 1) * 2.25, 12);
       let boundaryLeft;
       let boundaryRight;
       if (overlapRight - overlapLeft >= 4) {
@@ -2137,27 +2270,39 @@
         algorithmVersion: ENGINE_VERSION,
         gapDetection: {
           medianPx: gap.valuePx,
-          method: 'auto-interline-clearance-v1',
+          method: 'auto-interline-zero-margin-v2',
           engine: ENGINE_VERSION,
           confidence: gap.confidence,
           sampleCount: 2,
           verified: false,
           manualCorrected: false,
           upperBoundary,
-          lowerBoundary
+          lowerBoundary,
+          zeroMargin: true,
+          raster: gap.boundaries?.raster ? { ...gap.boundaries.raster } : null,
+          support: gap.boundaries?.support ? { ...gap.boundaries.support } : null
         },
         rowBoundaries: {
           upperRowIndex: gap.upperRowIndex,
           lowerRowIndex: gap.lowerRowIndex,
           upperBottomInkY: gap.boundaries.upperBottomInkY,
-          lowerReferenceRoofTopY: gap.boundaries.lowerReferenceRoofTopY
+          lowerReferenceRoofTopY: gap.boundaries.lowerReferenceRoofTopY,
+          zeroMargin: true,
+          support: gap.boundaries?.support ? { ...gap.boundaries.support } : null
+        },
+        normalization: {
+          nibPxAtMeasurement: activeNibPx,
+          calibrationId: currentState.formula.calibration?.id || null,
+          calibrationVersion: currentState.formula.calibration?.algorithmVersion ||
+            currentState.formula.calibration?.version || null,
+          measuredAt: new Date().toISOString()
         },
         autoMeasurement: {
           engine: ENGINE_VERSION,
           kind: 'interline-clearance',
           definition: 'upper-row-bottom-ink-to-next-row-reference-roof-top',
           valuePx: gap.valuePx,
-          valueNib: gap.valueNib,
+          valueNib: activeNibPx ? gap.valuePx / activeNibPx : gap.valueNib,
           confidence: gap.confidence
         }
       }, currentState);
@@ -2199,6 +2344,12 @@
       textRows,
       interlineProposals
     };
+    // Keep human and automatic evidence separate. If a verified/manual gap is
+    // present it remains the active formula value; the automatic median stays
+    // visible as its own comparison instead of being averaged into it.
+    if (typeof global.refreshBetweenLinesSummary === 'function') {
+      global.refreshBetweenLinesSummary();
+    }
     if (options.selectEvidence && objects[0]) currentState.selectedId = objects[0].id;
     safeStatus(
       `זוהו ${objects.length} מרווחים בין שורות · חציון ${result.medianNib.toFixed(2)} עובי קולמוס`
@@ -2468,6 +2619,8 @@
       prepareRaster,
       densestRelativeCluster,
       detectRowBands,
+      localZeroMarginGap,
+      removeTinyInk,
       isManualCalibrationLocked
     })
   });

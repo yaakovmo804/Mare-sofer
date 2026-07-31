@@ -4,6 +4,9 @@ function commitDraft(message) {
   snapshot();
   const object = state.draft;
   if (object.type === 'area') ensureAreaSegments(object);
+  if (object.type === 'gap' && gapMeasurementSource(object) === 'manual') {
+    captureGapNormalization(object, state.formula.nibPx, 'manual-measurement');
+  }
   state.objects.push(object);
   if (object.type === 'nib' && !object.regionId) replaceCalibrationOverlays(object);
   state.draft = null;
@@ -70,35 +73,67 @@ function refreshBetweenLinesSummary() {
     .map(object => ({
       measurementId: object.uid || String(object.id),
       valuePx: measurementLengthPx(object),
-      valueNib: state.formula.nibPx ? measurementLengthPx(object) / state.formula.nibPx : null,
+      valueNib: measurementRatioNib(object),
+      source: gapMeasurementSource(object),
       points: structuredCloneSafe(object.points),
       manualCorrected: object.gapDetection?.manualCorrected === true,
-      confidence: object.gapDetection?.confidence ?? object.confidence ?? null
+      confidence: object.gapDetection?.confidence ?? object.confidence ?? null,
+      normalization: structuredCloneSafe(object.normalization || null)
     }))
     .filter(proposal => Number.isFinite(proposal.valuePx) && proposal.valuePx > 0);
-  const values = proposals.map(proposal => proposal.valuePx).sort((a, b) => a - b);
-  if (!values.length) {
+
+  function summarize(source) {
+    const matching = proposals.filter(proposal => proposal.source === source);
+    if (!matching.length) return null;
+    const medianOf = values => {
+      const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+      if (!sorted.length) return null;
+      const middle = Math.floor(sorted.length / 2);
+      return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+    };
+    return {
+      source,
+      count: matching.length,
+      medianPx: medianOf(matching.map(proposal => proposal.valuePx)),
+      medianNib: medianOf(matching.map(proposal => proposal.valueNib))
+    };
+  }
+
+  const manualSummary = summarize('manual');
+  const automaticSummary = summarize('automatic');
+  const activeSummary = manualSummary || automaticSummary;
+  if (!activeSummary) {
     state.formula.betweenLinesPx = null;
     state.formula.analysis = {
       ...(state.formula.analysis || {}),
       interlineProposals: [],
+      interlineSummaries: { manual: null, automatic: null, activeSource: null },
+      manualInterlineMedianPx: null,
+      manualInterlineMedianNib: null,
       autoInterlineMedianPx: null,
-      autoInterlineMedianNib: null
+      autoInterlineMedianNib: null,
+      betweenLinesMedianPx: null,
+      betweenLinesMedianNib: null
     };
     return null;
   }
-  const middle = Math.floor(values.length / 2);
-  const median = values.length % 2
-    ? values[middle]
-    : (values[middle - 1] + values[middle]) / 2;
-  state.formula.betweenLinesPx = median;
+  state.formula.betweenLinesPx = activeSummary.medianPx;
   state.formula.analysis = {
     ...(state.formula.analysis || {}),
     interlineProposals: proposals,
-    autoInterlineMedianPx: median,
-    autoInterlineMedianNib: state.formula.nibPx ? median / state.formula.nibPx : null
+    interlineSummaries: {
+      manual: manualSummary,
+      automatic: automaticSummary,
+      activeSource: activeSummary.source
+    },
+    manualInterlineMedianPx: manualSummary?.medianPx ?? null,
+    manualInterlineMedianNib: manualSummary?.medianNib ?? null,
+    autoInterlineMedianPx: automaticSummary?.medianPx ?? null,
+    autoInterlineMedianNib: automaticSummary?.medianNib ?? null,
+    betweenLinesMedianPx: activeSummary.medianPx,
+    betweenLinesMedianNib: activeSummary.medianNib
   };
-  return median;
+  return activeSummary.medianPx;
 }
 
 function clearDraftState() {
@@ -135,16 +170,54 @@ function finishRectDraft(objectType, rollbackSnapshot) {
   const object = commitDraft(objectType === 'kastel'
     ? 'הקעסטעל נוצר. כעת אפשר להחיל חוק שלישים או לזהות גג, חלל ומושב'
     : 'אזור הכיול נוצר ומנותח כעת');
-  if (objectType === 'kastel') initializeKastelGuides(object);
+  if (objectType === 'kastel') {
+    initializeKastelGuides(object);
+    setTool('pan');
+    statusText.textContent = 'הקעסטעל נוצר ונבחר. גרור כל פינה כדי להרחיב או לעצב אותו';
+  }
   if (objectType === 'nibRegion') analyzeCalibrationRegion(object, rollbackSnapshot);
   return object;
+}
+
+function orientationValue(a, b, c) {
+  return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+}
+
+function segmentsProperlyIntersect(a, b, c, d) {
+  const first = orientationValue(a, b, c);
+  const second = orientationValue(a, b, d);
+  const third = orientationValue(c, d, a);
+  const fourth = orientationValue(c, d, b);
+  return first * second < 0 && third * fourth < 0;
+}
+
+function validEditableKastel(points) {
+  return Array.isArray(points) && points.length === 4 &&
+    polygonArea(points) * state.view.scale * state.view.scale >= 144 &&
+    !segmentsProperlyIntersect(points[0], points[1], points[2], points[3]) &&
+    !segmentsProperlyIntersect(points[1], points[2], points[3], points[0]);
 }
 
 function handleTouchPointerMove(event) {
   event.preventDefault();
   if (!state.pointers.has(event.pointerId)) return;
-  state.pointers.set(event.pointerId, getPos(event));
-  if (state.pointers.size < 2) return;
+  const screenPoint = getPos(event);
+  state.pointers.set(event.pointerId, screenPoint);
+  if (state.pointers.size < 2) {
+    const drag = state.dragging;
+    if (state.touchEditPointerId !== event.pointerId || drag?.type !== 'touchLetter') return;
+    if (!dragPassedThreshold(drag, screenPoint, 4)) return;
+    const imagePoint = screenToImage(screenPoint);
+    const object = state.objects.find(item => item.id === drag.id && isLetterTemplate(item));
+    if (!object) return;
+    const dx = imagePoint.x - drag.start.x;
+    const dy = imagePoint.y - drag.start.y;
+    object.points = drag.original.map(point => ({ x: point.x + dx, y: point.y + dy }));
+    drag.moved = true;
+    draw();
+    renderResults();
+    return;
+  }
   const ids = state.pinchStart?.pointerIds || [];
   if (ids.length !== 2 || !ids.every(id => state.pointers.has(id))) {
     rebaseTouchGesture();
@@ -162,7 +235,22 @@ function handleTouchPointerMove(event) {
   draw();
 }
 
+const MEDIDAOT_INTERFACE_SELECTOR = '.topbar,.toolbar,.properties,.letter-drawer,dialog,.floating-help,.standalone-hint';
+
+function pointerIsOverInterface(event) {
+  if (typeof document.elementFromPoint !== 'function') return false;
+  const element = document.elementFromPoint(event.clientX, event.clientY);
+  return !!element && element !== canvas && !!element.closest?.(MEDIDAOT_INTERFACE_SELECTOR);
+}
+
 function pointerMove(event) {
+  if (event.pointerType === 'pen' &&
+      state.activePointerId === event.pointerId &&
+      pointerIsOverInterface(event)) {
+    pointerCancel(event);
+    statusText.textContent = 'הפעולה על משטח העבודה בוטלה; התפריטים פעילים באצבע';
+    return;
+  }
   event.preventDefault();
   if (event.pointerType === 'touch') {
     handleTouchPointerMove(event);
@@ -181,6 +269,10 @@ function pointerMove(event) {
   } else if (drag.type === 'drawRect') {
     const a = drag.start;
     state.draft.points = [a, { x: imagePoint.x, y: a.y }, imagePoint, { x: a.x, y: imagePoint.y }];
+  } else if (drag.type === 'vectorizeLasso') {
+    if (appendLassoPoint(state.vectorizeLasso, imagePoint)) drag.moved = true;
+  } else if (drag.type === 'letterAnchorLasso') {
+    if (appendLassoPoint(state.letterVectorLasso, imagePoint)) drag.moved = true;
   } else if (drag.type === 'draftHandle' && state.draft) {
     if (!dragPassedThreshold(drag, screenPoint, drag.closeOnTap ? 8 : 3)) return;
     if (drag.beforeDraft && !drag.historyCommitted) {
@@ -209,6 +301,9 @@ function pointerMove(event) {
       if (object.type === 'area') moveAreaAnchor(object, drag.handle, imagePoint);
       else object.points[drag.handle] = imagePoint;
       object.auto = false;
+      if (object.type === 'gap') {
+        captureGapNormalization(object, state.formula.nibPx, 'manual-endpoint-correction');
+      }
       if (object.type === 'gap' && object.gapDetection) {
         const correctedLength = distance(object.points[0], object.points[1]);
         object.gapDetection = {
@@ -225,7 +320,7 @@ function pointerMove(event) {
             originalValuePx: object.autoMeasurement.originalValuePx ?? object.autoMeasurement.valuePx,
             originalValueNib: object.autoMeasurement.originalValueNib ?? object.autoMeasurement.valueNib,
             valuePx: correctedLength,
-            valueNib: state.formula.nibPx ? correctedLength / state.formula.nibPx : null,
+            valueNib: measurementRatioNib(object),
             supersededByManualEndpoints: true
           };
         }
@@ -273,6 +368,31 @@ function pointerMove(event) {
       state.letterVectorSelection = {
         id: object.id,
         handleId: drag.vectorHandleId
+      };
+      syncLetterControls(object);
+    }
+  } else if (drag.type === 'letterVectorGroup') {
+    if (!dragPassedThreshold(drag, screenPoint)) return;
+    commitDragHistory(drag);
+    const object = state.objects.find(item => item.id === drag.id && isLetterTemplate(item));
+    const engine = globalThis.MEDIDAOT_VECTOR_ENGINE;
+    if (object && engine?.translateObjectHandles && drag.originalVector) {
+      object.letterVector = engine.cloneVectorData(drag.originalVector);
+      object.letterWeight = object.letterVector.weight;
+      engine.translateObjectHandles(object, drag.vectorHandleIds, {
+        x: imagePoint.x - drag.start.x,
+        y: imagePoint.y - drag.start.y
+      }, {
+        asset: letterAsset(object),
+        moveAdjacentControls: true
+      });
+      object.auto = false;
+      markObjectModified(object);
+      state.letterVectorSelection = {
+        id: object.id,
+        handleIds: [...drag.vectorHandleIds],
+        primaryHandleId: state.letterVectorSelection?.primaryHandleId || drag.vectorHandleIds[0],
+        handleId: state.letterVectorSelection?.primaryHandleId || drag.vectorHandleIds[0]
       };
       syncLetterControls(object);
     }
@@ -328,12 +448,44 @@ function endTouchPointer(event) {
 function pointerUp(event) {
   event.preventDefault();
   if (event.pointerType === 'touch') {
+    if (state.touchEditPointerId === event.pointerId && state.dragging?.type === 'touchLetter') {
+      const completed = state.dragging;
+      const object = state.objects.find(item => item.id === completed.id && isLetterTemplate(item));
+      if (completed.moved && object) {
+        state.history.push(completed.before);
+        if (state.history.length > 80) state.history.shift();
+        state.future = [];
+        object.auto = false;
+        markObjectModified(object);
+        statusText.textContent = 'האות הוזזה באצבע';
+      }
+      state.touchEditPointerId = null;
+      state.dragging = null;
+      state.interactionBefore = null;
+      renderAll();
+    }
     endTouchPointer(event);
     return;
   }
   if (!isMeasurementPointer(event) || state.activePointerId !== event.pointerId) return;
 
   const completedDrag = state.dragging;
+  if (completedDrag?.type === 'vectorizeLasso') {
+    finishVectorizeLasso();
+    state.dragging = null;
+    state.interactionBefore = null;
+    state.activePointerId = null;
+    try { canvas.releasePointerCapture(event.pointerId); } catch {}
+    return;
+  }
+  if (completedDrag?.type === 'letterAnchorLasso') {
+    finishLetterAnchorLasso();
+    state.dragging = null;
+    state.interactionBefore = null;
+    state.activePointerId = null;
+    try { canvas.releasePointerCapture(event.pointerId); } catch {}
+    return;
+  }
   if (completedDrag?.type === 'draftHandle' &&
       completedDrag.closeOnTap &&
       !completedDrag.moved &&
@@ -346,7 +498,7 @@ function pointerUp(event) {
     const objectType = state.dragging.objectType;
     finishRectDraft(objectType, state.interactionBefore);
   }
-  if (completedDrag?.moved && ['handle', 'object', 'letterResize', 'letterVectorHandle'].includes(completedDrag.type)) {
+  if (completedDrag?.moved && ['handle', 'object', 'letterResize', 'letterVectorHandle', 'letterVectorGroup'].includes(completedDrag.type)) {
     const movedObject = state.objects.find(item => item.id === completedDrag.id);
     if (movedObject?.type === 'nibRegion') {
       const rollbackSnapshot = completedDrag.before;
@@ -354,8 +506,13 @@ function pointerUp(event) {
       analyzeCalibrationRegion(movedObject, rollbackSnapshot);
     }
     if (movedObject?.type === 'kastel') {
-      normalizeQuadObject(movedObject);
-      initializeKastelGuides(movedObject);
+      if (validEditableKastel(movedObject.points)) {
+        initializeKastelGuides(movedObject);
+      } else {
+        const original = completedDrag.before?.objects?.find(item => item.id === movedObject.id);
+        if (original?.points?.length === 4) movedObject.points = structuredCloneSafe(original.points);
+        statusText.textContent = 'הפינה לא הוזזה משום שהמסגרת הייתה מצטלבת או קורסת';
+      }
     }
   }
   if (completedDrag?.moved) renderAll();
@@ -366,6 +523,7 @@ function pointerUp(event) {
 }
 function pointerCancel(event) {
   if (event.pointerType === 'touch') {
+    if (state.touchEditPointerId === event.pointerId) cancelTouchLetterInteraction();
     endTouchPointer(event);
     return;
   }
@@ -387,11 +545,19 @@ canvas.addEventListener('pointerup', pointerUp, { passive: false });
 canvas.addEventListener('pointercancel', pointerCancel, { passive: false });
 canvas.addEventListener('lostpointercapture', event => {
   if (event.pointerType === 'touch') {
+    if (state.touchEditPointerId === event.pointerId) cancelTouchLetterInteraction();
     if (state.pointers.has(event.pointerId)) endTouchPointer(event);
     return;
   }
   if (state.activePointerId === event.pointerId && state.interactionBefore) pointerCancel(event);
 });
+document.addEventListener('pointerdown', event => {
+  if (!event.target?.closest?.(MEDIDAOT_INTERFACE_SELECTOR)) return;
+  if (state.activePointerId === null || !state.interactionBefore) return;
+  restoreInteractionState(state.interactionBefore);
+  releaseActiveMeasurementPointer();
+  renderAll();
+}, { capture: true });
 canvas.addEventListener('wheel', event => {
   if (!state.image) return;
   event.preventDefault();
@@ -509,13 +675,18 @@ function settleDraftBeforeToolChange(nextTool) {
 
 function setTool(tool) {
   const draftOutcome = settleDraftBeforeToolChange(tool);
+  if (tool !== 'vectorize') state.vectorizeLasso = null;
+  if (tool !== 'pan') {
+    state.letterVectorLasso = null;
+    $('letterAnchorLassoBtn')?.classList.remove('active');
+  }
   state.tool = tool;
   document.querySelectorAll('.tool[data-tool]').forEach(button => button.classList.toggle('active', button.dataset.tool === tool));
   $('gapsPanelBtn')?.classList.toggle('active', tool === 'gap');
   $('autoNibToolBtn')?.classList.remove('active');
   if (TOOL_COLORS[tool]) ui.color.value = TOOL_COLORS[tool];
   const messages = {
-    pan: 'בחירה ועריכה ב־Apple Pencil; הזזה וזום בשתי אצבעות',
+    pan: 'אצבע מזיזה אות; Apple Pencil עורך נקודות; שתי אצבעות מזיזות ומגדילות',
     area: 'מדידת שטח ואיזון לובן: סמן נקודות ב־Apple Pencil',
     nib: 'עובי קולמוס: סמן שתי נקודות לרוחב עובי מייצג',
     nibRegion: 'בדיקה מתקדמת באזור: גרור מסגרת סביב מרכזו של גג ישר',
@@ -523,6 +694,7 @@ function setTool(tool) {
     length: 'אורך חופשי: סמן שתי נקודות',
     angle: 'זווית: סמן שתי נקודות לאורך הקו',
     kastel: 'קעסטעל: גרור מסגרת סביב האות',
+    vectorize: 'אות מצולמת לווקטור: הקף את האות במסלול חופשי ב־Apple Pencil',
   };
   const outcomeMessage = draftOutcome === 'completed'
     ? 'המדידה הקודמת הושלמה. '
@@ -830,7 +1002,15 @@ $('autoLineGapBtn')?.addEventListener('click', () => {
   state.formula.selectedVariable = 'between-lines';
   ui.gapVariable.value = 'between-lines';
   const automatic = globalThis.MEDIDAOT_AUTO_MEASURE;
-  if (automatic?.runInterline) automatic.runInterline({ userInitiated: true }).catch(() => {});
+  if (automatic?.runInterline) {
+    automatic.runInterline({ userInitiated: true })
+      .then(result => {
+        if (result?.stale || !result?.applied) return;
+        refreshBetweenLinesSummary();
+        renderFormulaUI();
+      })
+      .catch(() => {});
+  }
   else statusText.textContent = 'מנוע זיהוי בין השיטין טרם נטען';
 });
 
@@ -1080,7 +1260,13 @@ function loadImageSource(source, resetProject, preparedImage = null) {
       setTimeout(() => {
         const automatic = globalThis.MEDIDAOT_AUTO_MEASURE;
         if (automatic?.analyzeLoadedImage) {
-          automatic.analyzeLoadedImage({ apply: true }).catch(() => {});
+          automatic.analyzeLoadedImage({ apply: true })
+            .then(result => {
+              if (result?.stale || !result?.applied?.interline) return;
+              refreshBetweenLinesSummary();
+              renderFormulaUI();
+            })
+            .catch(() => {});
         }
         else analyzeImage(false);
       }, 0);
