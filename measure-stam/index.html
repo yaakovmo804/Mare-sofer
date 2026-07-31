@@ -12,7 +12,7 @@
   <title>מדידאות — מראה סופר</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="icon.svg" />
-  <link rel="stylesheet" href="styles.css?v=20260731g" />
+  <link rel="stylesheet" href="styles.css?v=20260731h" />
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -61,7 +61,8 @@
           <button class="tool" data-tool="length"><span class="tool-icon">⌁</span><span>אורך חופשי</span></button>
           <button class="tool" data-tool="angle"><span class="tool-icon">∠</span><span>זווית מנקודה לנקודה</span></button>
           <button class="tool" data-tool="kastel"><span class="tool-icon">◇</span><span>קעסטעל</span></button>
-          <button class="tool" data-tool="thirds"><span class="tool-icon">⅓</span><span>חוק השלישים — בדיקת מיקום</span></button>
+          <button id="thirdsToggleBtn" class="tool" type="button"><span class="tool-icon">⅓</span><span>חוק השלישים</span></button>
+          <button id="detectStructureBtn" class="tool" type="button"><span class="tool-icon">▤</span><span>זהה גג, חלל ומושב</span></button>
         </section>
 
         <section class="tool-section edit-tools">
@@ -82,7 +83,7 @@
         <div id="emptyState" class="empty-state">
           <div class="empty-icon">✦</div>
           <h2>העלה צילום של אות, מילה או שורה</h2>
-          <p>התמונה נטענת מיד. הכיול נקבע רק מאזור מסומן או מקו ידני.</p>
+          <p>התמונה נטענת מיד. עובי הקולמוס יכול להיקבע מאזור, מקו ידני או מגג שזוהה בקעסטעל.</p>
         </div>
         <div id="analysisOverlay" class="analysis-overlay" hidden>
           <div class="spinner" aria-hidden="true"></div>
@@ -111,7 +112,7 @@
               <div class="metric"><span>יחידת היסוד</span><strong id="nibMetric">—</strong><small id="nibMetricDetail">טרם כויל</small></div>
               <div class="metric"><span>מרווח מצוי</span><strong id="commonGapMetric">—</strong></div>
             </div>
-            <p id="analysisNote" class="microcopy">הבדיקה הכללית אינה משנה כיול. לקביעת 1 עובי קולמוס השתמש בכיול מאזור או בקו ידני.</p>
+            <p id="analysisNote" class="microcopy">הבדיקה הכללית אינה משנה כיול. כיול פעיל נקבע מאזור, מקו ידני או מגג שזוהה בקעסטעל; כיול ידני נשאר נעול.</p>
             <details class="technical-details calibration-details">
               <summary>ערך חישובי מתקדם</summary>
               <label>עובי הקולמוס בפיקסלים
@@ -189,15 +190,18 @@
 
         <section id="kastelGuidesPanel" class="property-section" hidden>
           <h2>גג, מושב וחוק השלישים</h2>
-          <p class="microcopy">שני הקווים המקווקווים מחלקים את הגובה בלבד. שנתות הרוחב מופיעות לאורך השפה העליונה לפי עובי הקולמוס.</p>
+          <p class="microcopy">חוק השלישים מחלק את רוחב הקעסטעל לשלושה טורים בקווים אנכיים. זיהוי גג–חלל–מושב מציג בנפרד את גבולות האזורים בקווים אופקיים; במושב עקום נוסף קו מגמה, נקודת ממוצע וזווית.</p>
           <p id="guideStatus" class="microcopy">הקווים טרם זוהו.</p>
           <div class="guide-legend" aria-label="מקרא קווי הקעסטעל">
             <span class="thirds">⅓ / ⅔</span>
-            <span class="roof">תחתית הגג</span>
-            <span class="seat">ראש המושב</span>
+            <span class="roof">גבולות הגג</span>
+            <span class="seat">גבולות המושב</span>
+            <span class="seat-angle">עיקום וזווית המושב</span>
           </div>
-          <label>תחתית הגג<input id="roofGuideInput" type="range" min="20" max="700" value="180" /></label>
-          <label>ראש המושב<input id="seatGuideInput" type="range" min="300" max="980" value="820" /></label>
+          <label>הגבול העליון של הגג<input id="roofTopGuideInput" type="range" min="0" max="650" value="20" /></label>
+          <label>הגבול התחתון של הגג<input id="roofGuideInput" type="range" min="20" max="700" value="180" /></label>
+          <label>הגבול העליון של המושב<input id="seatGuideInput" type="range" min="300" max="980" value="820" /></label>
+          <label>הגבול התחתון של המושב<input id="seatBottomGuideInput" type="range" min="350" max="1000" value="980" /></label>
         </section>
 
         <section class="property-section">
@@ -214,14 +218,14 @@
 
     <dialog id="helpDialog">
       <h2>אופן שימוש</h2>
-      <p><b>שטח ואיזון לובן:</b> אפשר להוסיף עשרות נקודות סביב התחום וללחוץ „סיום וסגירת השטח”. מעבר לכלי אחר סוגר אוטומטית שטח תקין; סימון חלקי שאינו יכול להיות מדידה מבוטל.</p>
+      <p><b>שטח ואיזון לובן:</b> אפשר להוסיף עשרות נקודות סביב התחום. בסיום גע בנקודה הראשונה או לחץ „סיום וסגירת השטח”. מעבר לכלי אחר סוגר אוטומטית שטח תקין; סימון חלקי שאינו יכול להיות מדידה מבוטל.</p>
       <p><b>עיגול מקטע:</b> גע ביהלום שבין שתי נקודות וגרור אותו, או בחר מקטע ולחץ „עיגול המקטע”.</p>
       <p><b>מחיקת נקודה:</b> גע בנקודה כדי לבחור אותה, ולאחר מכן לחץ „מחיקת נקודה”. במצב בחירה ניתן גם לגרור נקודה למקום מדויק.</p>
       <p><b>מגע:</b> מדידה ועריכת נקודות נעשות ב־Apple Pencil בלבד. הזזה וזום נעשים בשתי אצבעות. במחשב אפשר לעבוד בעכבר.</p>
       <p><b>עובי קולמוס:</b> גרור אזור צר סביב מקטע ישר ורציף, כך שייראה מעט נייר משני צדי הדיו. אזור שנחתך בתוך הדיו, פינה או הסתעפות יידחו. האפליקציה מודדת חתכים רבים, קובעת חציון יציב ומסמנת דגימה שחורגת ביותר מ־10% בלי לשנות את הכיול הפעיל; סימון הכיול החדש מחליף את הקודם.</p>
       <p><b>מרווחים:</b> בחר משתנה, סמן שתי נקודות, וקבל את המרחק ביחידות עובי קולמוס. ערך הפיקסלים נשאר זמין תחת „פרטים חישוביים”.</p>
       <p><b>זווית:</b> שתי נקודות. ברירת המחדל מציגה את הסטייה מן הציר הקרוב, ולכן מתקבלים ערכים כגון 0°, 12° ו־13° ולא זווית משלימה.</p>
-      <p><b>קעסטעל:</b> גרור מסגרת סביב האות. רק הקעסטעל הנבחר מציג את שני קווי השליש בגובה ואת שנתות עובי הקולמוס בשפה העליונה. קווי תחתית הגג וראש המושב מוצגים רק לאחר זיהוי או קביעה ידנית.</p>
+      <p><b>קעסטעל:</b> גרור מסגרת סביב האות. „חוק השלישים” מחלק את רוחב הקעסטעל אוטומטית בשני קווים אנכיים. „זהה גג, חלל ומושב” מסמן את הגבול העליון והתחתון של הגג והמושב, מפיק את החלל שביניהם ומציע עובי קולמוס מן הגג; כל גבול ניתן לתיקון ידני.</p>
       <p><b>תוצאות על התמונה:</b> כל מדידה גמורה שומרת את תווית התוצאה שלה. ברשימת „תוצאות כל המדידות” אפשר להציג או להסתיר כל תווית בנפרד, בלי להסתיר את קו המדידה.</p>
       <p><b>שמירת נתונים:</b> קובץ JSON שומר תמונה, כיול, גאומטריה, מדדים וסיווגים. הוא כולל תבנית לכלל איזון של 10%, אך אינו מאמן מנוע בינה לבדו; לשם כך צריך לתייג רכיבים מאומתים ולאגד קבצים במסד נתונים.</p>
       <button id="closeHelp" class="btn primary">סגור</button>
@@ -229,10 +233,10 @@
 
     <button id="helpBtn" class="floating-help" aria-label="עזרה">?</button>
   </div>
-  <script src="app-1.js?v=20260731g"></script>
-  <script src="app-2.js?v=20260731g"></script>
-  <script src="app-3.js?v=20260731g"></script>
-  <script src="app-4.js?v=20260731g"></script>
-  <script src="stability-patch.js?v=20260731g"></script>
+  <script src="app-1.js?v=20260731h"></script>
+  <script src="app-2.js?v=20260731h"></script>
+  <script src="app-3.js?v=20260731h"></script>
+  <script src="app-4.js?v=20260731h"></script>
+  <script src="stability-patch.js?v=20260731h"></script>
 </body>
 </html>

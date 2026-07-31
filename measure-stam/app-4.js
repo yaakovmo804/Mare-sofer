@@ -959,34 +959,214 @@ function activateFallbackNibCalibration(excludedRegionId = null) {
 
 function initializeKastelGuides(kastel, force = false) {
   if (!kastel || kastel.type !== 'kastel') return;
+  const previousGuides = kastel.guides;
   const heightPx = (distance(kastel.points[0], kastel.points[3]) + distance(kastel.points[1], kastel.points[2])) / 2 || 1;
   const fallbackThickness = state.formula.nibPx
     ? clamp(state.formula.nibPx / heightPx, .005, .46)
     : .18;
+  const detectionRequested = force || kastel.overlays?.structureVisible === true;
   if (!force && kastelHasManualGuide(kastel.guides)) {
+    if (!Number.isFinite(kastel.guides.roofTopT)) kastel.guides.suggestedRoofTopT = .02;
     if (!Number.isFinite(kastel.guides.roofBottomT)) kastel.guides.suggestedRoofBottomT = fallbackThickness;
     if (!Number.isFinite(kastel.guides.seatTopT)) kastel.guides.suggestedSeatTopT = 1 - fallbackThickness;
+    if (!Number.isFinite(kastel.guides.seatBottomT)) kastel.guides.suggestedSeatBottomT = .98;
     kastel.provenance = kastel.provenance || {};
     kastel.provenance.modifiedAt = new Date().toISOString();
+    updateNibFromKastelRoof(kastel);
     renderAll();
-    return;
+    return kastel.guides;
+  }
+  if (!detectionRequested && kastel.guides) {
+    kastel.guides.suggestedRoofTopT = .02;
+    kastel.guides.suggestedRoofBottomT = fallbackThickness;
+    kastel.guides.suggestedSeatTopT = 1 - fallbackThickness;
+    kastel.guides.suggestedSeatBottomT = .98;
+    return null;
   }
   let guides = {
+    roofTopT: null,
     roofBottomT: null,
     seatTopT: null,
+    seatBottomT: null,
+    suggestedRoofTopT: .02,
     suggestedRoofBottomT: fallbackThickness,
     suggestedSeatTopT: 1 - fallbackThickness,
-    roofSource: null,
-    seatSource: null,
+    suggestedSeatBottomT: .98,
+    roofTopSource: null,
+    roofBottomSource: null,
+    seatTopSource: null,
+    seatBottomSource: null,
     source: 'unresolved',
     confidence: 0
   };
-  const detected = detectKastelInkBands(kastel);
-  if (detected && detected.confidence >= .42 && detected.roofBottomT < detected.seatTopT - .06) guides = detected;
+  const detected = detectionRequested ? detectKastelInkBands(kastel) : null;
+  if (detected &&
+      detected.confidence >= .42 &&
+      detected.roofTopT < detected.roofBottomT &&
+      detected.roofBottomT < detected.seatTopT - .06 &&
+      detected.seatTopT < detected.seatBottomT) {
+    guides = detected;
+  } else if (force && kastelHasManualGuide(previousGuides)) {
+    kastel.guides = previousGuides;
+    kastel.provenance = kastel.provenance || {};
+    kastel.provenance.modifiedAt = new Date().toISOString();
+    renderAll();
+    return null;
+  } else if (detectionRequested) {
+    withdrawNibFromKastelRoof(kastel);
+  }
   kastel.guides = guides;
+  kastel.overlays = {
+    ...(kastel.overlays || {}),
+    structureVisible: guides.source === 'auto'
+  };
   kastel.provenance = kastel.provenance || {};
   kastel.provenance.modifiedAt = new Date().toISOString();
+  if (guides.source === 'auto') updateNibFromKastelRoof(kastel);
   renderAll();
+  return guides.source === 'auto' ? guides : null;
+}
+
+function hasLockedNibCalibration() {
+  return state.formula.calibration?.verified === true ||
+    (state.formula.nibSamples || []).some(sample => sample.active !== false && sample.locked === true);
+}
+
+function withdrawNibFromKastelRoof(kastel) {
+  if (!kastel) return;
+  const sourceUid = `${kastel.uid || kastel.id}:roof`;
+  state.formula.nibSamples = (state.formula.nibSamples || [])
+    .filter(sample => sample.sourceUid !== sourceUid);
+  if (Array.isArray(state.formula.calibration?.validations)) {
+    state.formula.calibration.validations = state.formula.calibration.validations
+      .filter(validation => validation.sourceUid !== sourceUid);
+  }
+  const calibrationCameFromKastel = state.formula.calibration?.objectId === kastel.id &&
+    String(state.formula.calibration?.method || '').startsWith('kastel-roof-band');
+  if (calibrationCameFromKastel) state.formula.calibration = null;
+  if (calibrationCameFromKastel || !hasLockedNibCalibration()) activateFallbackNibCalibration();
+}
+
+function updateNibFromKastelRoof(kastel) {
+  if (!kastel?.guides) return false;
+  const heightPx = (distance(kastel.points[0], kastel.points[3]) + distance(kastel.points[1], kastel.points[2])) / 2 || 1;
+  const roofManuallyAdjusted = kastel.guides.roofTopSource === 'manual' || kastel.guides.roofBottomSource === 'manual';
+  const roofThicknessPx = !roofManuallyAdjusted && Number.isFinite(kastel.guides.roofDerivedNibPx)
+    ? kastel.guides.roofDerivedNibPx
+    : Number.isFinite(kastel.guides.roofTopT) && Number.isFinite(kastel.guides.roofBottomT)
+      ? (kastel.guides.roofBottomT - kastel.guides.roofTopT) * heightPx
+      : null;
+  if (!Number.isFinite(roofThicknessPx) || roofThicknessPx <= 0) return false;
+  kastel.guides.roofDerivedNibPx = roofThicknessPx;
+  const sourceUid = `${kastel.uid || kastel.id}:roof`;
+  const now = new Date().toISOString();
+  const previous = (state.formula.nibSamples || []).find(sample => sample.sourceUid === sourceUid);
+  const otherLockedSample = (state.formula.nibSamples || []).some(sample =>
+    sample.sourceUid !== sourceUid && sample.active !== false && sample.locked === true
+  );
+  const verifiedCalibrationElsewhere = state.formula.calibration?.verified === true &&
+    !(state.formula.calibration?.objectId === kastel.id &&
+      state.formula.calibration?.method === 'kastel-roof-band-corrected');
+  const lockedCalibration = otherLockedSample || verifiedCalibrationElsewhere;
+  const sameSourceDeviation = previous?.active !== false &&
+      previous?.accepted !== false &&
+      Number.isFinite(+previous?.valuePx) &&
+      +previous.valuePx > 0
+    ? Math.abs(roofThicknessPx - +previous.valuePx) / +previous.valuePx
+    : null;
+  if (!roofManuallyAdjusted &&
+      Number.isFinite(sameSourceDeviation) &&
+      sameSourceDeviation > .10 + 1e-9) {
+    kastel.guides.roofCalibrationAccepted = false;
+    kastel.guides.roofCalibrationDeviation = sameSourceDeviation;
+    state.formula.calibration = {
+      ...(state.formula.calibration || {}),
+      validations: [
+        ...(state.formula.calibration?.validations || []).filter(item => item.sourceUid !== sourceUid),
+        {
+          sourceUid,
+          sourceType: 'kastel-roof-band',
+          valuePx: roofThicknessPx,
+          accepted: false,
+          relativeDeviation: sameSourceDeviation,
+          confidence: kastel.guides.confidence || null,
+          createdAt: now
+        }
+      ].slice(-60)
+    };
+    return false;
+  }
+  const sample = {
+    id: previous?.id || createStableId('nib-sample'),
+    sourceUid,
+    sourceMeasurementId: kastel.uid || String(kastel.id),
+    sourceType: roofManuallyAdjusted ? 'kastel-roof-band-corrected' : 'kastel-roof-band',
+    valuePx: roofThicknessPx,
+    active: true,
+    locked: roofManuallyAdjusted && !lockedCalibration,
+    validationOnly: lockedCalibration,
+    confidence: roofManuallyAdjusted ? 1 : kastel.guides.confidence || null,
+    estimator: roofManuallyAdjusted ? 'human-corrected-roof-band-v1' : 'kastel-roof-column-median-v1',
+    createdAt: previous?.createdAt || now,
+    updatedAt: now
+  };
+  const clustered = classifyNibSampleCluster([
+    ...(state.formula.nibSamples || []).filter(item => item.sourceUid !== sourceUid),
+    sample
+  ].slice(-60), .10, state.formula.nibPx);
+  const classifiedSample = clustered.samples.find(item => item.id === sample.id) || sample;
+  kastel.guides.roofCalibrationAccepted = classifiedSample.accepted !== false;
+  kastel.guides.roofCalibrationDeviation = classifiedSample.relativeDeviation ?? null;
+
+  if (lockedCalibration) {
+    state.formula.nibSamples = clustered.samples.map(item =>
+      item.id === classifiedSample.id
+        ? { ...item, active: false, validationOnly: true }
+        : item
+    );
+    const validation = {
+      sourceUid,
+      sourceType: 'kastel-roof-band',
+      valuePx: roofThicknessPx,
+      accepted: classifiedSample.accepted !== false,
+      relativeDeviation: classifiedSample.relativeDeviation ?? null,
+      confidence: classifiedSample.confidence,
+      createdAt: now
+    };
+    state.formula.calibration = {
+      ...(state.formula.calibration || {}),
+      validations: [
+        ...(state.formula.calibration?.validations || []).filter(item => item.sourceUid !== sourceUid),
+        validation
+      ].slice(-60)
+    };
+    return false;
+  }
+
+  state.formula.nibSamples = clustered.samples;
+  if (classifiedSample.accepted === false || !clustered.canonicalPx) return false;
+  const canonicalPx = clustered.canonicalPx;
+  state.formula.nibPx = canonicalPx;
+  state.formula.calibration = {
+    ...(state.formula.calibration || {}),
+    id: state.formula.calibration?.id || `nib-calibration_${state.projectMeta.id || 'project'}`,
+    method: roofManuallyAdjusted ? 'kastel-roof-band-corrected' : 'kastel-roof-band',
+    algorithmVersion: roofManuallyAdjusted ? 'human-corrected-roof-band-v1' : 'kastel-roof-column-median-v1',
+    regionObjectId: null,
+    objectId: kastel.id,
+    valuePx: canonicalPx,
+    confidence: sample.confidence,
+    verified: roofManuallyAdjusted,
+    aggregation: {
+      method: 'densest-relative-cluster-median',
+      toleranceRelative: .10,
+      valuePx: canonicalPx,
+      madPx: clustered.madPx,
+      acceptedCount: clustered.acceptedCount,
+      rejectedCount: clustered.rejectedCount
+    }
+  };
+  return true;
 }
 
 function detectKastelInkBands(kastel) {
@@ -1108,15 +1288,110 @@ function detectKastelInkBands(kastel) {
   if (separation < .34) return null;
   const roofBottomT = clamp((roofEnd + 1) / height, .03, .46);
   const seatTopT = clamp(seatStart / height, .54, .97);
+  const roofTopT = clamp(roofStart / height, 0, roofBottomT - .005);
+  const seatBottomT = clamp((seatEnd + 1) / height, seatTopT + .005, 1);
+  const roofThicknessSamples = [];
+  const seatTopSamples = [];
+  const columnStart = Math.floor(width * .16);
+  const columnEnd = Math.ceil(width * .84);
+  for (let x = columnStart; x < columnEnd; x++) {
+    let firstRoof = -1;
+    let lastRoof = -1;
+    for (let y = Math.max(0, roofStart - 2); y <= Math.min(height - 1, roofEnd + 2); y++) {
+      if (gray[y * width + x] >= threshold) continue;
+      if (firstRoof < 0) firstRoof = y;
+      lastRoof = y;
+    }
+    if (firstRoof >= 0 && lastRoof >= firstRoof) roofThicknessSamples.push(lastRoof - firstRoof + 1);
+
+    let firstSeat = -1;
+    for (let y = Math.max(0, seatStart - 3); y <= Math.min(height - 1, seatEnd + 2); y++) {
+      if (gray[y * width + x] < threshold) {
+        firstSeat = y;
+        break;
+      }
+    }
+    if (firstSeat >= 0) seatTopSamples.push({ x, y: firstSeat });
+  }
+  const roofThicknessMedianRaster = numericMedian(roofThicknessSamples) || Math.max(1, roofEnd - roofStart + 1);
+  const roofThicknessMadRaster = medianAbsoluteDeviation(roofThicknessSamples, roofThicknessMedianRaster) || 0;
+  const roofDerivedNibPx = roofThicknessMedianRaster / height * targetHeight;
+  const roofThicknessMadPx = roofThicknessMadRaster / height * targetHeight;
+
+  let seatTrend = null;
+  if (seatTopSamples.length >= Math.max(6, Math.floor((columnEnd - columnStart) * .15))) {
+    const seatMedian = numericMedian(seatTopSamples.map(sample => sample.y));
+    const seatMad = medianAbsoluteDeviation(seatTopSamples.map(sample => sample.y), seatMedian) || 0;
+    const tolerance = Math.max(2, seatMad * 3);
+    const stableSamples = seatTopSamples.filter(sample => Math.abs(sample.y - seatMedian) <= tolerance);
+    if (stableSamples.length >= 5) {
+      const meanX = stableSamples.reduce((sum, sample) => sum + sample.x, 0) / stableSamples.length;
+      const meanY = stableSamples.reduce((sum, sample) => sum + sample.y, 0) / stableSamples.length;
+      let numerator = 0;
+      let denominator = 0;
+      for (const sample of stableSamples) {
+        numerator += (sample.x - meanX) * (sample.y - meanY);
+        denominator += (sample.x - meanX) ** 2;
+      }
+      const slopeRaster = denominator ? numerator / denominator : 0;
+      const interceptRaster = meanY - slopeRaster * meanX;
+      const leftX = width * .12;
+      const rightX = width * .88;
+      const leftT = clamp((interceptRaster + slopeRaster * leftX) / height, seatTopT - .08, seatBottomT);
+      const rightT = clamp((interceptRaster + slopeRaster * rightX) / height, seatTopT - .08, seatBottomT);
+      const residuals = stableSamples.map(sample => Math.abs(sample.y - (interceptRaster + slopeRaster * sample.x)));
+      const pixelSlope = slopeRaster * (targetHeight / height) / Math.max(1e-9, targetWidth / width);
+      const path = [];
+      const binCount = 9;
+      for (let bin = 0; bin < binCount; bin++) {
+        const startX = columnStart + (columnEnd - columnStart) * bin / binCount;
+        const endX = columnStart + (columnEnd - columnStart) * (bin + 1) / binCount;
+        const members = stableSamples.filter(sample =>
+          sample.x >= startX && (bin === binCount - 1 ? sample.x <= endX : sample.x < endX)
+        );
+        if (!members.length) continue;
+        path.push({
+          u: clamp(numericMedian(members.map(sample => sample.x)) / width, 0, 1),
+          t: clamp(numericMedian(members.map(sample => sample.y)) / height, seatTopT - .08, seatBottomT)
+        });
+      }
+      const smoothedPath = path.map((point, index) => {
+        const neighbours = path.slice(Math.max(0, index - 1), Math.min(path.length, index + 2));
+        return {
+          u: point.u,
+          t: numericMedian(neighbours.map(item => item.t))
+        };
+      });
+      seatTrend = {
+        leftT,
+        rightT,
+        meanU: clamp(meanX / width, 0, 1),
+        meanT: clamp(meanY / height, 0, 1),
+        angleDeg: Math.atan(pixelSlope) * 180 / Math.PI,
+        curvaturePx: (numericMedian(residuals) || 0) / height * targetHeight,
+        confidence: clamp(stableSamples.length / Math.max(1, seatTopSamples.length), .2, .98),
+        sampleCount: stableSamples.length,
+        path: smoothedPath.length >= 3 ? smoothedPath : null
+      };
+    }
+  }
   const edgeFit = (1 - Math.min(.3, roofStart / height)) * (1 - Math.min(.3, (height - 1 - seatEnd) / height));
   return {
+    roofTopT,
     roofBottomT,
     seatTopT,
-    roofSource: 'auto',
-    seatSource: 'auto',
+    seatBottomT,
+    roofTopSource: 'auto',
+    roofBottomSource: 'auto',
+    seatTopSource: 'auto',
+    seatBottomSource: 'auto',
     source: 'auto',
     confidence: clamp(edgeFit * separation * (peak / Math.max(1, xEnd - xStart)) * 3.2, .15, .92),
-    threshold
+    threshold,
+    roofDerivedNibPx,
+    roofThicknessMadPx,
+    roofThicknessSampleCount: roofThicknessSamples.length,
+    seatTrend
   };
 }
 
@@ -1191,19 +1466,24 @@ function drawObjectToContext(context, object) {
     context.stroke();
     const selectedObject = state.objects.find(item => item.id === state.selectedId);
     const exportOverlayActive = object.id === state.selectedId ||
-      (selectedObject?.type === 'thirds' && selectedObject.kastelId === object.id);
+      (selectedObject?.type === 'thirds' && selectedObject.kastelId === object.id) ||
+      object.overlays?.thirdsVisible === true ||
+      object.overlays?.structureVisible === true;
     if (object.type === 'kastel' && points.length === 4 && exportOverlayActive) {
       const unit = exportOverlayUnit();
-      context.save();
-      context.strokeStyle = object.color;
-      context.lineWidth = 1.5 * unit;
-      context.setLineDash([7 * unit, 6 * unit]);
-      for (const t of [1 / 3, 2 / 3]) {
-        const left = interp(points[0], points[3], t);
-        const right = interp(points[1], points[2], t);
-        drawExportLine(context, left, right);
+      if (object.overlays?.thirdsVisible === true) {
+        context.save();
+        context.strokeStyle = KASTEL_GUIDE_COLORS.thirds;
+        context.lineWidth = 1.8 * unit;
+        context.setLineDash([7 * unit, 6 * unit]);
+        for (const t of [1 / 3, 2 / 3]) {
+          const top = interp(points[0], points[1], t);
+          const bottom = interp(points[3], points[2], t);
+          drawExportLine(context, top, bottom);
+        }
+        context.restore();
       }
-      const tickLayout = kastelNibTickLayout(object, 1);
+      const tickLayout = object.id === state.selectedId ? kastelNibTickLayout(object, 1) : null;
       if (tickLayout) {
         const { topWidthImage, divisions, step } = tickLayout;
         context.save();
@@ -1232,7 +1512,8 @@ function drawObjectToContext(context, object) {
         }
       }
       const guideSpecs = kastelGuideSpecs(object.guides);
-      if (guideSpecs.length) {
+      const showStructure = object.overlays?.structureVisible === true;
+      if (showStructure && guideSpecs.length) {
         context.save();
         context.globalAlpha = .9;
         context.lineWidth = 2.5 * unit;
@@ -1244,8 +1525,35 @@ function drawObjectToContext(context, object) {
           drawExportLine(context, left, right);
         }
         context.restore();
+        const trend = object.guides?.seatTrend;
+        const trendGeometry = seatTrendGeometry(points, trend);
+        if (trendGeometry) {
+          const trendPath = trendGeometry.line;
+          const mean = trendGeometry.mean;
+          context.save();
+          context.strokeStyle = KASTEL_GUIDE_COLORS.seatTrend;
+          context.lineWidth = 2 * unit;
+          context.setLineDash([2 * unit, 5 * unit]);
+          context.beginPath();
+          context.moveTo(trendPath[0].x, trendPath[0].y);
+          for (const point of trendPath.slice(1)) context.lineTo(point.x, point.y);
+          context.stroke();
+          context.fillStyle = KASTEL_GUIDE_COLORS.seatTrend;
+          context.beginPath();
+          context.arc(mean.x, mean.y, 4 * unit, 0, Math.PI * 2);
+          context.fill();
+          context.restore();
+          if (Number.isFinite(trend.angleDeg)) {
+            drawExportScaleNote(
+              context,
+              mean,
+              `זווית המושב ${fmt(trend.angleDeg, 1)}°`,
+              KASTEL_GUIDE_COLORS.seatTrend,
+              unit
+            );
+          }
+        }
       }
-      context.restore();
     }
   } else if (['length', 'nib', 'gap', 'angle'].includes(object.type) && points.length >= 2) {
     context.beginPath(); context.moveTo(points[0].x, points[0].y); context.lineTo(points[1].x, points[1].y); context.stroke();
@@ -1423,7 +1731,7 @@ async function serializeProjectV3() {
       title: captured.projectMeta.title || 'פרויקט מדידאות',
       createdAt: captured.projectMeta.createdAt,
       updatedAt: now,
-      appVersion: '2026.07.31g',
+      appVersion: '2026.07.31h',
       locale: 'he-IL'
     },
     source: {
@@ -1567,13 +1875,29 @@ function measurementMetrics(object) {
     const widthPx = (distance(object.points[0], object.points[1]) + distance(object.points[3], object.points[2])) / 2;
     const heightPx = (distance(object.points[0], object.points[3]) + distance(object.points[1], object.points[2])) / 2;
     return {
-      metricId: 'kastel-frame.v1',
+      metricId: 'kastel-frame.v2',
       widthPx,
       heightPx,
       widthNib: state.formula.nibPx ? widthPx / state.formula.nibPx : null,
       heightNib: state.formula.nibPx ? heightPx / state.formula.nibPx : null,
+      thirdsOrientation: 'vertical-dividers-across-width',
+      thirdsVisible: object.overlays?.thirdsVisible === true,
+      roofTopVerticalFraction: object.guides?.roofTopT ?? null,
       roofBottomVerticalFraction: object.guides?.roofBottomT ?? null,
       seatTopVerticalFraction: object.guides?.seatTopT ?? null,
+      seatBottomVerticalFraction: object.guides?.seatBottomT ?? null,
+      roofThicknessPx: Number.isFinite(object.guides?.roofTopT) && Number.isFinite(object.guides?.roofBottomT)
+        ? (object.guides.roofBottomT - object.guides.roofTopT) * heightPx
+        : null,
+      innerSpacePx: Number.isFinite(object.guides?.roofBottomT) && Number.isFinite(object.guides?.seatTopT)
+        ? (object.guides.seatTopT - object.guides.roofBottomT) * heightPx
+        : null,
+      seatThicknessPx: Number.isFinite(object.guides?.seatTopT) && Number.isFinite(object.guides?.seatBottomT)
+        ? (object.guides.seatBottomT - object.guides.seatTopT) * heightPx
+        : null,
+      roofDerivedNibPx: object.guides?.roofDerivedNibPx ?? null,
+      seatSlopeAngleDeg: object.guides?.seatTrend?.angleDeg ?? null,
+      seatCurvaturePx: object.guides?.seatTrend?.curvaturePx ?? null,
       guideConfidence: object.guides?.confidence ?? null
     };
   }
@@ -1585,6 +1909,8 @@ function measurementMetrics(object) {
         metricId: 'kastel-position.v1',
         verticalFrameFraction: value.yPct / 100,
         verticalThirdDeviationPct: value.yDev,
+        horizontalFrameFraction: value.xPct / 100,
+        horizontalThirdDeviationPct: value.xDev,
         horizontalNibFromRight: value.xNibFromRight
       };
     }
@@ -1885,26 +2211,88 @@ function normalizeLoadedObject(object) {
     const sharedSource = validSource(guides.source) ? guides.source : null;
     const roofSource = validSource(guides.roofSource) ? guides.roofSource : sharedSource;
     const seatSource = validSource(guides.seatSource) ? guides.seatSource : sharedSource;
-    const roofResolved = Number.isFinite(guides.roofBottomT) && validSource(roofSource);
-    const seatResolved = Number.isFinite(guides.seatTopT) && validSource(seatSource);
-    const oldRoofValue = Number.isFinite(guides.roofBottomT) ? guides.roofBottomT : null;
-    const oldSeatValue = Number.isFinite(guides.seatTopT) ? guides.seatTopT : null;
+    const guideKeys = ['roofTopT', 'roofBottomT', 'seatTopT', 'seatBottomT'];
+    const fallbackSources = {
+      roofTopT: null,
+      roofBottomT: roofSource,
+      seatTopT: seatSource,
+      seatBottomT: null
+    };
+    const values = {};
+    const sources = {};
+    for (const key of guideKeys) {
+      const sourceKey = `${key.replace(/T$/, '')}Source`;
+      values[key] = Number.isFinite(+guides[key]) ? clamp(+guides[key], 0, 1) : null;
+      sources[key] = validSource(guides[sourceKey]) ? guides[sourceKey] : fallbackSources[key];
+      if (!validSource(sources[key])) {
+        values[key] = null;
+        sources[key] = null;
+      }
+    }
+    for (let index = 1; index < guideKeys.length; index++) {
+      const previous = values[guideKeys[index - 1]];
+      const current = values[guideKeys[index]];
+      if (Number.isFinite(previous) && Number.isFinite(current) && current <= previous) {
+        values[guideKeys[index]] = null;
+        sources[guideKeys[index]] = null;
+      }
+    }
+    const oldRoofValue = values.roofBottomT;
+    const oldSeatValue = values.seatTopT;
+    guides.suggestedRoofTopT = Number.isFinite(guides.suggestedRoofTopT)
+      ? clamp(guides.suggestedRoofTopT, 0, 1)
+      : .02;
     guides.suggestedRoofBottomT = Number.isFinite(guides.suggestedRoofBottomT)
       ? guides.suggestedRoofBottomT
       : oldRoofValue;
     guides.suggestedSeatTopT = Number.isFinite(guides.suggestedSeatTopT)
       ? guides.suggestedSeatTopT
       : oldSeatValue;
-    guides.roofBottomT = roofResolved ? oldRoofValue : null;
-    guides.seatTopT = seatResolved ? oldSeatValue : null;
-    guides.roofSource = roofResolved ? roofSource : null;
-    guides.seatSource = seatResolved ? seatSource : null;
-    guides.source = roofResolved && seatResolved
-      ? roofSource === seatSource ? roofSource : 'mixed'
-      : roofResolved || seatResolved
-        ? (roofSource || seatSource) === 'manual' ? 'manual-partial' : 'auto-partial'
+    guides.suggestedSeatBottomT = Number.isFinite(guides.suggestedSeatBottomT)
+      ? clamp(guides.suggestedSeatBottomT, 0, 1)
+      : .98;
+    for (const key of guideKeys) {
+      const sourceKey = `${key.replace(/T$/, '')}Source`;
+      guides[key] = values[key];
+      guides[sourceKey] = sources[key];
+    }
+    const resolvedSources = guideKeys.map(key => sources[key]).filter(Boolean);
+    guides.source = resolvedSources.length === 4
+      ? resolvedSources.every(source => source === 'manual')
+        ? 'manual'
+        : resolvedSources.every(source => source === 'auto')
+          ? 'auto'
+          : 'mixed'
+      : resolvedSources.length
+        ? resolvedSources.includes('manual') ? 'manual-partial' : 'auto-partial'
         : 'unresolved';
-    if (!roofResolved && !seatResolved) guides.confidence = 0;
+    if (!resolvedSources.length) guides.confidence = 0;
+    if (guides.seatTrend) {
+      const trend = guides.seatTrend;
+      if (![trend.leftT, trend.rightT, trend.angleDeg].every(Number.isFinite)) {
+        guides.seatTrend = null;
+      } else {
+        trend.leftT = clamp(trend.leftT, 0, 1);
+        trend.rightT = clamp(trend.rightT, 0, 1);
+        trend.meanU = Number.isFinite(trend.meanU) ? clamp(trend.meanU, 0, 1) : .5;
+        trend.meanT = Number.isFinite(trend.meanT)
+          ? clamp(trend.meanT, 0, 1)
+          : clamp((trend.leftT + trend.rightT) / 2, 0, 1);
+        const path = Array.isArray(trend.path)
+          ? trend.path
+            .filter(point => Number.isFinite(point?.u) && Number.isFinite(point?.t))
+            .map(point => ({ u: clamp(point.u, 0, 1), t: clamp(point.t, 0, 1) }))
+            .sort((a, b) => a.u - b.u)
+          : [];
+        trend.path = path.length >= 3 ? path : null;
+      }
+    }
+  }
+  if (normalized.type === 'kastel') {
+    normalized.overlays = {
+      thirdsVisible: normalized.overlays?.thirdsVisible === true,
+      structureVisible: normalized.overlays?.structureVisible === true
+    };
   }
   return normalized;
 }

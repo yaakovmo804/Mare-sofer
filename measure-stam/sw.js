@@ -1,12 +1,12 @@
-const CACHE_NAME = 'medidaot-v6-2026-07-31g';
+const CACHE_NAME = 'medidaot-v7-2026-07-31h';
 const APP_SHELL = [
-  './', './index.html', './medidaot.html', './medidaot.html?v=20260731g',
-  './styles.css', './styles.css?v=20260731g',
-  './app-1.js', './app-1.js?v=20260731g',
-  './app-2.js', './app-2.js?v=20260731g',
-  './app-3.js', './app-3.js?v=20260731g',
-  './app-4.js', './app-4.js?v=20260731g',
-  './stability-patch.js', './stability-patch.js?v=20260731g',
+  './', './index.html', './medidaot.html', './medidaot.html?v=20260731h',
+  './styles.css', './styles.css?v=20260731h',
+  './app-1.js', './app-1.js?v=20260731h',
+  './app-2.js', './app-2.js?v=20260731h',
+  './app-3.js', './app-3.js?v=20260731h',
+  './app-4.js', './app-4.js?v=20260731h',
+  './stability-patch.js', './stability-patch.js?v=20260731h',
   './manifest.webmanifest', './manifest-medidaot.webmanifest', './icon.svg'
 ];
 self.addEventListener('install', event => {

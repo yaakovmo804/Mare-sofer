@@ -47,7 +47,7 @@
 
       if (resetProject) {
         state.formula.analysis.status = 'idle';
-        statusText.textContent = 'התמונה נטענה. לקביעת 1 עובי קולמוס סמן אזור כיול צר ורציף.';
+        statusText.textContent = 'התמונה נטענה. אפשר לכייל ידנית, או ליצור קעסטעל ולזהות את הגג.';
         renderFormulaUI();
       }
     };
@@ -88,10 +88,10 @@
   analysisOverlay.hidden = true;
 
   const emptyCopy = document.querySelector('#emptyState p');
-  if (emptyCopy) emptyCopy.textContent = 'התמונה נטענת מיד. הכיול נקבע רק מאזור מסומן או מקו ידני.';
+  if (emptyCopy) emptyCopy.textContent = 'התמונה נטענת מיד. עובי הקולמוס יכול להיקבע מאזור, מקו ידני או מגג שזוהה בקעסטעל.';
 
   const analysisNote = $('analysisNote');
-  if (analysisNote) analysisNote.textContent = 'הבדיקה הכללית אינה משנה כיול. לקביעת 1 עובי קולמוס השתמש בכיול מאזור או בקו ידני.';
+  if (analysisNote) analysisNote.textContent = 'הבדיקה הכללית אינה משנה כיול. כיול פעיל נקבע מאזור, מקו ידני או מגג שזוהה בקעסטעל; כיול ידני נשאר נעול.';
 
   const analyzeButton = $('analyzeBtn');
   if (analyzeButton) analyzeButton.textContent = 'בדיקה כללית (ללא כיול)';

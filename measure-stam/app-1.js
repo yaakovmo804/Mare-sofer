@@ -29,6 +29,12 @@ const TOOL_COLORS = {
   area: '#ef4444', nib: '#7c3aed', nibRegion: '#9333ea', gap: '#0f766e', length: '#2563eb',
   angle: '#d97706', kastel: '#e11d48', thirds: '#16a34a'
 };
+const KASTEL_GUIDE_COLORS = {
+  thirds: '#16a34a',
+  roof: '#0f766e',
+  seat: '#2563eb',
+  seatTrend: '#d97706'
+};
 
 const SEMANTIC_CATEGORIES = [
   { id: 'nib', name: 'עובי קולמוס' },
@@ -102,8 +108,10 @@ const ui = {
   category: $('categorySelect'),
   assessment: $('assessmentSelect'),
   note: $('noteInput'),
+  roofTopGuide: $('roofTopGuideInput'),
   roofGuide: $('roofGuideInput'),
-  seatGuide: $('seatGuideInput')
+  seatGuide: $('seatGuideInput'),
+  seatBottomGuide: $('seatBottomGuideInput')
 };
 
 let dpr = Math.max(1, window.devicePixelRatio || 1);
@@ -217,6 +225,13 @@ function pointLineDistance(point, a, b) {
   return distance(point, { x: a.x + t * (b.x - a.x), y: a.y + t * (b.y - a.y) });
 }
 function interp(a, b, t) { return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }; }
+function quadPoint(points, u, v) {
+  const [a, b, c, d] = points;
+  return {
+    x: a.x * (1 - u) * (1 - v) + b.x * u * (1 - v) + c.x * u * v + d.x * (1 - u) * v,
+    y: a.y * (1 - u) * (1 - v) + b.y * u * (1 - v) + c.y * u * v + d.y * (1 - u) * v
+  };
+}
 function normalizeQuadPoints(points) {
   if (!Array.isArray(points) || points.length !== 4) return points;
   const sorted = points.map(point => ({ x: +point.x, y: +point.y })).sort((a, b) => a.y - b.y || a.x - b.x);
@@ -627,8 +642,9 @@ function drawObject(object, selected, draft) {
     ctx.stroke();
     const selectedObject = state.objects.find(item => item.id === state.selectedId);
     const linkedProbeSelected = selectedObject?.type === 'thirds' && selectedObject.kastelId === object.id;
-    if (object.type === 'kastel' && (selected || linkedProbeSelected) && !draft && points.length === 4) {
-      drawKastelGrid(points, object, object.color);
+    const overlayVisible = object.overlays?.thirdsVisible === true || object.overlays?.structureVisible === true;
+    if (object.type === 'kastel' && (selected || linkedProbeSelected || overlayVisible) && !draft && points.length === 4) {
+      drawKastelGrid(points, object, object.color, selected || linkedProbeSelected);
     }
     if (!draft && resultLabelVisible && points.length === 4) {
       const anchor = object.type === 'kastel'
@@ -785,7 +801,8 @@ function kastelNibTickLayout(object, displayScale = state.view.scale) {
 function kastelHasManualGuide(guides) {
   if (!guides) return false;
   if (guides.source === 'manual') return true;
-  return guides.roofSource === 'manual' || guides.seatSource === 'manual';
+  return ['roofTopSource', 'roofBottomSource', 'seatTopSource', 'seatBottomSource', 'roofSource', 'seatSource']
+    .some(key => guides[key] === 'manual');
 }
 function kastelGuideSpecs(guides) {
   if (!guides) return [];
@@ -794,32 +811,76 @@ function kastelGuideSpecs(guides) {
   const seatSource = guides.seatSource || sharedSource;
   return [
     {
-      t: guides.roofBottomT,
-      color: '#0f766e',
-      dash: roofSource === 'manual' ? [] : [5, 5],
-      label: `תחתית הגג${roofSource === 'auto' ? ' — הצעה' : ''}`,
-      source: roofSource
+      key: 'roofTopT',
+      t: guides.roofTopT,
+      color: KASTEL_GUIDE_COLORS.roof,
+      dash: (guides.roofTopSource || roofSource) === 'manual' ? [] : [5, 5],
+      label: `הגבול העליון של הגג${(guides.roofTopSource || roofSource) === 'auto' ? ' — זוהה' : ''}`,
+      source: guides.roofTopSource || roofSource
     },
     {
+      key: 'roofBottomT',
+      t: guides.roofBottomT,
+      color: KASTEL_GUIDE_COLORS.roof,
+      dash: (guides.roofBottomSource || roofSource) === 'manual' ? [] : [5, 5],
+      label: `הגבול התחתון של הגג${(guides.roofBottomSource || roofSource) === 'auto' ? ' — זוהה' : ''}`,
+      source: guides.roofBottomSource || roofSource
+    },
+    {
+      key: 'seatTopT',
       t: guides.seatTopT,
-      color: '#2563eb',
-      dash: seatSource === 'manual' ? [] : [5, 5],
-      label: `ראש המושב${seatSource === 'auto' ? ' — הצעה' : ''}`,
-      source: seatSource
+      color: KASTEL_GUIDE_COLORS.seat,
+      dash: (guides.seatTopSource || seatSource) === 'manual' ? [] : [5, 5],
+      label: `הגבול העליון של המושב${(guides.seatTopSource || seatSource) === 'auto' ? ' — זוהה' : ''}`,
+      source: guides.seatTopSource || seatSource
+    },
+    {
+      key: 'seatBottomT',
+      t: guides.seatBottomT,
+      color: KASTEL_GUIDE_COLORS.seat,
+      dash: (guides.seatBottomSource || seatSource) === 'manual' ? [] : [5, 5],
+      label: `הגבול התחתון של המושב${(guides.seatBottomSource || seatSource) === 'auto' ? ' — זוהה' : ''}`,
+      source: guides.seatBottomSource || seatSource
     }
   ].filter(guide => Number.isFinite(guide.t) && ['auto', 'manual'].includes(guide.source));
 }
-function drawKastelGrid(points, object, color) {
+function seatTrendGeometry(points, trend) {
+  if (!trend || !Array.isArray(points) || points.length !== 4) return null;
+  const path = Array.isArray(trend.path)
+    ? trend.path
+      .filter(point => Number.isFinite(point?.u) && Number.isFinite(point?.t))
+      .map(point => quadPoint(points, clamp(point.u, 0, 1), clamp(point.t, 0, 1)))
+    : [];
+  const fallbackPath = Number.isFinite(trend.leftT) && Number.isFinite(trend.rightT)
+    ? [
+        quadPoint(points, .12, trend.leftT),
+        quadPoint(points, .88, trend.rightT)
+      ]
+    : [];
+  const line = path.length >= 2 ? path : fallbackPath;
+  if (line.length < 2) return null;
+  const meanU = Number.isFinite(trend.meanU) ? clamp(trend.meanU, 0, 1) : .5;
+  const meanT = Number.isFinite(trend.meanT)
+    ? clamp(trend.meanT, 0, 1)
+    : (trend.leftT + trend.rightT) / 2;
+  return {
+    line,
+    mean: quadPoint(points, meanU, meanT)
+  };
+}
+function drawKastelGrid(points, object, color, selected = false) {
   ctx.save();
-  ctx.setLineDash([7, 6]);
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 1.5;
-  for (const t of [1 / 3, 2 / 3]) {
-    const left = interp(points[0], points[3], t);
-    const right = interp(points[1], points[2], t);
-    drawLine(left, right);
+  if (object.overlays?.thirdsVisible === true) {
+    ctx.setLineDash([7, 6]);
+    ctx.strokeStyle = KASTEL_GUIDE_COLORS.thirds;
+    ctx.lineWidth = 1.8;
+    for (const t of [1 / 3, 2 / 3]) {
+      const top = interp(points[0], points[1], t);
+      const bottom = interp(points[3], points[2], t);
+      drawLine(top, bottom);
+    }
   }
-  const tickLayout = kastelNibTickLayout(object);
+  const tickLayout = selected ? kastelNibTickLayout(object) : null;
   if (tickLayout) {
     const { topWidthImage, divisions, step } = tickLayout;
     ctx.save();
@@ -840,7 +901,8 @@ function drawKastelGrid(points, object, color) {
     }
   }
   const guideSpecs = kastelGuideSpecs(object.guides);
-  if (guideSpecs.length) {
+  const showStructure = object.overlays?.structureVisible === true;
+  if (showStructure && guideSpecs.length) {
     ctx.save();
     ctx.lineWidth = 2.5;
     ctx.globalAlpha = .9;
@@ -852,6 +914,28 @@ function drawKastelGrid(points, object, color) {
       drawLine(left, right);
     }
     ctx.restore();
+    const trend = object.guides?.seatTrend;
+    const trendGeometry = seatTrendGeometry(object.points, trend);
+    if (trendGeometry) {
+      const trendPath = trendGeometry.line.map(imageToScreen);
+      const mean = imageToScreen(trendGeometry.mean);
+      ctx.save();
+      ctx.strokeStyle = KASTEL_GUIDE_COLORS.seatTrend;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([2, 5]);
+      ctx.beginPath();
+      ctx.moveTo(trendPath[0].x, trendPath[0].y);
+      for (const point of trendPath.slice(1)) ctx.lineTo(point.x, point.y);
+      ctx.stroke();
+      ctx.fillStyle = KASTEL_GUIDE_COLORS.seatTrend;
+      ctx.beginPath();
+      ctx.arc(mean.x, mean.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      if (Number.isFinite(trend.angleDeg)) {
+        label(mean, `זווית המושב ${fmt(trend.angleDeg, 1)}°`, KASTEL_GUIDE_COLORS.seatTrend);
+      }
+    }
   }
   ctx.restore();
 }

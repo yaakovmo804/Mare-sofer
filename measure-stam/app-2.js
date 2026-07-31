@@ -1,4 +1,20 @@
 'use strict';
+function kastelRegionMetrics(object) {
+  if (!object?.guides || object?.points?.length !== 4) return null;
+  const heightPx = (distance(object.points[0], object.points[3]) + distance(object.points[1], object.points[2])) / 2;
+  const { roofTopT, roofBottomT, seatTopT, seatBottomT } = object.guides;
+  const roofPx = Number.isFinite(roofTopT) && Number.isFinite(roofBottomT)
+    ? Math.max(0, (roofBottomT - roofTopT) * heightPx)
+    : null;
+  const spacePx = Number.isFinite(roofBottomT) && Number.isFinite(seatTopT)
+    ? Math.max(0, (seatTopT - roofBottomT) * heightPx)
+    : null;
+  const seatPx = Number.isFinite(seatTopT) && Number.isFinite(seatBottomT)
+    ? Math.max(0, (seatBottomT - seatTopT) * heightPx)
+    : null;
+  return { heightPx, roofPx, spacePx, seatPx };
+}
+
 function measurementResultModel(object) {
   const fallback = { canvasText: typeLabel(object?.type), primaryText: typeLabel(object?.type), secondaryText: '' };
   if (!object?.points?.length) return fallback;
@@ -37,17 +53,15 @@ function measurementResultModel(object) {
       ? `רוחב ${fmt(widthPx / state.formula.nibPx, 2)} · גובה ${fmt(heightPx / state.formula.nibPx, 2)} עובי קולמוס`
       : 'נדרש כיול קולמוס';
     const secondaryParts = [`${fmt(widthPx, 1)} × ${fmt(heightPx, 1)} פיקסלים`];
-    const guideSpecs = kastelGuideSpecs(object.guides);
-    const roofGuide = guideSpecs.find(guide => guide.label.startsWith('תחתית הגג'));
-    const seatGuide = guideSpecs.find(guide => guide.label.startsWith('ראש המושב'));
+    const regions = object.overlays?.structureVisible === true
+      ? kastelRegionMetrics(object)
+      : null;
     const formatPart = value => state.formula.nibPx
       ? `${fmt(value / state.formula.nibPx, 2)} עובי קולמוס`
       : `${fmt(value, 1)} פיקסלים`;
-    if (roofGuide) secondaryParts.push(`גג ${formatPart(heightPx * roofGuide.t)}`);
-    if (roofGuide && seatGuide) {
-      secondaryParts.push(`חלל ${formatPart(Math.max(0, heightPx * (seatGuide.t - roofGuide.t)))}`);
-    }
-    if (seatGuide) secondaryParts.push(`מושב ${formatPart(heightPx * (1 - seatGuide.t))}`);
+    if (regions?.roofPx != null) secondaryParts.push(`גג ${formatPart(regions.roofPx)}`);
+    if (regions?.spacePx != null) secondaryParts.push(`חלל ${formatPart(regions.spacePx)}`);
+    if (regions?.seatPx != null) secondaryParts.push(`מושב ${formatPart(regions.seatPx)}`);
     return {
       canvasText: state.formula.nibPx
         ? `${fmt(widthPx / state.formula.nibPx, 2)} × ${fmt(heightPx / state.formula.nibPx, 2)} עובי קולמוס`
@@ -74,13 +88,10 @@ function measurementResultModel(object) {
     const kastel = state.objects.find(item => item.id === object.kastelId);
     if (!kastel) return { canvasText: 'קעסטעל לא נמצא', primaryText: 'קעסטעל לא נמצא', secondaryText: '' };
     const value = thirdsValues(kastel, object.points[0]);
-    const horizontal = state.formula.nibPx
-      ? `${fmt(value.xNibFromRight, 2)} עובי קולמוס מימין`
-      : 'רוחב: נדרש כיול';
     return {
-      canvasText: `גובה ${fmt(value.yPct, 1)}% · ${horizontal}`,
-      primaryText: `גובה ${fmt(value.yPct, 1)}%`,
-      secondaryText: `${horizontal} · סטייה משליש ${fmt(value.yDev, 1)}%`
+      canvasText: `רוחב ${fmt(value.xPct, 1)}% · סטייה משליש ${fmt(value.xDev, 1)}%`,
+      primaryText: `רוחב ${fmt(value.xPct, 1)}%`,
+      secondaryText: `מדידת נקודה ישנה · סטייה משליש ${fmt(value.xDev, 1)}%`
     };
   }
 
@@ -209,32 +220,36 @@ function renderResults() {
       ? `<p class="result-emphasis">רוחב ${fmt(widthPx / state.formula.nibPx, 2)} עובי קולמוס · גובה ${fmt(heightPx / state.formula.nibPx, 2)} עובי קולמוס</p>`
       : '<p class="result-emphasis">נדרש כיול קולמוס</p>';
     html += technicalPixelDetails(`${fmt(widthPx, 1)} × ${fmt(heightPx, 1)}`);
-    html += '<p>חוק השלישים מחלק את גובה האות בלבד; סימוני הרוחב בנויים לפי עובי הקולמוס.</p>';
+    html += `<p>חוק השלישים מחלק את רוחב הקעסטעל לשלושה טורים אנכיים${object.overlays?.thirdsVisible ? ' — מוצג כעת' : ''}.</p>`;
     const guideSpecs = kastelGuideSpecs(object.guides);
-    if (guideSpecs.length) {
-      const roofGuide = guideSpecs.find(guide => guide.label.startsWith('תחתית הגג'));
-      const seatGuide = guideSpecs.find(guide => guide.label.startsWith('ראש המושב'));
-      const roofResolved = !!roofGuide;
-      const seatResolved = !!seatGuide;
-      const roofPx = roofResolved ? heightPx * roofGuide.t : null;
-      const seatPx = seatResolved ? heightPx * (1 - seatGuide.t) : null;
-      const innerPx = roofResolved && seatResolved ? Math.max(0, heightPx - roofPx - seatPx) : null;
+    if (object.overlays?.structureVisible === true && guideSpecs.length) {
+      const regions = kastelRegionMetrics(object);
       const formatGuide = value => state.formula.nibPx ? `${fmt(value / state.formula.nibPx, 2)} עובי קולמוס` : 'נדרש כיול';
-      if (roofResolved) html += `<p>עובי גג: <b>${formatGuide(roofPx)}</b></p>`;
-      if (innerPx != null) html += `<p>חלל גג–מושב: <b>${formatGuide(innerPx)}</b></p>`;
-      if (seatResolved) html += `<p>עובי מושב: <b>${formatGuide(seatPx)}</b></p>`;
+      if (regions?.roofPx != null) html += `<p>עובי גג: <b>${formatGuide(regions.roofPx)}</b></p>`;
+      if (regions?.spacePx != null) html += `<p>חלל גג–מושב: <b>${formatGuide(regions.spacePx)}</b></p>`;
+      if (regions?.seatPx != null) html += `<p>עובי מושב: <b>${formatGuide(regions.seatPx)}</b></p>`;
+      if (Number.isFinite(object.guides?.seatTrend?.angleDeg)) {
+        html += `<p>זווית המושב בנקודה הממוצעת: <b>${fmt(object.guides.seatTrend.angleDeg, 1)}°</b></p>`;
+      }
+      if (Number.isFinite(object.guides?.roofDerivedNibPx)) {
+        html += `<p>עובי קולמוס שנגזר מן הגג: <b>${fmt(object.guides.roofDerivedNibPx / (state.formula.nibPx || object.guides.roofDerivedNibPx), 2)} עובי קולמוס</b></p>`;
+        if (object.guides.roofCalibrationAccepted === false) {
+          const deviation = object.guides.roofCalibrationDeviation;
+          html += `<p class="result-note">הערך מן הגג${Number.isFinite(deviation) ? ` חרג ב־${fmt(deviation * 100, 1)}%` : ' חרג ביותר מ־10%'} ולכן לא שינה את הכיול הפעיל.</p>`;
+        } else if (state.formula.calibration?.verified === true) {
+          html += '<p class="result-note">הגג שימש לבדיקת התאמה בלבד; הכיול הידני המאומת נשאר נעול.</p>';
+        }
+      }
       const hasAuto = guideSpecs.some(guide => guide.source === 'auto');
       const hasManual = guideSpecs.some(guide => guide.source === 'manual');
       const guideNote = hasAuto && hasManual
-        ? 'קו אחד נקבע ידנית והקו האחר הוא הצעת זיהוי.'
+        ? 'חלק מן הגבולות תוקנו ידנית והאחרים נשארו מן הזיהוי.'
         : hasAuto
-          ? 'זיהוי מסייע — ניתן לדייק במחוונים.'
-          : roofResolved && seatResolved
-            ? 'שני קווי העזר נקבעו ידנית.'
-            : 'רק קו אחד נקבע. הקו השני עדיין אינו מוצג.';
+          ? 'ארבעת גבולות האזורים זוהו אוטומטית — ניתן לדייק במחוונים.'
+          : 'גבולות האזורים נקבעו ידנית.';
       html += `<p class="result-note">${guideNote}</p>`;
     } else {
-      html += '<p class="result-note">תחתית הגג וראש המושב לא זוהו בוודאות. ניתן לקבוע אותם ידנית במחוונים.</p>';
+      html += '<p class="result-note">גג ומושב לא זוהו בוודאות. לחץ „זהה גג, חלל ומושב” או קבע את הגבולות ידנית.</p>';
     }
   } else if (object.type === 'nibRegion') {
     const ratio = object.calibrationPx && state.formula.nibPx ? object.calibrationPx / state.formula.nibPx : 1;
@@ -245,11 +260,9 @@ function renderResults() {
     const kastel = state.objects.find(item => item.id === object.kastelId);
     if (kastel) {
       const value = thirdsValues(kastel, object.points[0]);
-      html += `<p>מיקום בגובה: <b>${fmt(value.yPct, 1)}%</b></p>`;
-      html += `<p>סטייה מקו השליש הקרוב: <b>${fmt(value.yDev, 1)}%</b></p>`;
-      html += state.formula.nibPx
-        ? `<p>מיקום לרוחב: <b>${fmt(value.xNibFromRight, 2)} עובי קולמוס מן הימין</b></p>`
-        : '<p class="result-note">כייל קולמוס כדי לקבל מיקום רוחבי מקצועי.</p>';
+      html += `<p>מיקום לרוחב: <b>${fmt(value.xPct, 1)}%</b></p>`;
+      html += `<p>סטייה מקו השליש הקרוב: <b>${fmt(value.xDev, 1)}%</b></p>`;
+      html += '<p class="result-note">זו מדידת נקודה מגרסה קודמת. חוק השלישים החדש פועל ישירות על הקעסטעל.</p>';
     }
   }
   if (object.category) html += `<p class="result-note">קטגוריה: ${escapeHtml(categoryName(object.category))}</p>`;
@@ -421,35 +434,56 @@ function renderControls() {
     : selected?.type === 'thirds'
       ? state.objects.find(item => item.id === selected.kastelId && item.type === 'kastel')
       : null;
+  const kastels = state.objects.filter(item => item.type === 'kastel');
+  const actionKastel = activeKastel || (kastels.length === 1 ? kastels[0] : null);
   const guidesPanel = $('kastelGuidesPanel');
   if (guidesPanel) guidesPanel.hidden = !activeKastel;
-  if (ui.roofGuide) ui.roofGuide.disabled = selected?.type !== 'kastel';
-  if (ui.seatGuide) ui.seatGuide.disabled = selected?.type !== 'kastel';
+  const thirdsButton = $('thirdsToggleBtn');
+  if (thirdsButton) {
+    thirdsButton.disabled = !state.objects.some(item => item.type === 'kastel');
+    thirdsButton.classList.toggle('active', actionKastel?.overlays?.thirdsVisible === true);
+  }
+  const structureButton = $('detectStructureBtn');
+  if (structureButton) {
+    structureButton.disabled = !state.objects.some(item => item.type === 'kastel');
+    structureButton.classList.toggle('active', actionKastel?.overlays?.structureVisible === true);
+  }
+  for (const input of [ui.roofTopGuide, ui.roofGuide, ui.seatGuide, ui.seatBottomGuide]) {
+    if (input) input.disabled = selected?.type !== 'kastel';
+  }
   if (activeKastel?.guides) {
+    const roofTopValue = Number.isFinite(activeKastel.guides.roofTopT)
+      ? activeKastel.guides.roofTopT
+      : activeKastel.guides.suggestedRoofTopT ?? .02;
     const roofValue = Number.isFinite(activeKastel.guides.roofBottomT)
       ? activeKastel.guides.roofBottomT
       : activeKastel.guides.suggestedRoofBottomT ?? .18;
     const seatValue = Number.isFinite(activeKastel.guides.seatTopT)
       ? activeKastel.guides.seatTopT
       : activeKastel.guides.suggestedSeatTopT ?? .82;
+    const seatBottomValue = Number.isFinite(activeKastel.guides.seatBottomT)
+      ? activeKastel.guides.seatBottomT
+      : activeKastel.guides.suggestedSeatBottomT ?? .98;
+    if (document.activeElement !== ui.roofTopGuide) ui.roofTopGuide.value = Math.round(roofTopValue * 1000);
     if (document.activeElement !== ui.roofGuide) ui.roofGuide.value = Math.round(roofValue * 1000);
     if (document.activeElement !== ui.seatGuide) ui.seatGuide.value = Math.round(seatValue * 1000);
+    if (document.activeElement !== ui.seatBottomGuide) ui.seatBottomGuide.value = Math.round(seatBottomValue * 1000);
     const guideStatus = $('guideStatus');
     if (guideStatus) {
       const specs = kastelGuideSpecs(activeKastel.guides);
-      const roofResolved = specs.some(guide => guide.label.startsWith('תחתית הגג'));
-      const seatResolved = specs.some(guide => guide.label.startsWith('ראש המושב'));
-      const status = !specs.length
-        ? 'הקווים טרם זוהו. כל מחוון קובע רק את הקו שלו.'
-        : roofResolved && seatResolved
+      const resolved = new Set(specs.map(guide => guide.key));
+      const allResolved = ['roofTopT', 'roofBottomT', 'seatTopT', 'seatBottomT'].every(key => resolved.has(key));
+      const status = activeKastel.overlays?.structureVisible !== true
+        ? 'האזורים טרם זוהו. אפשר להפעיל זיהוי או לקבוע כל גבול ידנית.'
+        : !specs.length
+        ? 'האזורים טרם זוהו. אפשר להפעיל זיהוי או לקבוע כל גבול ידנית.'
+        : allResolved
           ? specs.every(guide => guide.source === 'manual')
-            ? 'שני הקווים נקבעו ידנית.'
+            ? 'ארבעת הגבולות נקבעו ידנית.'
             : specs.every(guide => guide.source === 'auto')
-              ? 'שני הקווים זוהו אוטומטית — מומלץ לאמת.'
-              : 'קו אחד ידני והקו האחר הוא הצעת זיהוי.'
-          : roofResolved
-            ? 'תחתית הגג נקבעה; ראש המושב טרם נקבע.'
-            : 'ראש המושב נקבע; תחתית הגג טרם נקבעה.';
+              ? 'גג, חלל ומושב זוהו אוטומטית — מומלץ לאמת.'
+              : 'חלק מן הגבולות ידניים וחלקם מן הזיהוי.'
+          : `${resolved.size} מתוך 4 גבולות נקבעו.`;
       guideStatus.textContent = selected?.type === 'thirds'
         ? `${status} כדי לערוך, בחר את מסגרת הקעסטעל.`
         : status;
@@ -504,6 +538,20 @@ function nearestAreaSegmentIndex(object, imagePoint, thresholdScreen = 20) {
     } else {
       current = Math.min(current, pointLineDistance(target, imageToScreen(start), imageToScreen(end)));
     }
+    if (current <= thresholdScreen && current < bestDistance) {
+      best = index;
+      bestDistance = current;
+    }
+  }
+  return best;
+}
+function nearestAreaCurveHandleIndex(object, imagePoint, thresholdScreen = 13) {
+  if (object?.type !== 'area') return -1;
+  const target = imageToScreen(imagePoint);
+  let best = -1;
+  let bestDistance = Infinity;
+  for (let index = 0; index < areaSegmentCount(object); index++) {
+    const current = distance(target, imageToScreen(segmentDisplayPoint(object, index)));
     if (current <= thresholdScreen && current < bestDistance) {
       best = index;
       bestDistance = current;
@@ -708,7 +756,26 @@ function handleAreaPointer(imagePoint) {
     state.draft = makeObject('area', [imagePoint], { color: TOOL_COLORS.area, closed: false });
     state.draftHistory = [];
     state.selectedPoint = { target: 'draft', index: 0 };
-    statusText.textContent = 'סמן נקודות סביב התחום. בסיום לחץ „סגירת השטח”';
+    statusText.textContent = 'סמן נקודות סביב התחום. בסיום גע בנקודה הראשונה או לחץ „סגירת השטח”';
+    renderAll();
+    return;
+  }
+  const closePointIndex = state.draft.points.length >= 3
+    ? nearestPointIndex([state.draft.points[0]], imagePoint, 24)
+    : -1;
+  if (closePointIndex === 0) {
+    state.selectedPoint = { target: 'draft', index: 0 };
+    state.selectedSegment = null;
+    state.dragging = {
+      type: 'draftHandle',
+      handle: 0,
+      originScreen: imageToScreen(imagePoint),
+      originalPoint: { ...state.draft.points[0] },
+      beforeDraft: structuredCloneSafe(state.draft),
+      moved: false,
+      closeOnTap: true
+    };
+    statusText.textContent = 'שחרר כדי לסגור את השטח, או גרור כדי להזיז את נקודת הפתיחה';
     renderAll();
     return;
   }
@@ -722,13 +789,14 @@ function handleAreaPointer(imagePoint) {
       originScreen: imageToScreen(imagePoint),
       originalPoint: { ...state.draft.points[index] },
       beforeDraft: structuredCloneSafe(state.draft),
-      moved: false
+      moved: false,
+      closeOnTap: false
     };
     statusText.textContent = 'הנקודה נבחרה. גרור למיקום המדויק';
     renderAll();
     return;
   }
-  const segment = nearestAreaSegmentIndex(state.draft, imagePoint, 18);
+  const segment = nearestAreaCurveHandleIndex(state.draft, imagePoint, 13);
   if (segment >= 0) {
     state.selectedPoint = null;
     state.selectedSegment = { target: 'draft', index: segment };
