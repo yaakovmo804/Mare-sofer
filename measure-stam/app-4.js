@@ -1444,7 +1444,9 @@ function drawObjectToContext(context, object) {
   context.lineJoin = 'round';
   context.lineCap = 'round';
   if (object.auto) context.setLineDash([10, 8]);
-  if (object.type === 'area') {
+  if (object.type === 'letterTemplate') {
+    drawLetterTemplateForExport(context, object);
+  } else if (object.type === 'area') {
     context.beginPath();
     context.moveTo(points[0].x, points[0].y);
     ensureAreaSegments(object);
@@ -1724,14 +1726,14 @@ async function serializeProjectV3() {
   return {
     ...base,
     format: 'mirror-sofer.measure-stam.project',
-    schemaVersion: '3.1.0',
+    schemaVersion: '3.2.0',
     project: {
       ...(base.project || {}),
       id: captured.projectMeta.id,
       title: captured.projectMeta.title || 'פרויקט מדידאות',
       createdAt: captured.projectMeta.createdAt,
       updatedAt: now,
-      appVersion: '2026.07.31h',
+      appVersion: '2026.07.31i',
       locale: 'he-IL'
     },
     source: {
@@ -1836,7 +1838,9 @@ function measurementGeometry(object) {
   if (object.type === 'area') {
     return { ...common, type: 'quadratic-path', closed: object.closed !== false, segments: structuredCloneSafe(object.segments || []) };
   }
-  if (object.type === 'kastel' || object.type === 'nibRegion') return { ...common, type: 'polygon', closed: true };
+  if (object.type === 'kastel' || object.type === 'nibRegion' || object.type === 'letterTemplate') {
+    return { ...common, type: 'polygon', closed: true };
+  }
   if (object.type === 'thirds') return { ...common, type: 'point' };
   if (object.type === 'angle') return { ...common, type: 'polyline' };
   return { ...common, type: 'line-string' };
@@ -1855,6 +1859,19 @@ function measurementMetrics(object) {
       areaPx2,
       areaNib2: state.formula.nibPx ? areaPx2 / (state.formula.nibPx ** 2) : null,
       calibrationId: activeNibCalibrationId()
+    };
+  }
+  if (object.type === 'letterTemplate' && object.points.length === 4) {
+    const rect = letterObjectRect(object);
+    return {
+      metricId: 'reference-letter-template.v1',
+      letter: object.template?.letter || null,
+      tradition: object.template?.tradition || 'beitYosef',
+      vectorAssetVersion: object.template?.vectorAssetVersion || 1,
+      widthPx: rect.width,
+      heightPx: rect.height,
+      mode: object.letterMode || 'solid',
+      opacity: object.letterOpacity ?? .62
     };
   }
   if (['length', 'nib', 'gap'].includes(object.type) && object.points.length >= 2) {
@@ -2157,7 +2174,7 @@ function prepareLoadedObjects(rawObjects) {
 function normalizeLoadedObject(object) {
   if (!object || typeof object !== 'object') throw new Error('Invalid measurement');
   const normalized = structuredCloneSafe(object);
-  const allowedTypes = new Set(['area', 'length', 'angle', 'kastel', 'thirds', 'nib', 'nibRegion', 'gap']);
+  const allowedTypes = new Set(['area', 'length', 'angle', 'kastel', 'thirds', 'nib', 'nibRegion', 'gap', 'letterTemplate']);
   if (!allowedTypes.has(normalized.type)) throw new Error('Unsupported measurement type');
   if (normalized.geometry?.nodes) throw new Error('Unsupported rich path geometry');
   const supportedGeometryTypes = new Set(['quadratic-path', 'polygon', 'point', 'polyline', 'line-string']);
@@ -2177,9 +2194,9 @@ function normalizeLoadedObject(object) {
   if (['kastel', 'nibRegion'].includes(normalized.type) && normalized.points.length === 4) {
     normalized.points = normalizeQuadPoints(normalized.points);
   }
-  const minimumPoints = { area: 3, length: 2, angle: 2, kastel: 4, thirds: 1, nib: 2, nibRegion: 4, gap: 2 };
+  const minimumPoints = { area: 3, length: 2, angle: 2, kastel: 4, thirds: 1, nib: 2, nibRegion: 4, gap: 2, letterTemplate: 4 };
   if (normalized.points.length < minimumPoints[normalized.type]) throw new Error('Incomplete measurement geometry');
-  if (['kastel', 'nibRegion'].includes(normalized.type) && normalized.points.length !== 4) {
+  if (['kastel', 'nibRegion', 'letterTemplate'].includes(normalized.type) && normalized.points.length !== 4) {
     throw new Error('Rectangular measurements require four corners');
   }
   normalized.uid = normalized.uid || (typeof normalized.id === 'string' ? normalized.id : createStableId('measurement'));
@@ -2205,6 +2222,7 @@ function normalizeLoadedObject(object) {
     }
     ensureAreaSegments(normalized);
   }
+  if (normalized.type === 'letterTemplate') normalizeLetterTemplateObject(normalized);
   if (normalized.type === 'kastel' && normalized.guides) {
     const guides = normalized.guides;
     const validSource = source => ['auto', 'manual'].includes(source);

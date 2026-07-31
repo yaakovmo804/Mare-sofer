@@ -100,7 +100,8 @@ function measurementResultModel(object) {
 
 function renderList() {
   listEl.replaceChildren();
-  state.objects.forEach((object, index) => {
+  const measurementObjects = state.objects.filter(object => !isLetterTemplate(object));
+  measurementObjects.forEach((object, index) => {
     const item = document.createElement('article');
     item.className = `measurement-item${object.id === state.selectedId ? ' selected' : ''}`;
     const selectButton = document.createElement('button');
@@ -152,7 +153,7 @@ function renderList() {
     item.append(selectButton, toggle);
     listEl.append(item);
   });
-  if (!state.objects.length) {
+  if (!measurementObjects.length) {
     const empty = document.createElement('p');
     empty.className = 'microcopy';
     empty.textContent = 'אין עדיין מדידות.';
@@ -179,6 +180,7 @@ function selectObject(id) {
       state.formula.selectedVariable = object.formulaKey;
       ui.gapVariable.value = object.formulaKey;
     }
+    if (isLetterTemplate(object)) syncLetterControls(object);
   }
   renderAll();
 }
@@ -190,7 +192,12 @@ function renderResults() {
     return;
   }
   let html = `<p><b>${escapeHtml(object.name)}</b></p>`;
-  if (object.type === 'area') {
+  if (object.type === 'letterTemplate') {
+    const rect = letterObjectRect(object);
+    html += `<p class="result-emphasis">תבנית ${escapeHtml(object.template?.letter || '')} · ${letterTraditionLabel(object.template?.tradition)}</p>`;
+    html += `<p>${fmt(rect.width, 1)} × ${fmt(rect.height, 1)} פיקסלים</p>`;
+    html += `<p class="result-note">שכבה וקטורית להשוואה; אינה נכללת ברשימת המדידות.</p>`;
+  } else if (object.type === 'area') {
     const area = measuredArea(object);
     html += `<p class="result-emphasis">${fmt(area, 0)} פיקסלים²</p>`;
     html += '<p class="result-note">התחום ניתן להשוואה לשטחים אחרים ברשימה.</p>';
@@ -424,6 +431,12 @@ function renderControls() {
   $('cancelDraftBtn').disabled = !state.draft;
   $('deleteBtn').disabled = !state.selectedId;
   const selected = state.objects.find(item => item.id === state.selectedId);
+  const selectedLetter = isLetterTemplate(selected);
+  const measurementPropertiesPanel = $('measurementPropertiesPanel');
+  const selectedResultPanel = $('selectedResultPanel');
+  if (measurementPropertiesPanel) measurementPropertiesPanel.hidden = selectedLetter;
+  if (selectedResultPanel) selectedResultPanel.hidden = selectedLetter;
+  syncLetterControls(selectedLetter ? selected : null);
   ui.fillEnabled.disabled = !selected || !['area', 'kastel', 'nibRegion'].includes(selected.type);
   ui.fillAlpha.disabled = !selected || !['area', 'kastel', 'nibRegion'].includes(selected.type);
   if (ui.category) ui.category.disabled = !selected;
@@ -559,16 +572,54 @@ function nearestAreaCurveHandleIndex(object, imagePoint, thresholdScreen = 13) {
   }
   return best;
 }
+function selectedAreaEditHit(imagePoint) {
+  const object = state.objects.find(item => item.id === state.selectedId && item.type === 'area');
+  if (!object) return null;
+
+  const target = imageToScreen(imagePoint);
+  const handle = nearestPointIndex(object.points, imagePoint, 22);
+  const segmentHandle = nearestAreaCurveHandleIndex(object, imagePoint, 18);
+  const handleDistance = handle >= 0
+    ? distance(target, imageToScreen(object.points[handle]))
+    : Infinity;
+  const segmentHandleDistance = segmentHandle >= 0
+    ? distance(target, imageToScreen(segmentDisplayPoint(object, segmentHandle)))
+    : Infinity;
+
+  // A Pencil tap on the visible diamond should select the segment even when
+  // a short segment places that diamond inside an anchor's larger hit target.
+  if (segmentHandle >= 0 && segmentHandleDistance < handleDistance) {
+    return { object, handle: null, segment: segmentHandle };
+  }
+  if (handle >= 0) return { object, handle, segment: null };
+  if (segmentHandle >= 0) return { object, handle: null, segment: segmentHandle };
+
+  const segment = nearestAreaSegmentIndex(object, imagePoint, 18);
+  return segment >= 0 ? { object, handle: null, segment } : null;
+}
 function hitTest(imagePoint) {
+  const selectedLetter = state.objects.find(item => item.id === state.selectedId && isLetterTemplate(item));
+  if (selectedLetter) {
+    const letterHandle = nearestLetterHandle(selectedLetter, imagePoint, 20);
+    if (letterHandle) return { object: selectedLetter, handle: null, segment: null, letterHandle };
+    if (pointInPolygon(imagePoint, selectedLetter.points)) {
+      return { object: selectedLetter, handle: null, segment: null, letterHandle: null };
+    }
+  }
+  const selectedAreaHit = selectedAreaEditHit(imagePoint);
+  if (selectedAreaHit) return selectedAreaHit;
+
   const threshold = 10 / state.view.scale;
   for (let i = state.objects.length - 1; i >= 0; i--) {
     const object = state.objects[i];
+    if (isLetterTemplate(object)) {
+      if (pointInPolygon(imagePoint, object.points)) {
+        return { object, handle: null, segment: null, letterHandle: null };
+      }
+      continue;
+    }
     const handle = nearestPointIndex(object.points, imagePoint, 22);
     if (handle >= 0) return { object, handle, segment: null };
-    if (object.type === 'area' && object.id === state.selectedId) {
-      const segment = nearestAreaSegmentIndex(object, imagePoint, 18);
-      if (segment >= 0) return { object, handle: null, segment };
-    }
     const contour = object.type === 'area' ? flattenedAreaPoints(object) : object.points;
     if (['area', 'kastel', 'nibRegion'].includes(object.type) && object.points.length >= 3 && pointInPolygon(imagePoint, contour)) {
       return { object, handle: null, segment: null };
@@ -707,7 +758,20 @@ function pointerDown(event) {
       historyCommitted: false,
       moved: false
     };
-    if (hit.handle !== null) {
+    if (hit.letterHandle) {
+      state.selectedPoint = null;
+      state.selectedSegment = null;
+      state.dragging = {
+        ...dragBase,
+        type: 'letterResize',
+        letterHandle: hit.letterHandle,
+        original: structuredCloneSafe(hit.object.points),
+        lockAspect: hit.object.letterLockAspect !== false
+      };
+      statusText.textContent = ['n', 'e', 's', 'w'].includes(hit.letterHandle)
+        ? 'גרור לשינוי רוחב או גובה'
+        : 'גרור להגדלה או הקטנה';
+    } else if (hit.handle !== null) {
       state.selectedPoint = { target: 'object', id: hit.object.id, index: hit.handle };
       state.selectedSegment = null;
       state.dragging = { ...dragBase, type: 'handle', handle: hit.handle };

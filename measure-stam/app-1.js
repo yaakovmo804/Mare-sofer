@@ -49,6 +49,7 @@ const SEMANTIC_CATEGORIES = [
   { id: 'line-gap', name: 'מרווח בין שורות' },
   { id: 'thirds', name: 'חוק השלישים' },
   { id: 'angle', name: 'זוויות' },
+  { id: 'reference-template', name: 'תבנית אות' },
   { id: 'other', name: 'אחר' }
 ];
 
@@ -363,14 +364,14 @@ function defaultName(type) {
   const names = {
     area: 'שטח ואיזון לובן', length: 'אורך', angle: 'זווית', kastel: 'קעסטעל',
     thirds: 'חוק השלישים — בדיקת מיקום', nib: 'עובי קולמוס', nibRegion: 'אזור כיול קולמוס',
-    gap: selectedVariableName()
+    gap: selectedVariableName(), letterTemplate: 'תבנית אות'
   };
   return names[type] || 'מדידה';
 }
 function typeLabel(type) {
   const names = {
     area: 'שטח', length: 'אורך', angle: 'זווית', kastel: 'קעסטעל', thirds: 'חוק השלישים',
-    nib: 'קולמוס', nibRegion: 'אזור כיול', gap: 'מרווח'
+    nib: 'קולמוס', nibRegion: 'אזור כיול', gap: 'מרווח', letterTemplate: 'תבנית אות'
   };
   return names[type] || 'מדידה';
 }
@@ -427,6 +428,7 @@ function makeObject(type, points, overrides = {}) {
 function defaultCategory(type, formulaKey = state.formula.selectedVariable) {
   if (type === 'nib' || type === 'nibRegion') return 'nib';
   if (type === 'area') return 'white-space';
+  if (type === 'letterTemplate') return 'reference-template';
   if (type === 'kastel' || type === 'thirds') return 'thirds';
   if (type === 'angle') return 'angle';
   if (type === 'gap') {
@@ -611,7 +613,11 @@ function drawObject(object, selected, draft) {
   ctx.lineCap = 'round';
   if (object.auto) ctx.setLineDash([8, 6]);
 
-  if (object.type === 'area') {
+  if (object.type === 'letterTemplate') {
+    drawLetterTemplateOnScreen(object, selected);
+    ctx.restore();
+    return;
+  } else if (object.type === 'area') {
     ctx.beginPath();
     ctx.moveTo(points[0].x, points[0].y);
     ensureAreaSegments(object);

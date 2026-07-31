@@ -11,18 +11,21 @@
   <meta name="format-detection" content="telephone=no" />
   <title>מדידאות — מראה סופר</title>
   <link rel="manifest" href="manifest-medidaot.webmanifest" />
-  <link rel="apple-touch-icon" href="icon.svg" />
-  <link rel="stylesheet" href="styles.css?v=20260731h" />
+  <link rel="apple-touch-icon" sizes="180x180" href="assets/medidaot-apple-touch-180.png" />
+  <link rel="icon" type="image/png" sizes="32x32" href="assets/medidaot-favicon-32.png" />
+  <link rel="stylesheet" href="styles.css?v=20260731i" />
 </head>
 <body>
   <div id="app" class="app-shell">
     <header class="topbar">
       <div class="brand">
-        <div class="logo" aria-hidden="true">מ״ס</div>
-        <div>
+        <img class="app-brand-icon" src="assets/medidaot-icon-192.png" alt="" />
+        <div class="app-brand-copy">
           <h1>מדידאות</h1>
           <p>מדידת האות — שטחים, איזון לובן, נוסחת הכתב וגאומטריה</p>
         </div>
+        <span class="brand-divider" aria-hidden="true"></span>
+        <img class="mareh-sofer-brand" src="assets/mareh-sofer-brand.png" alt="מראה סופר — הראנו אות לטובה" />
       </div>
       <div class="top-actions">
         <label class="btn primary">העלאת תמונה<input id="imageInput" type="file" accept="image/*" hidden /></label>
@@ -47,6 +50,11 @@
         <section class="tool-section">
           <h2>שטחים ואיזון לובן</h2>
           <button class="tool" data-tool="area"><span class="tool-icon">⬡</span><span>מדידת שטח</span></button>
+        </section>
+
+        <section class="tool-section">
+          <h2>תבניות אות</h2>
+          <button id="letterBoardBtn" class="tool" type="button"><span class="tool-icon">א</span><span>לוח צורת האותיות</span></button>
         </section>
 
         <section class="tool-section formula-tools">
@@ -81,15 +89,30 @@
 
       <section class="canvas-panel panel" aria-label="משטח המדידה">
         <div id="emptyState" class="empty-state">
-          <div class="empty-icon">✦</div>
+          <img class="empty-app-icon" src="assets/medidaot-icon-512.png" alt="" />
           <h2>העלה צילום של אות, מילה או שורה</h2>
           <p>התמונה נטענת מיד. עובי הקולמוס יכול להיקבע מאזור, מקו ידני או מגג שזוהה בקעסטעל.</p>
+          <img class="empty-brand-logo" src="assets/mareh-sofer-brand.png" alt="מראה סופר" />
         </div>
         <div id="analysisOverlay" class="analysis-overlay" hidden>
           <div class="spinner" aria-hidden="true"></div>
           <span>מבצע בדיקה כללית — ללא שינוי כיול…</span>
         </div>
         <canvas id="canvas"></canvas>
+        <section id="letterDrawer" class="letter-drawer" aria-label="לוח צורת האותיות" hidden>
+          <div class="letter-drawer-head">
+            <div>
+              <h2>לוח צורת האותיות</h2>
+              <p id="letterDrawerNote">בחר אות בית יוסף והנח אותה כתבנית וקטורית על הצילום.</p>
+            </div>
+            <button id="closeLetterDrawerBtn" type="button" aria-label="סגירת לוח האותיות">×</button>
+          </div>
+          <div class="letter-tradition-tabs" role="tablist" aria-label="סגנון הכתב">
+            <button class="active" type="button" data-letter-tradition="beitYosef" role="tab" aria-selected="true">בית יוסף</button>
+            <button type="button" data-letter-tradition="ari" role="tab" aria-selected="false">כתב האר״י</button>
+          </div>
+          <div id="letterKeyboard" class="letter-keyboard" dir="rtl"></div>
+        </section>
         <div class="statusbar">
           <span id="statusText">מוכן</span>
           <span id="zoomText">100%</span>
@@ -139,7 +162,7 @@
           </div>
         </section>
 
-        <section class="property-section">
+        <section id="measurementPropertiesPanel" class="property-section">
           <h2>מאפייני הסימון</h2>
           <label>שם המדידה<input id="nameInput" type="text" placeholder="למשל: ירך ימנית" /></label>
           <label>קטגוריה מקצועית
@@ -156,6 +179,7 @@
               <option value="line-gap">מרווח בין שורות</option>
               <option value="thirds">חוק השלישים</option>
               <option value="angle">זוויות</option>
+              <option value="reference-template">תבנית אות</option>
               <option value="other">אחר</option>
             </select>
           </label>
@@ -188,6 +212,29 @@
           </label>
         </section>
 
+        <section id="letterControlsPanel" class="property-section letter-controls" hidden>
+          <div class="section-title-row">
+            <h2>תבנית האות</h2>
+            <span id="letterSelectedLabel" class="badge neutral">—</span>
+          </div>
+          <p class="microcopy">ידיות הפינה מגדילות ומקטינות תוך שמירת היחס. ידיות הצד מרחיבות, מצרות ומותחות כל ציר בנפרד.</p>
+          <div class="letter-mode-toggle" role="group" aria-label="מראה התבנית">
+            <button id="letterModeSolidBtn" class="active" type="button">מלא</button>
+            <button id="letterModeOutlineBtn" type="button">חלול</button>
+          </div>
+          <label>צבע התבנית<input id="letterColorInput" type="color" value="#2563eb" /></label>
+          <label>שקיפות<input id="letterOpacityInput" type="range" min="8" max="100" value="62" /></label>
+          <label id="letterOutlineWidthLabel">עובי קו חלול<input id="letterOutlineWidthInput" type="range" min="1" max="12" step="0.5" value="2.5" /></label>
+          <label class="check"><input id="letterGridInput" type="checkbox" checked /> רשת עזר</label>
+          <label class="check"><input id="letterLockAspectInput" type="checkbox" checked /> שמירת יחס בידיות הפינה</label>
+          <p id="letterSizeReadout" class="microcopy">—</p>
+          <div class="button-row">
+            <button id="duplicateLetterBtn" class="btn compact" type="button">שכפול</button>
+            <button id="resetLetterRatioBtn" class="btn compact" type="button">יחס מקור</button>
+            <button id="deleteLetterBtn" class="btn compact danger" type="button">מחיקה</button>
+          </div>
+        </section>
+
         <section id="kastelGuidesPanel" class="property-section" hidden>
           <h2>גג, מושב וחוק השלישים</h2>
           <p class="microcopy">חוק השלישים מחלק את רוחב הקעסטעל לשלושה טורים בקווים אנכיים. זיהוי גג–חלל–מושב מציג בנפרד את גבולות האזורים בקווים אופקיים; במושב עקום נוסף קו מגמה, נקודת ממוצע וזווית.</p>
@@ -204,7 +251,7 @@
           <label>הגבול התחתון של המושב<input id="seatBottomGuideInput" type="range" min="350" max="1000" value="980" /></label>
         </section>
 
-        <section class="property-section">
+        <section id="selectedResultPanel" class="property-section">
           <h2>פרטי המדידה שנבחרה</h2>
           <div id="results" class="results"><p>טרם נבחרה מדידה.</p></div>
         </section>
@@ -220,6 +267,7 @@
       <h2>אופן שימוש</h2>
       <p><b>שטח ואיזון לובן:</b> אפשר להוסיף עשרות נקודות סביב התחום. בסיום גע בנקודה הראשונה או לחץ „סיום וסגירת השטח”. מעבר לכלי אחר סוגר אוטומטית שטח תקין; סימון חלקי שאינו יכול להיות מדידה מבוטל.</p>
       <p><b>עיגול מקטע:</b> גע ביהלום שבין שתי נקודות וגרור אותו, או בחר מקטע ולחץ „עיגול המקטע”.</p>
+      <p><b>לוח צורת האותיות:</b> בחר בית יוסף או כתב האר״י ולחץ על אות. התבנית מונחת כשכבה וקטורית; גרור אותה להזזה, השתמש בידיות הפינה להגדלה והקטנה ובידיות הצד להרחבה, הצרה ומתיחה. אפשר לבחור מלא או חלול, צבע, שקיפות ורשת עזר, ולשכפל כמה עותקים.</p>
       <p><b>מחיקת נקודה:</b> גע בנקודה כדי לבחור אותה, ולאחר מכן לחץ „מחיקת נקודה”. במצב בחירה ניתן גם לגרור נקודה למקום מדויק.</p>
       <p><b>מגע:</b> מדידה ועריכת נקודות נעשות ב־Apple Pencil בלבד. הזזה וזום נעשים בשתי אצבעות. במחשב אפשר לעבוד בעכבר.</p>
       <p><b>עובי קולמוס:</b> גרור אזור צר סביב מקטע ישר ורציף, כך שייראה מעט נייר משני צדי הדיו. אזור שנחתך בתוך הדיו, פינה או הסתעפות יידחו. האפליקציה מודדת חתכים רבים, קובעת חציון יציב ומסמנת דגימה שחורגת ביותר מ־10% בלי לשנות את הכיול הפעיל; סימון הכיול החדש מחליף את הקודם.</p>
@@ -233,10 +281,12 @@
 
     <button id="helpBtn" class="floating-help" aria-label="עזרה">?</button>
   </div>
-  <script src="app-1.js?v=20260731h"></script>
-  <script src="app-2.js?v=20260731h"></script>
-  <script src="app-3.js?v=20260731h"></script>
-  <script src="app-4.js?v=20260731h"></script>
-  <script src="stability-patch.js?v=20260731h"></script>
+  <script src="letter-assets.js?v=20260731i"></script>
+  <script src="app-1.js?v=20260731i"></script>
+  <script src="letter-tools.js?v=20260731i"></script>
+  <script src="app-2.js?v=20260731i"></script>
+  <script src="app-3.js?v=20260731i"></script>
+  <script src="app-4.js?v=20260731i"></script>
+  <script src="stability-patch.js?v=20260731i"></script>
 </body>
 </html>

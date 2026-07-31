@@ -170,6 +170,21 @@ function pointerMove(event) {
       state.selectedPoint = { target: 'object', id: object.id, index: drag.handle };
       syncFormulaFromObject(object);
     }
+  } else if (drag.type === 'letterResize') {
+    if (!dragPassedThreshold(drag, screenPoint)) return;
+    commitDragHistory(drag);
+    const object = state.objects.find(item => item.id === drag.id && isLetterTemplate(item));
+    if (object) {
+      object.points = resizeLetterFromHandle(
+        drag.original,
+        drag.letterHandle,
+        imagePoint,
+        drag.lockAspect && !['n', 'e', 's', 'w'].includes(drag.letterHandle)
+      );
+      object.auto = false;
+      markObjectModified(object);
+      syncLetterControls(object);
+    }
   } else if (drag.type === 'curveHandle') {
     if (!dragPassedThreshold(drag, screenPoint)) return;
     commitDragHistory(drag);
@@ -233,7 +248,7 @@ function pointerUp(event) {
     const objectType = state.dragging.objectType;
     finishRectDraft(objectType, state.interactionBefore);
   }
-  if (completedDrag?.moved && ['handle', 'object'].includes(completedDrag.type)) {
+  if (completedDrag?.moved && ['handle', 'object', 'letterResize'].includes(completedDrag.type)) {
     const movedObject = state.objects.find(item => item.id === completedDrag.id);
     if (movedObject?.type === 'nibRegion') {
       const rollbackSnapshot = completedDrag.before;
@@ -564,7 +579,17 @@ function closeAreaDraft() {
   }
   state.draft.closed = true;
   ensureAreaSegments(state.draft);
-  commitDraft('השטח נסגר ונמדד. ניתן להמשיך לערוך כל נקודה ומקטע');
+  const object = commitDraft('השטח נסגר ונמדד');
+  if (!object) return;
+  setTool('pan');
+  state.selectedPoint = null;
+  state.selectedSegment = {
+    target: 'object',
+    id: object.id,
+    index: Math.max(0, areaSegmentCount(object) - 1)
+  };
+  statusText.textContent = 'השטח נסגר. המקטע האחרון נבחר; גרור את היהלום או לחץ „עיגול המקטע”';
+  renderAll();
 }
 
 function selectedAreaSegment() {

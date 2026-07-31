@@ -3,7 +3,7 @@
   "name": "מדידאות — מראה סופר",
   "short_name": "מדידאות",
   "description": "מדידת שטחים, איזון לובן, עובי קולמוס, מרווחים וגאומטריית האות",
-  "start_url": "./?v=20260731h",
+  "start_url": "./?v=20260731i",
   "scope": "./",
   "display": "standalone",
   "display_override": ["standalone", "fullscreen"],
@@ -13,6 +13,8 @@
   "lang": "he",
   "dir": "rtl",
   "icons": [
-    {"src":"icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}
+    {"src":"assets/medidaot-icon-192.png","sizes":"192x192","type":"image/png","purpose":"any"},
+    {"src":"assets/medidaot-icon-512.png","sizes":"512x512","type":"image/png","purpose":"any"},
+    {"src":"assets/medidaot-icon-maskable-512.png","sizes":"512x512","type":"image/png","purpose":"maskable"}
   ]
 }
