@@ -1,4 +1,25 @@
 'use strict';
+
+// During a service-worker upgrade, an already installed copy can briefly load
+// the previous HTML shell with the new scripts. Keep that transition usable
+// until the new shell (which loads letter-tools.js) takes control.
+if (typeof globalThis.isLetterTemplate !== 'function') {
+  globalThis.isLetterTemplate = object => object?.type === 'letterTemplate';
+  globalThis.letterObjectRect = object => {
+    const xs = (object?.points || []).map(point => point.x);
+    const ys = (object?.points || []).map(point => point.y);
+    const left = xs.length ? Math.min(...xs) : 0;
+    const right = xs.length ? Math.max(...xs) : left;
+    const top = ys.length ? Math.min(...ys) : 0;
+    const bottom = ys.length ? Math.max(...ys) : top;
+    return { x: left, y: top, width: right - left, height: bottom - top, left, right, top, bottom };
+  };
+  globalThis.syncLetterControls = () => {};
+  globalThis.nearestLetterHandle = () => null;
+  globalThis.normalizeLetterTemplateObject = object => object;
+  globalThis.drawLetterTemplateForExport = () => {};
+}
+
 function kastelRegionMetrics(object) {
   if (!object?.guides || object?.points?.length !== 4) return null;
   const heightPx = (distance(object.points[0], object.points[3]) + distance(object.points[1], object.points[2])) / 2;

@@ -1,14 +1,14 @@
-const CACHE_NAME = 'medidaot-v8-2026-07-31i';
+const CACHE_NAME = 'medidaot-v9-2026-07-31j';
 const APP_SHELL = [
-  './', './index.html', './medidaot.html', './medidaot.html?v=20260731i',
-  './styles.css', './styles.css?v=20260731i',
-  './letter-assets.js', './letter-assets.js?v=20260731i',
-  './app-1.js', './app-1.js?v=20260731i',
-  './letter-tools.js', './letter-tools.js?v=20260731i',
-  './app-2.js', './app-2.js?v=20260731i',
-  './app-3.js', './app-3.js?v=20260731i',
-  './app-4.js', './app-4.js?v=20260731i',
-  './stability-patch.js', './stability-patch.js?v=20260731i',
+  './', './index.html', './medidaot.html', './medidaot.html?v=20260731j',
+  './styles.css', './styles.css?v=20260731j',
+  './letter-assets.js', './letter-assets.js?v=20260731j',
+  './app-1.js', './app-1.js?v=20260731j',
+  './letter-tools.js', './letter-tools.js?v=20260731j',
+  './app-2.js', './app-2.js?v=20260731j',
+  './app-3.js', './app-3.js?v=20260731j',
+  './app-4.js', './app-4.js?v=20260731j',
+  './stability-patch.js', './stability-patch.js?v=20260731j',
   './manifest.webmanifest', './manifest-medidaot.webmanifest',
   './assets/medidaot-icon-192.png', './assets/medidaot-icon-512.png',
   './assets/medidaot-icon-maskable-512.png', './assets/medidaot-apple-touch-180.png',
@@ -22,14 +22,25 @@ self.addEventListener('activate', event => {
 });
 self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') return;
+  if (event.request.mode === 'navigate') {
+    event.respondWith(
+      fetch(event.request).then(response => {
+        const copy = response.clone();
+        caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy));
+        return response;
+      }).catch(async () =>
+        (await caches.match(event.request)) ||
+        (await caches.match('./medidaot.html')) ||
+        caches.match('./index.html')
+      )
+    );
+    return;
+  }
   event.respondWith(
     caches.match(event.request).then(cached => cached || fetch(event.request).then(response => {
       const copy = response.clone();
       caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy));
       return response;
-    }).catch(async () => {
-      if (event.request.mode !== 'navigate') return cached;
-      return (await caches.match('./medidaot.html')) || caches.match('./index.html');
-    }))
+    }).catch(() => cached))
   );
 });

@@ -1733,7 +1733,7 @@ async function serializeProjectV3() {
       title: captured.projectMeta.title || 'פרויקט מדידאות',
       createdAt: captured.projectMeta.createdAt,
       updatedAt: now,
-      appVersion: '2026.07.31i',
+      appVersion: '2026.07.31j',
       locale: 'he-IL'
     },
     source: {
