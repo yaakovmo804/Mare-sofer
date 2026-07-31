@@ -12,7 +12,7 @@
   <title>מדידאות — מראה סופר</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="icon.svg" />
-  <link rel="stylesheet" href="styles.css?v=20260731f" />
+  <link rel="stylesheet" href="styles.css?v=20260731g" />
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -61,14 +61,14 @@
           <button class="tool" data-tool="length"><span class="tool-icon">⌁</span><span>אורך חופשי</span></button>
           <button class="tool" data-tool="angle"><span class="tool-icon">∠</span><span>זווית מנקודה לנקודה</span></button>
           <button class="tool" data-tool="kastel"><span class="tool-icon">◇</span><span>קעסטעל</span></button>
-          <button class="tool" data-tool="thirds"><span class="tool-icon">⅓</span><span>בדיקת מיקום בקעסטעל</span></button>
+          <button class="tool" data-tool="thirds"><span class="tool-icon">⅓</span><span>חוק השלישים — בדיקת מיקום</span></button>
         </section>
 
         <section class="tool-section edit-tools">
           <h2>תיקון</h2>
           <button id="undoBtn" class="tool"><span class="tool-icon">↶</span><span>ביטול</span></button>
           <button id="redoBtn" class="tool"><span class="tool-icon">↷</span><span>שחזור</span></button>
-          <button id="closeAreaBtn" class="tool" disabled><span class="tool-icon">⬡</span><span>סגירת השטח</span></button>
+          <button id="closeAreaBtn" class="tool" disabled><span class="tool-icon">⬡</span><span>סיום וסגירת השטח</span></button>
           <button id="curveSegmentBtn" class="tool" disabled><span class="tool-icon">⌒</span><span>עיגול המקטע</span></button>
           <button id="straightenSegmentBtn" class="tool" disabled><span class="tool-icon">―</span><span>יישור המקטע</span></button>
           <button id="deletePointBtn" class="tool danger" disabled><span class="tool-icon">●−</span><span>מחיקת נקודה</span></button>
@@ -201,12 +201,12 @@
         </section>
 
         <section class="property-section">
-          <h2>תוצאות</h2>
+          <h2>פרטי המדידה שנבחרה</h2>
           <div id="results" class="results"><p>טרם נבחרה מדידה.</p></div>
         </section>
 
         <section class="property-section measurements-section">
-          <h2>רשימת מדידות</h2>
+          <h2>תוצאות כל המדידות</h2>
           <div id="measurementsList" class="measurements-list"></div>
         </section>
       </aside>
@@ -214,7 +214,7 @@
 
     <dialog id="helpDialog">
       <h2>אופן שימוש</h2>
-      <p><b>שטח ואיזון לובן:</b> אפשר להוסיף עשרות נקודות סביב התחום וללחוץ „סגירת השטח”. נגיעה בכל נקודה קיימת מאפשרת לגרור אותה, לרבות הנקודה הראשונה.</p>
+      <p><b>שטח ואיזון לובן:</b> אפשר להוסיף עשרות נקודות סביב התחום וללחוץ „סיום וסגירת השטח”. מעבר לכלי אחר סוגר אוטומטית שטח תקין; סימון חלקי שאינו יכול להיות מדידה מבוטל.</p>
       <p><b>עיגול מקטע:</b> גע ביהלום שבין שתי נקודות וגרור אותו, או בחר מקטע ולחץ „עיגול המקטע”.</p>
       <p><b>מחיקת נקודה:</b> גע בנקודה כדי לבחור אותה, ולאחר מכן לחץ „מחיקת נקודה”. במצב בחירה ניתן גם לגרור נקודה למקום מדויק.</p>
       <p><b>מגע:</b> מדידה ועריכת נקודות נעשות ב־Apple Pencil בלבד. הזזה וזום נעשים בשתי אצבעות. במחשב אפשר לעבוד בעכבר.</p>
@@ -222,16 +222,17 @@
       <p><b>מרווחים:</b> בחר משתנה, סמן שתי נקודות, וקבל את המרחק ביחידות עובי קולמוס. ערך הפיקסלים נשאר זמין תחת „פרטים חישוביים”.</p>
       <p><b>זווית:</b> שתי נקודות. ברירת המחדל מציגה את הסטייה מן הציר הקרוב, ולכן מתקבלים ערכים כגון 0°, 12° ו־13° ולא זווית משלימה.</p>
       <p><b>קעסטעל:</b> גרור מסגרת סביב האות. רק הקעסטעל הנבחר מציג את שני קווי השליש בגובה ואת שנתות עובי הקולמוס בשפה העליונה. קווי תחתית הגג וראש המושב מוצגים רק לאחר זיהוי או קביעה ידנית.</p>
+      <p><b>תוצאות על התמונה:</b> כל מדידה גמורה שומרת את תווית התוצאה שלה. ברשימת „תוצאות כל המדידות” אפשר להציג או להסתיר כל תווית בנפרד, בלי להסתיר את קו המדידה.</p>
       <p><b>שמירת נתונים:</b> קובץ JSON שומר תמונה, כיול, גאומטריה, מדדים וסיווגים. הוא כולל תבנית לכלל איזון של 10%, אך אינו מאמן מנוע בינה לבדו; לשם כך צריך לתייג רכיבים מאומתים ולאגד קבצים במסד נתונים.</p>
       <button id="closeHelp" class="btn primary">סגור</button>
     </dialog>
 
     <button id="helpBtn" class="floating-help" aria-label="עזרה">?</button>
   </div>
-  <script src="app-1.js?v=20260731f"></script>
-  <script src="app-2.js?v=20260731f"></script>
-  <script src="app-3.js?v=20260731f"></script>
-  <script src="app-4.js?v=20260731f"></script>
-  <script src="stability-patch.js?v=20260731f"></script>
+  <script src="app-1.js?v=20260731g"></script>
+  <script src="app-2.js?v=20260731g"></script>
+  <script src="app-3.js?v=20260731g"></script>
+  <script src="app-4.js?v=20260731g"></script>
+  <script src="stability-patch.js?v=20260731g"></script>
 </body>
 </html>

@@ -1423,7 +1423,7 @@ async function serializeProjectV3() {
       title: captured.projectMeta.title || 'פרויקט מדידאות',
       createdAt: captured.projectMeta.createdAt,
       updatedAt: now,
-      appVersion: '2026.07.31f',
+      appVersion: '2026.07.31g',
       locale: 'he-IL'
     },
     source: {
@@ -1484,6 +1484,10 @@ function serializeMeasurementV3(object, stableIdMap = new Map()) {
   delete copy.segments;
   delete copy.closed;
   copy.metrics = { ...(copy.metrics || {}), ...measurementMetrics(object) };
+  copy.display = {
+    ...(copy.display || {}),
+    resultLabelVisible: isResultLabelVisible(object)
+  };
   const judgments = Array.isArray(copy.judgments) ? structuredCloneSafe(copy.judgments) : [];
   const primaryHumanIndex = judgments.findIndex(item => item?.source === 'human' && item?.role === 'primary-ui');
   const fallbackHumanIndex = judgments.findIndex(item => item?.source === 'human');
@@ -1859,6 +1863,10 @@ function normalizeLoadedObject(object) {
     : null;
   normalized.assessment = normalized.assessment || humanJudgment?.label || 'unclassified';
   normalized.note = normalized.note || humanJudgment?.note || '';
+  normalized.display = {
+    ...(normalized.display || {}),
+    resultLabelVisible: normalized.display?.resultLabelVisible !== false
+  };
   normalized.provenance = normalized.provenance || {
     origin: normalized.auto ? 'assisted' : 'human',
     createdAt: new Date().toISOString(),

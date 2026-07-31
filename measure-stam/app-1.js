@@ -347,14 +347,14 @@ function mergeFormula(saved) {
 function defaultName(type) {
   const names = {
     area: 'שטח ואיזון לובן', length: 'אורך', angle: 'זווית', kastel: 'קעסטעל',
-    thirds: 'בדיקת מיקום בקעסטעל', nib: 'עובי קולמוס', nibRegion: 'אזור כיול קולמוס',
+    thirds: 'חוק השלישים — בדיקת מיקום', nib: 'עובי קולמוס', nibRegion: 'אזור כיול קולמוס',
     gap: selectedVariableName()
   };
   return names[type] || 'מדידה';
 }
 function typeLabel(type) {
   const names = {
-    area: 'שטח', length: 'אורך', angle: 'זווית', kastel: 'קעסטעל', thirds: 'מיקום בקעסטעל',
+    area: 'שטח', length: 'אורך', angle: 'זווית', kastel: 'קעסטעל', thirds: 'חוק השלישים',
     nib: 'קולמוס', nibRegion: 'אזור כיול', gap: 'מרווח'
   };
   return names[type] || 'מדידה';
@@ -378,11 +378,12 @@ function makeObject(type, points, overrides = {}) {
   const style = styleFromUI();
   const lineOnly = ['length', 'angle', 'nib', 'gap', 'thirds'].includes(type);
   const category = overrides.category || defaultCategory(type, overrides.formulaKey);
+  const clonedPoints = (points || []).map(point => ({ x: +point.x, y: +point.y }));
   return {
     id: state.nextId++,
     uid: typeof globalThis.crypto?.randomUUID === 'function' ? globalThis.crypto.randomUUID() : `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`,
     type,
-    points,
+    points: clonedPoints,
     name: defaultName(type),
     color: overrides.color || style.color || TOOL_COLORS[type] || '#ef4444',
     lineWidth: overrides.lineWidth || style.lineWidth || 4,
@@ -399,7 +400,12 @@ function makeObject(type, points, overrides = {}) {
       createdAt: new Date().toISOString(),
       modifiedAt: new Date().toISOString()
     },
-    ...overrides
+    ...overrides,
+    points: clonedPoints,
+    display: {
+      resultLabelVisible: true,
+      ...(overrides.display || {})
+    }
   };
 }
 
@@ -581,6 +587,7 @@ function draw() {
 function drawObject(object, selected, draft) {
   const points = object.points.map(imageToScreen);
   if (!points.length) return;
+  const resultLabelVisible = draft || isResultLabelVisible(object);
   ctx.save();
   ctx.strokeStyle = object.color;
   ctx.fillStyle = hexToRgba(object.color, object.fillAlpha || 0);
@@ -607,9 +614,9 @@ function drawObject(object, selected, draft) {
     if ((!draft || object.closed) && points.length >= 3) ctx.closePath();
     if (object.fillEnabled && points.length >= 3) ctx.fill();
     ctx.stroke();
-    if (selected && !draft && points.length >= 3) {
+    if (!draft && resultLabelVisible && points.length >= 3) {
       const center = imageToScreen(polygonCentroid(flattenedAreaPoints(object)));
-      label(center, areaLabel(object), object.color);
+      label(center, measurementResultModel(object).canvasText, object.color);
     }
   } else if (object.type === 'kastel' || object.type === 'nibRegion') {
     ctx.beginPath();
@@ -623,30 +630,33 @@ function drawObject(object, selected, draft) {
     if (object.type === 'kastel' && (selected || linkedProbeSelected) && !draft && points.length === 4) {
       drawKastelGrid(points, object, object.color);
     }
+    if (!draft && resultLabelVisible && points.length === 4) {
+      const anchor = object.type === 'kastel'
+        ? midpoint(points[3], points[2])
+        : midpoint(points[0], points[1]);
+      label(anchor, measurementResultModel(object).canvasText, object.color, object.type === 'kastel' ? 'below' : 'above');
+    }
   } else if (['length', 'nib', 'gap'].includes(object.type)) {
     if (points.length > 1) {
       drawLine(points[0], points[1]);
       drawEndCaps(points[0], points[1], object.color);
-      if (selected || draft) label(midpoint(points[0], points[1]), lineLabel(object), object.color);
+      if (resultLabelVisible) {
+        const text = draft ? lineLabel(object) : measurementResultModel(object).canvasText;
+        label(midpoint(points[0], points[1]), text, object.color);
+      }
     }
   } else if (object.type === 'angle') {
     if (points.length > 1) {
       drawLine(points[0], points[1]);
       drawEndCaps(points[0], points[1], object.color);
-      if (selected || draft) label(midpoint(points[0], points[1]), `${fmt(objectAngle(object), 1)}°`, object.color);
+      if (resultLabelVisible) label(midpoint(points[0], points[1]), `${fmt(objectAngle(object), 1)}°`, object.color);
     }
     if (points.length > 2) drawLine(points[1], points[2]);
   } else if (object.type === 'thirds') {
     if (selected) drawCross(points[0], object.color);
     else drawProbeDot(points[0], object.color);
     const kastel = state.objects.find(item => item.id === object.kastelId);
-    if (selected && kastel) {
-      const value = thirdsValues(kastel, object.points[0]);
-      const horizontal = state.formula.nibPx
-        ? `${fmt(value.xNibFromRight, 2)} עובי קולמוס מימין`
-        : 'רוחב: נדרש כיול';
-      label(points[0], `גובה ${fmt(value.yPct, 1)}% · ${horizontal}`, object.color);
-    }
+    if (resultLabelVisible && kastel) label(points[0], measurementResultModel(object).canvasText, object.color);
   }
 
   if (selected || draft) {
@@ -740,12 +750,15 @@ function drawProbeDot(point, color) {
   ctx.fill();
   ctx.restore();
 }
-function label(point, text, color) {
+function label(point, text, color, placement = 'above') {
   ctx.save();
   ctx.font = '700 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Arial';
   const width = ctx.measureText(text).width + 16;
-  const x = point.x - width / 2;
-  const y = point.y - 30;
+  const canvasWidth = canvas.width / dpr;
+  const canvasHeight = canvas.height / dpr;
+  const x = clamp(point.x - width / 2, 4, Math.max(4, canvasWidth - width - 4));
+  const preferredY = placement === 'below' ? point.y + 7 : point.y - 30;
+  const y = clamp(preferredY, 4, Math.max(4, canvasHeight - 27));
   ctx.fillStyle = 'rgba(255,255,255,.94)';
   ctx.fillRect(x, y, width, 23);
   ctx.strokeStyle = color;
@@ -754,8 +767,11 @@ function label(point, text, color) {
   ctx.fillStyle = '#111827';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(text, point.x, y + 11.5);
+  ctx.fillText(text, x + width / 2, y + 11.5);
   ctx.restore();
+}
+function isResultLabelVisible(object) {
+  return object?.display?.resultLabelVisible !== false;
 }
 function kastelNibTickLayout(object, displayScale = state.view.scale) {
   if (!state.formula.nibPx || !object?.points?.length) return null;

@@ -1,25 +1,146 @@
 'use strict';
+function measurementResultModel(object) {
+  const fallback = { canvasText: typeLabel(object?.type), primaryText: typeLabel(object?.type), secondaryText: '' };
+  if (!object?.points?.length) return fallback;
+
+  if (object.type === 'area') {
+    const area = measuredArea(object);
+    const value = `${fmt(area, 0)} פיקסלים²`;
+    return { canvasText: value, primaryText: value, secondaryText: 'שטח ואיזון לובן' };
+  }
+
+  if (['length', 'nib', 'gap'].includes(object.type) && object.points.length >= 2) {
+    const px = distance(object.points[0], object.points[1]);
+    const ratio = state.formula.nibPx ? px / state.formula.nibPx : null;
+    let primaryText = ratio == null ? 'נדרש כיול קולמוס' : `${fmt(ratio, 2)} עובי קולמוס`;
+    if (object.type === 'nib' && ratio == null) primaryText = '1 עובי קולמוס';
+    if (object.type === 'gap' && ratio != null) primaryText = `${variableName(object.formulaKey)}: ${primaryText}`;
+    const canvasText = ratio == null ? primaryText : `${fmt(ratio, 2)} עובי קולמוס`;
+    const secondaryParts = [`${fmt(px, 1)} פיקסלים`];
+    if (object.sampleAccepted === false) secondaryParts.push('דגימה חריגה');
+    return { canvasText, primaryText, secondaryText: secondaryParts.join(' · ') };
+  }
+
+  if (object.type === 'angle' && object.points.length >= 2) {
+    const primaryText = `${fmt(objectAngle(object), 1)}°`;
+    return {
+      canvasText: primaryText,
+      primaryText,
+      secondaryText: `ייחוס: ${angleReferenceLabel(object.angleRef || ui.angleRef.value)}`
+    };
+  }
+
+  if (object.type === 'kastel' && object.points.length === 4) {
+    const widthPx = (distance(object.points[0], object.points[1]) + distance(object.points[3], object.points[2])) / 2;
+    const heightPx = (distance(object.points[0], object.points[3]) + distance(object.points[1], object.points[2])) / 2;
+    const primaryText = state.formula.nibPx
+      ? `רוחב ${fmt(widthPx / state.formula.nibPx, 2)} · גובה ${fmt(heightPx / state.formula.nibPx, 2)} עובי קולמוס`
+      : 'נדרש כיול קולמוס';
+    const secondaryParts = [`${fmt(widthPx, 1)} × ${fmt(heightPx, 1)} פיקסלים`];
+    const guideSpecs = kastelGuideSpecs(object.guides);
+    const roofGuide = guideSpecs.find(guide => guide.label.startsWith('תחתית הגג'));
+    const seatGuide = guideSpecs.find(guide => guide.label.startsWith('ראש המושב'));
+    const formatPart = value => state.formula.nibPx
+      ? `${fmt(value / state.formula.nibPx, 2)} עובי קולמוס`
+      : `${fmt(value, 1)} פיקסלים`;
+    if (roofGuide) secondaryParts.push(`גג ${formatPart(heightPx * roofGuide.t)}`);
+    if (roofGuide && seatGuide) {
+      secondaryParts.push(`חלל ${formatPart(Math.max(0, heightPx * (seatGuide.t - roofGuide.t)))}`);
+    }
+    if (seatGuide) secondaryParts.push(`מושב ${formatPart(heightPx * (1 - seatGuide.t))}`);
+    return {
+      canvasText: state.formula.nibPx
+        ? `${fmt(widthPx / state.formula.nibPx, 2)} × ${fmt(heightPx / state.formula.nibPx, 2)} עובי קולמוס`
+        : primaryText,
+      primaryText,
+      secondaryText: secondaryParts.join(' · ')
+    };
+  }
+
+  if (object.type === 'nibRegion') {
+    if (!object.calibrationPx) {
+      return { canvasText: 'כיול בבדיקה', primaryText: 'כיול בבדיקה', secondaryText: 'אזור כיול קולמוס' };
+    }
+    const ratio = state.formula.nibPx ? object.calibrationPx / state.formula.nibPx : 1;
+    const primaryText = `${fmt(ratio, 2)} עובי קולמוס`;
+    return {
+      canvasText: primaryText,
+      primaryText,
+      secondaryText: `${fmt(object.calibrationPx, 1)} פיקסלים${object.sampleAccepted === false ? ' · דגימה חריגה' : ''}`
+    };
+  }
+
+  if (object.type === 'thirds') {
+    const kastel = state.objects.find(item => item.id === object.kastelId);
+    if (!kastel) return { canvasText: 'קעסטעל לא נמצא', primaryText: 'קעסטעל לא נמצא', secondaryText: '' };
+    const value = thirdsValues(kastel, object.points[0]);
+    const horizontal = state.formula.nibPx
+      ? `${fmt(value.xNibFromRight, 2)} עובי קולמוס מימין`
+      : 'רוחב: נדרש כיול';
+    return {
+      canvasText: `גובה ${fmt(value.yPct, 1)}% · ${horizontal}`,
+      primaryText: `גובה ${fmt(value.yPct, 1)}%`,
+      secondaryText: `${horizontal} · סטייה משליש ${fmt(value.yDev, 1)}%`
+    };
+  }
+
+  return fallback;
+}
+
 function renderList() {
   listEl.replaceChildren();
-  for (const object of state.objects) {
-    const item = document.createElement('button');
-    item.type = 'button';
+  state.objects.forEach((object, index) => {
+    const item = document.createElement('article');
     item.className = `measurement-item${object.id === state.selectedId ? ' selected' : ''}`;
+    const selectButton = document.createElement('button');
+    selectButton.type = 'button';
+    selectButton.className = 'measurement-select';
     const main = document.createElement('span');
     main.className = 'measurement-main';
     const dot = document.createElement('span');
     dot.className = 'dot';
     dot.style.background = object.color;
-    const name = document.createElement('span');
-    name.textContent = object.name;
+    const identity = document.createElement('span');
+    identity.className = 'measurement-identity';
+    const name = document.createElement('strong');
+    name.textContent = `${index + 1}. ${object.name}`;
     const type = document.createElement('span');
     type.className = 'measurement-type';
     type.textContent = object.auto ? `${typeLabel(object.type)} · מוצע` : typeLabel(object.type);
-    main.append(dot, name);
-    item.append(main, type);
-    item.addEventListener('click', () => selectObject(object.id));
+    identity.append(name, type);
+    main.append(dot, identity);
+    const resultModel = measurementResultModel(object);
+    const value = document.createElement('span');
+    value.className = 'measurement-value';
+    value.textContent = resultModel.primaryText;
+    const detail = document.createElement('span');
+    detail.className = 'measurement-detail';
+    detail.textContent = resultModel.secondaryText;
+    selectButton.append(main, value);
+    if (resultModel.secondaryText) selectButton.append(detail);
+    selectButton.addEventListener('click', () => selectObject(object.id));
+
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = `measurement-label-toggle${isResultLabelVisible(object) ? ' active' : ''}`;
+    toggle.setAttribute('aria-pressed', isResultLabelVisible(object) ? 'true' : 'false');
+    toggle.setAttribute('aria-label', `${isResultLabelVisible(object) ? 'הסתר' : 'הצג'} את תוצאת ${object.name} על התמונה`);
+    toggle.title = isResultLabelVisible(object) ? 'הסתר תוצאה מהתמונה' : 'הצג תוצאה על התמונה';
+    toggle.textContent = isResultLabelVisible(object) ? 'תוצאה מוצגת' : 'תוצאה מוסתרת';
+    toggle.addEventListener('click', () => {
+      snapshot();
+      object.display = {
+        ...(object.display || {}),
+        resultLabelVisible: !isResultLabelVisible(object)
+      };
+      draw();
+      renderList();
+      renderResults();
+    });
+
+    item.append(selectButton, toggle);
     listEl.append(item);
-  }
+  });
   if (!state.objects.length) {
     const empty = document.createElement('p');
     empty.className = 'microcopy';
@@ -135,6 +256,7 @@ function renderResults() {
   if (object.assessment && object.assessment !== 'unclassified') {
     html += `<p class="result-note">סיווג: ${object.assessment === 'reference' ? 'דוגמת ייחוס' : object.assessment === 'acceptable' ? 'תקין' : 'חריג'}</p>`;
   }
+  html += `<p class="result-note">תוצאה על התמונה: ${isResultLabelVisible(object) ? 'מוצגת' : 'מוסתרת'}</p>`;
   results.innerHTML = html;
 }
 
@@ -526,7 +648,7 @@ function pointerDown(event) {
 
   const imagePoint = screenToImage(screenPoint);
   const hit = hitTest(imagePoint);
-  const canEditHit = hit && (state.tool === 'pan' || Number.isInteger(hit.handle) || Number.isInteger(hit.segment));
+  const canEditHit = !!hit && state.tool === 'pan';
   if (canEditHit) {
     selectObject(hit.object.id);
     const dragBase = {

@@ -59,6 +59,44 @@ function markObjectModified(object) {
   object.provenance.modifiedAt = new Date().toISOString();
 }
 
+function clearDraftState() {
+  state.draft = null;
+  state.draftHistory = [];
+  state.selectedPoint = null;
+  state.selectedSegment = null;
+  state.dragging = null;
+}
+
+function releaseActiveMeasurementPointer() {
+  const pointerId = state.activePointerId;
+  state.activePointerId = null;
+  state.interactionBefore = null;
+  state.dragging = null;
+  if (pointerId !== null) {
+    try { canvas.releasePointerCapture(pointerId); } catch {}
+  }
+}
+
+function finishRectDraft(objectType, rollbackSnapshot) {
+  if (!state.draft || state.draft.type !== objectType) return null;
+  state.draft.points = normalizeQuadPoints(state.draft.points);
+  const width = distance(state.draft.points[0], state.draft.points[1]);
+  const height = distance(state.draft.points[0], state.draft.points[3]);
+  if (width * state.view.scale < 12 || height * state.view.scale < 12) {
+    clearDraftState();
+    statusText.textContent = objectType === 'kastel' ? 'הקעסטעל קטן מדי ובוטל' : 'אזור הכיול קטן מדי ובוטל';
+    renderAll();
+    return null;
+  }
+  state.draft.closed = true;
+  const object = commitDraft(objectType === 'kastel'
+    ? 'הקעסטעל נוצר. חוק השלישים והמדדים הותאמו'
+    : 'אזור הכיול נוצר ומנותח כעת');
+  if (objectType === 'kastel') initializeKastelGuides(object);
+  if (objectType === 'nibRegion') analyzeCalibrationRegion(object, rollbackSnapshot);
+  return object;
+}
+
 function handleTouchPointerMove(event) {
   event.preventDefault();
   if (!state.pointers.has(event.pointerId)) return;
@@ -185,28 +223,7 @@ function pointerUp(event) {
   const completedDrag = state.dragging;
   if (completedDrag?.type === 'drawRect' && state.draft) {
     const objectType = state.dragging.objectType;
-    state.draft.points = normalizeQuadPoints(state.draft.points);
-    const width = distance(state.draft.points[0], state.draft.points[1]);
-    const height = distance(state.draft.points[0], state.draft.points[3]);
-    if (width * state.view.scale < 12 || height * state.view.scale < 12) {
-      state.draft = null;
-      statusText.textContent = objectType === 'kastel' ? 'הקעסטעל קטן מדי ובוטל' : 'אזור הכיול קטן מדי ובוטל';
-      state.dragging = null;
-      state.interactionBefore = null;
-      state.activePointerId = null;
-      try { canvas.releasePointerCapture(event.pointerId); } catch {}
-      renderAll();
-      return;
-    }
-    state.draft.closed = true;
-    const object = commitDraft(objectType === 'kastel'
-      ? 'הקעסטעל נוצר. חוק השלישים והמדדים הותאמו'
-      : 'אזור הכיול נוצר ומנותח כעת');
-    if (objectType === 'kastel') initializeKastelGuides(object);
-    if (objectType === 'nibRegion') {
-      const rollbackSnapshot = state.interactionBefore;
-      analyzeCalibrationRegion(object, rollbackSnapshot);
-    }
+    finishRectDraft(objectType, state.interactionBefore);
   }
   if (completedDrag?.moved && ['handle', 'object'].includes(completedDrag.type)) {
     const movedObject = state.objects.find(item => item.id === completedDrag.id);
@@ -237,6 +254,7 @@ function pointerCancel(event) {
   state.dragging = null;
   state.interactionBefore = null;
   state.activePointerId = null;
+  try { canvas.releasePointerCapture(event.pointerId); } catch {}
   statusText.textContent = 'הפעולה בוטלה ללא שינוי במדידות';
   zoomText.textContent = `${Math.round(state.view.scale * 100)}%`;
   renderAll();
@@ -325,7 +343,50 @@ function syncFormulaFromObject(object) {
   if (object.type === 'gap' && object.formulaKey === 'common-gap' && value > 0) state.formula.commonGapPx = value;
 }
 
+function settleDraftBeforeToolChange(nextTool) {
+  if (!state.draft) return 'none';
+  if (state.draft.type === nextTool) return 'resumed';
+
+  const draftType = state.draft.type;
+  const rollbackSnapshot = state.interactionBefore;
+  const pointerId = state.activePointerId;
+  state.activePointerId = null;
+  state.interactionBefore = null;
+  state.dragging = null;
+  if (pointerId !== null) {
+    try { canvas.releasePointerCapture(pointerId); } catch {}
+  }
+
+  if (draftType === 'area' && state.draft.points.length >= 3 && polygonArea(state.draft.points) > 0.01) {
+    state.draft.closed = true;
+    ensureAreaSegments(state.draft);
+    commitDraft('השטח נסגר ונמדד');
+    return 'completed';
+  }
+
+  if (['length', 'nib', 'gap', 'angle'].includes(draftType) &&
+      state.draft.points.length >= 2 &&
+      distance(state.draft.points[0], state.draft.points[1]) > 0.01) {
+    if (draftType === 'gap') {
+      state.draft.formulaKey = state.formula.selectedVariable;
+      state.draft.name = selectedVariableName();
+    }
+    if (draftType === 'angle') state.draft.angleRef = ui.angleRef.value;
+    commitDraft(draftType === 'nib' ? 'עובי הקולמוס כויל' : 'המדידה נוספה');
+    return 'completed';
+  }
+
+  if (['kastel', 'nibRegion'].includes(draftType)) {
+    const completed = finishRectDraft(draftType, rollbackSnapshot);
+    return completed ? 'completed' : 'cancelled';
+  }
+
+  clearDraftState();
+  return 'cancelled';
+}
+
 function setTool(tool) {
+  const draftOutcome = settleDraftBeforeToolChange(tool);
   state.tool = tool;
   document.querySelectorAll('.tool[data-tool]').forEach(button => button.classList.toggle('active', button.dataset.tool === tool));
   if (TOOL_COLORS[tool]) ui.color.value = TOOL_COLORS[tool];
@@ -338,12 +399,17 @@ function setTool(tool) {
     length: 'אורך חופשי: סמן שתי נקודות',
     angle: 'זווית: סמן שתי נקודות לאורך הקו',
     kastel: 'קעסטעל: גרור מסגרת סביב האות',
-    thirds: 'בדיקת מיקום: סמן נקודה בתוך הקעסטעל'
+    thirds: 'חוק השלישים: סמן נקודה בתוך הקעסטעל'
   };
-  statusText.textContent = messages[tool] || 'מוכן';
+  const outcomeMessage = draftOutcome === 'completed'
+    ? 'המדידה הקודמת הושלמה. '
+    : draftOutcome === 'cancelled'
+      ? 'הסימון החלקי בוטל. '
+      : '';
+  statusText.textContent = outcomeMessage + (messages[tool] || 'מוכן');
   if (tool === 'nib' || tool === 'nibRegion') activateFormulaTab('nib');
   if (tool === 'gap') activateFormulaTab('gaps');
-  renderControls();
+  renderAll();
 }
 
 document.querySelectorAll('.tool[data-tool]').forEach(button => button.addEventListener('click', () => setTool(button.dataset.tool)));
@@ -419,6 +485,7 @@ function deleteSelectedPoint() {
 
 function closeAreaDraft() {
   if (state.draft?.type !== 'area' || state.draft.points.length < 3) return;
+  releaseActiveMeasurementPointer();
   state.draft.closed = true;
   ensureAreaSegments(state.draft);
   commitDraft('השטח נסגר ונמדד. ניתן להמשיך לערוך כל נקודה ומקטע');
@@ -477,11 +544,8 @@ function straightenSelectedSegment() {
 
 function cancelDraft() {
   if (!state.draft) return;
-  state.draft = null;
-  state.draftHistory = [];
-  state.selectedPoint = null;
-  state.selectedSegment = null;
-  state.dragging = null;
+  releaseActiveMeasurementPointer();
+  clearDraftState();
   statusText.textContent = 'הסימון הנוכחי בוטל';
   renderAll();
 }
