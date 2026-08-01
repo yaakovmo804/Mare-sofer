@@ -6,8 +6,8 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
-const TEST_VERSION = '20260731m';
-const TEST_CACHE_DATE = '2026-07-31m';
+const TEST_VERSION = '20260801b';
+const TEST_CACHE_DATE = '2026-08-01b';
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const appDirectory = path.resolve(testDirectory, '..');
 
@@ -1286,6 +1286,8 @@ test('photographed vector source links round-trip through stable project identif
     BUILTIN_VARIABLES: []
   });
   persistenceContext.globalThis = persistenceContext;
+  vm.runInContext(readAppFile('master-system.js'), persistenceContext, { filename: 'master-system.js' });
+  persistenceContext.MASTER_SYSTEM = persistenceContext.MEDIDAOT_MASTER_SYSTEM;
   vm.runInContext(readAppFile('app-4.js'), persistenceContext, { filename: 'app-4.js' });
   persistenceContext.measurementGeometry = () => ({ type: 'polygon', points: [] });
   persistenceContext.measurementMetrics = () => ({});
@@ -1327,8 +1329,9 @@ test('photographed vector source links round-trip through stable project identif
   assert.equal(loadedVector.sourceSelection.frameId, loadedFrame.id);
 });
 
-test('HTML, manifests, and service worker reference one complete m-version asset set', async () => {
+test('HTML, manifests, and service worker reference one complete release asset set', async () => {
   const expectedScripts = [
+    'master-system.js',
     'letter-assets.js',
     'letter-vector-engine.js',
     'app-1.js',
@@ -1337,13 +1340,14 @@ test('HTML, manifests, and service worker reference one complete m-version asset
     'app-2.js',
     'app-3.js',
     'app-4.js',
+    'professional-tools.js',
     'auto-measure.js',
     'stability-patch.js'
   ].map(filename => `${filename}?v=${TEST_VERSION}`);
 
   for (const htmlName of ['medidaot.html', 'index.html']) {
     const html = readAppFile(htmlName);
-    assert.doesNotMatch(html, /20260731[kl]/);
+    assert.doesNotMatch(html, /20260731[klm]/);
     const scripts = [...html.matchAll(/<script\s+src="([^"]+)"/g)]
       .map(match => match[1]);
     assert.deepEqual(scripts, expectedScripts);
@@ -1370,7 +1374,7 @@ test('HTML, manifests, and service worker reference one complete m-version asset
     assert.match(manifest.start_url, new RegExp(`(?:\\?|&)v=${TEST_VERSION}(?:&|$)`));
   }
 
-  assert.match(readAppFile('app-4.js'), /appVersion:\s*'2026\.07\.31m'/);
+  assert.match(readAppFile('app-4.js'), /appVersion:\s*'2026\.08\.01b'/);
 
   const serviceWorker = readAppFile('sw.js');
   const cacheNameMatch = serviceWorker.match(/const CACHE_NAME = '([^']+)'/);
@@ -1449,7 +1453,7 @@ for (const { name, callback } of tests) {
   }
 }
 
-console.log(`\n${passed}/${tests.length} focused Medidaot m regression groups passed.`);
+console.log(`\n${passed}/${tests.length} focused Medidaot regression groups passed.`);
 if (passed !== tests.length) {
   throw new Error(`${tests.length - passed} regression group(s) failed`);
 }

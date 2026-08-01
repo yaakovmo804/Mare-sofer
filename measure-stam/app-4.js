@@ -1449,6 +1449,7 @@ function drawExportScaleNote(context, point, text, color, unit) {
   context.restore();
 }
 function drawObjectToContext(context, object) {
+  enforceSemanticStyle(object);
   const points = object.points;
   if (!points.length) return;
   context.save();
@@ -1473,6 +1474,35 @@ function drawObjectToContext(context, object) {
     if (object.closed && points.length >= 3) context.closePath();
     if (object.fillEnabled && points.length >= 3) context.fill();
     context.stroke();
+  } else if (['ellipse', 'circle'].includes(object.type) && points.length === 4) {
+    const left = Math.min(...points.map(point => point.x));
+    const right = Math.max(...points.map(point => point.x));
+    const top = Math.min(...points.map(point => point.y));
+    const bottom = Math.max(...points.map(point => point.y));
+    context.beginPath();
+    context.ellipse((left + right) / 2, (top + bottom) / 2, (right - left) / 2, (bottom - top) / 2, 0, 0, Math.PI * 2);
+    if (object.fillEnabled) context.fill();
+    context.stroke();
+  } else if (object.type === 'rowAlign' && points.length === 4) {
+    context.save();
+    context.setLineDash([9, 7]);
+    context.beginPath();
+    context.moveTo(points[0].x, points[0].y);
+    points.slice(1).forEach(point => context.lineTo(point.x, point.y));
+    context.closePath();
+    context.stroke();
+    context.setLineDash([]);
+    if (Number.isFinite(object.rowAlignment?.baselineY)) {
+      const left = Math.min(...points.map(point => point.x));
+      const right = Math.max(...points.map(point => point.x));
+      context.lineWidth = Math.max(2, object.lineWidth || 3);
+      drawExportLine(context, { x: left, y: object.rowAlignment.baselineY }, { x: right, y: object.rowAlignment.baselineY });
+      context.lineWidth = Math.max(3, (object.lineWidth || 3) * 1.4);
+      for (const candidate of (object.rowAlignment.candidates || []).filter(item => item.eligible === true)) {
+        drawExportLine(context, { x: candidate.x1, y: candidate.y }, { x: candidate.x2, y: candidate.y });
+      }
+    }
+    context.restore();
   } else if (['kastel', 'nibRegion'].includes(object.type)) {
     context.beginPath();
     context.moveTo(points[0].x, points[0].y);
@@ -1637,6 +1667,7 @@ $('saveProjectBtn').addEventListener('click', async () => {
 });
 
 async function serializeProjectV3() {
+  globalThis.MEDIDAOT_PROFESSIONAL_TOOLS?.refreshCompositionSourceAvailability?.();
   const now = new Date().toISOString();
   if (!state.projectMeta.id) state.projectMeta.id = createStableId('project');
   if (!state.projectMeta.createdAt) state.projectMeta.createdAt = now;
@@ -1672,9 +1703,11 @@ async function serializeProjectV3() {
     imageHeight: state.image?.height || null,
     formula: capturedFormula,
     measurements: state.objects.map(object => serializeMeasurementV3(object, stableIdMap)),
+    professionalSuite: structuredCloneSafe(state.professionalSuite),
     view: { ...state.view },
     nextId: state.nextId
   };
+  if (captured.professionalSuite) captured.professionalSuite.pendingMeasurement = null;
   const fingerprint = captured.imageSrc ? await sha256DataUrl(captured.imageSrc) : null;
   const mimeType = captured.sourceMeta?.mimeType || captured.imageSrc?.match(/^data:([^;,]+)/)?.[1] || null;
   const byteLength = captured.sourceMeta?.byteLength || estimateDataUrlBytes(captured.imageSrc);
@@ -1759,14 +1792,14 @@ async function serializeProjectV3() {
   return {
     ...base,
     format: 'mirror-sofer.measure-stam.project',
-    schemaVersion: '3.3.0',
+    schemaVersion: '4.0.0',
     project: {
       ...(base.project || {}),
       id: captured.projectMeta.id,
       title: captured.projectMeta.title || 'פרויקט מדידאות',
       createdAt: captured.projectMeta.createdAt,
       updatedAt: now,
-      appVersion: '2026.07.31m',
+      appVersion: '2026.08.01b',
       locale: 'he-IL'
     },
     source: {
@@ -1788,11 +1821,20 @@ async function serializeProjectV3() {
       ...(base.taxonomy || {}),
       version: '1.0.0',
       categories: [...builtInCategories, ...preservedCategories],
+      professionalDefinitions: MASTER_SYSTEM.METRICS.map(metric => ({
+        id: metric.id,
+        labelHe: metric.name,
+        groupId: metric.group,
+        color: metric.color,
+        description: captured.professionalSuite.descriptions?.[metric.id] || metric.description,
+        measurementDescription: captured.professionalSuite.measurementNotes?.[metric.id] || metric.measurementDescription || ''
+      })),
       customVariables: [...capturedCustomVariables, ...preservedCustomVariables]
     },
     calibrations: activeCalibration ? [...preservedCalibrations, activeCalibration] : preservedCalibrations,
     activeNibCalibrationId: activeCalibration ? calibrationId : null,
     formula: captured.formula,
+    professionalSuite: captured.professionalSuite,
     measurements: captured.measurements,
     samples: Array.isArray(base.samples) ? base.samples : [],
     relations: Array.isArray(base.relations) ? base.relations : [],
@@ -1811,7 +1853,7 @@ function serializeMeasurementV3(object, stableIdMap = new Map()) {
   copy.uid = copy.uid || createStableId('measurement');
   copy.legacy = { ...(copy.legacy || {}), runtimeId: object.id };
   copy.id = copy.uid;
-  for (const key of ['kastelId', 'regionId', 'linkedVectorId']) {
+  for (const key of ['kastelId', 'regionId', 'linkedVectorId', 'linkedKastelId']) {
     if (object[key] == null) continue;
     copy.legacy[`${key}Runtime`] = object[key];
     copy[key] = stableIdMap.get(object[key]) || object[key];
@@ -1828,6 +1870,7 @@ function serializeMeasurementV3(object, stableIdMap = new Map()) {
   }
   copy.semantic = {
     ...(copy.semantic || {}),
+    metricId: object.semanticMetricId || MASTER_SYSTEM.metricIdFor(object),
     categoryId: object.category || defaultCategory(object.type, object.formulaKey),
     labelHe: object.name || defaultName(object.type),
     formulaKey: object.formulaKey || null
@@ -1881,7 +1924,7 @@ function measurementGeometry(object) {
   if (object.type === 'area') {
     return { ...common, type: 'quadratic-path', closed: object.closed !== false, segments: structuredCloneSafe(object.segments || []) };
   }
-  if (object.type === 'kastel' || object.type === 'nibRegion' || object.type === 'letterTemplate') {
+  if (['kastel', 'nibRegion', 'letterTemplate', 'rowAlign', 'ellipse', 'circle'].includes(object.type)) {
     return { ...common, type: 'polygon', closed: true };
   }
   if (object.type === 'thirds') return { ...common, type: 'point' };
@@ -1929,6 +1972,37 @@ function measurementMetrics(object) {
       controlCount: vectorStats?.controls ?? null
     };
   }
+  if (['ellipse', 'circle'].includes(object.type) && object.points.length === 4) {
+    const xs = object.points.map(point => point.x);
+    const ys = object.points.map(point => point.y);
+    const widthPx = Math.max(...xs) - Math.min(...xs);
+    const heightPx = Math.max(...ys) - Math.min(...ys);
+    const areaPx2 = Math.PI * widthPx * heightPx / 4;
+    return {
+      metricId: object.type === 'circle' ? 'circle-frame.v1' : 'ellipse-frame.v1',
+      widthPx,
+      heightPx,
+      areaPx2,
+      widthNib: state.formula.nibPx ? widthPx / state.formula.nibPx : null,
+      heightNib: state.formula.nibPx ? heightPx / state.formula.nibPx : null,
+      areaNib2: state.formula.nibPx ? areaPx2 / (state.formula.nibPx ** 2) : null,
+      calibrationId: activeNibCalibrationId()
+    };
+  }
+  if (object.type === 'rowAlign') {
+    const candidates = structuredCloneSafe(object.rowAlignment?.candidates || []).map(candidate => ({
+      ...candidate,
+      deviationNib: currentRowDeviation(candidate).nib
+    }));
+    return {
+      metricId: 'stable-seat-row-alignment.v1',
+      baselineY: object.rowAlignment?.baselineY ?? null,
+      candidateCount: object.rowAlignment?.candidates?.length || 0,
+      candidates,
+      needsHumanLetterConfirmation: object.rowAlignment?.needsHumanLetterConfirmation !== false,
+      calibrationId: activeNibCalibrationId()
+    };
+  }
   if (['length', 'nib', 'gap'].includes(object.type) && object.points.length >= 2) {
     const lengthPx = object.type === 'gap' ? measurementLengthPx(object) : distance(object.points[0], object.points[1]);
     const hasCapturedGapCalibration = object.type === 'gap' && object.normalization &&
@@ -1956,7 +2030,17 @@ function measurementMetrics(object) {
       } : {})
     };
   }
-  if (object.type === 'angle') return { metricId: 'axis-deviation-angle.v1', angleDeg: objectAngle(object) };
+  if (object.type === 'angle') {
+    const signedAngleDeg = object.semanticMetricId === 'slants-parallels' && object.points.length >= 2
+      ? MASTER_SYSTEM.signedVerticalAngle(object.points[0], object.points[1])
+      : null;
+    return {
+      metricId: 'axis-deviation-angle.v1',
+      angleDeg: objectAngle(object),
+      signedAngleDeg,
+      angleConvention: signedAngleDeg == null ? 'absolute-axis-deviation' : 'signed-deviation-from-vertical'
+    };
+  }
   if (object.type === 'kastel' && object.points.length === 4) {
     const widthPx = (distance(object.points[0], object.points[1]) + distance(object.points[3], object.points[2])) / 2;
     const heightPx = (distance(object.points[0], object.points[3]) + distance(object.points[1], object.points[2])) / 2;
@@ -2044,14 +2128,17 @@ function estimateDataUrlBytes(value) {
 $('projectInput').addEventListener('change', event => {
   const file = event.target.files?.[0];
   if (!file) return;
+  const loadGeneration = ++state.loadGeneration;
   const reader = new FileReader();
   reader.onload = async () => {
     try {
+      if (loadGeneration !== state.loadGeneration) return;
       const data = JSON.parse(reader.result);
       const migrated = migrateProjectData(data);
       const nextFormula = mergeFormula(migrated.formula || {});
       const prepared = prepareLoadedObjects(migrated.objects);
       const preparedImage = migrated.imageSrc ? await decodeImageSource(migrated.imageSrc) : null;
+      if (loadGeneration !== state.loadGeneration) return;
       if (nextFormula.calibration) {
         for (const key of ['objectId', 'regionObjectId']) {
           const translated = prepared.referenceMap.get(String(nextFormula.calibration[key]));
@@ -2085,6 +2172,11 @@ $('projectInput').addEventListener('change', event => {
       state.projectMeta = migrated.projectMeta;
       state.sourceMeta = migrated.sourceMeta;
       state.projectDocument = migrated.projectDocument;
+      const retainedProfessionalInfo = {
+        descriptions: state.professionalSuite?.descriptions,
+        measurementNotes: state.professionalSuite?.measurementNotes
+      };
+      restoreProfessionalSuite(migrated.professionalSuite || retainedProfessionalInfo);
       state.activeCalibrationRegionId = visibleCalibrationRegionId || null;
       cancelCalibrationAnalysis();
       state.pointers.clear();
@@ -2099,16 +2191,17 @@ $('projectInput').addEventListener('change', event => {
       state.letterVectorSelection = null;
       state.history = [];
       state.future = [];
-      if (migrated.imageSrc) loadImageSource(migrated.imageSrc, false, preparedImage);
+      if (migrated.imageSrc) loadImageSource(migrated.imageSrc, false, preparedImage, loadGeneration);
       else {
         state.image = null;
         state.imageSrc = null;
         emptyState.style.display = '';
         renderAll();
       }
+      globalThis.MEDIDAOT_PROFESSIONAL_TOOLS?.refreshProfessionalSuiteAfterProjectLoad?.();
       statusText.textContent = `הפרויקט נפתח${migrated.fromLegacy ? ' והותאם למבנה הנתונים החדש' : ''}`;
     } catch {
-      alert('קובץ הפרויקט אינו תקין');
+      if (loadGeneration === state.loadGeneration) alert('קובץ הפרויקט אינו תקין');
     }
   };
   reader.readAsText(file);
@@ -2125,7 +2218,7 @@ function decodeImageSource(source) {
 }
 
 function migrateProjectData(data) {
-  if (data?.format === 'mirror-sofer.measure-stam.project' && String(data.schemaVersion || '').startsWith('3')) {
+  if (data?.format === 'mirror-sofer.measure-stam.project' && /^[34](?:\.|$)/.test(String(data.schemaVersion || ''))) {
     const image = data.source?.image;
     const calibration = data.calibrations?.find(item => item.id === data.activeNibCalibrationId) || data.calibrations?.[0];
     const formulaSeed = structuredCloneSafe(data.formula || {});
@@ -2168,6 +2261,7 @@ function migrateProjectData(data) {
         mimeType: image.mimeType,
         byteLength: image.byteLength
       } : null,
+      professionalSuite: data.professionalSuite || data.uiState?.professionalSuite || null,
       projectDocument: projectDocumentTemplate(data),
       fromLegacy: false
     };
@@ -2180,6 +2274,7 @@ function migrateProjectData(data) {
       imageSrc: data.imageSrc || null,
       projectMeta: { id: createStableId('project'), title: '', createdAt: null, updatedAt: null },
       sourceMeta: null,
+      professionalSuite: null,
       projectDocument: null,
       fromLegacy: true
     };
@@ -2188,7 +2283,12 @@ function migrateProjectData(data) {
 }
 
 function projectDocumentTemplate(data) {
-  const { measurements: _measurements, formula: _formula, ...template } = data;
+  const {
+    measurements: _measurements,
+    formula: _formula,
+    professionalSuite: _professionalSuite,
+    ...template
+  } = data;
   if (data.source) {
     template.source = { ...data.source };
     if (data.source.image) {
@@ -2232,7 +2332,7 @@ function prepareLoadedObjects(rawObjects) {
     object.id = runtimeId;
   }
   for (const object of objects) {
-    for (const key of ['kastelId', 'regionId', 'linkedVectorId']) {
+    for (const key of ['kastelId', 'regionId', 'linkedVectorId', 'linkedKastelId']) {
       if (object[key] == null) continue;
       const translated = referenceMap.get(String(object[key]));
       if (translated) object[key] = translated;
@@ -2253,7 +2353,10 @@ function prepareLoadedObjects(rawObjects) {
 function normalizeLoadedObject(object) {
   if (!object || typeof object !== 'object') throw new Error('Invalid measurement');
   const normalized = structuredCloneSafe(object);
-  const allowedTypes = new Set(['area', 'length', 'angle', 'kastel', 'thirds', 'nib', 'nibRegion', 'gap', 'letterTemplate']);
+  const allowedTypes = new Set([
+    'area', 'length', 'angle', 'kastel', 'thirds', 'nib', 'nibRegion', 'gap',
+    'letterTemplate', 'rowAlign', 'ellipse', 'circle'
+  ]);
   if (!allowedTypes.has(normalized.type)) throw new Error('Unsupported measurement type');
   if (normalized.geometry?.nodes) throw new Error('Unsupported rich path geometry');
   const supportedGeometryTypes = new Set(['quadratic-path', 'polygon', 'point', 'polyline', 'line-string']);
@@ -2270,16 +2373,21 @@ function normalizeLoadedObject(object) {
   if (normalized.points.some(point => !Number.isFinite(point.x) || !Number.isFinite(point.y))) {
     throw new Error('Invalid measurement geometry');
   }
-  if (['kastel', 'nibRegion'].includes(normalized.type) && normalized.points.length === 4) {
+  if (['kastel', 'nibRegion', 'rowAlign', 'ellipse', 'circle'].includes(normalized.type) && normalized.points.length === 4) {
     normalized.points = normalizeQuadPoints(normalized.points);
   }
-  const minimumPoints = { area: 3, length: 2, angle: 2, kastel: 4, thirds: 1, nib: 2, nibRegion: 4, gap: 2, letterTemplate: 4 };
+  const minimumPoints = {
+    area: 3, length: 2, angle: 2, kastel: 4, thirds: 1, nib: 2,
+    nibRegion: 4, gap: 2, letterTemplate: 4, rowAlign: 4, ellipse: 4, circle: 4
+  };
   if (normalized.points.length < minimumPoints[normalized.type]) throw new Error('Incomplete measurement geometry');
-  if (['kastel', 'nibRegion', 'letterTemplate'].includes(normalized.type) && normalized.points.length !== 4) {
+  if (['kastel', 'nibRegion', 'letterTemplate', 'rowAlign', 'ellipse', 'circle'].includes(normalized.type) && normalized.points.length !== 4) {
     throw new Error('Rectangular measurements require four corners');
   }
   normalized.uid = normalized.uid || (typeof normalized.id === 'string' ? normalized.id : createStableId('measurement'));
+  normalized.semanticMetricId = normalized.semanticMetricId || normalized.semantic?.metricId || null;
   normalized.category = normalized.category || normalized.semantic?.categoryId || defaultCategory(normalized.type, normalized.formulaKey);
+  enforceSemanticStyle(normalized);
   const humanJudgment = Array.isArray(normalized.judgments)
     ? normalized.judgments.find(item => item?.source === 'human')
     : null;
@@ -2398,7 +2506,8 @@ const helpDialog = $('helpDialog');
 $('helpBtn').addEventListener('click', () => helpDialog.showModal());
 $('closeHelp').addEventListener('click', () => helpDialog.close());
 window.addEventListener('keydown', event => {
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+  if (globalThis.MEDIDAOT_PROFESSIONAL_TOOLS?.handleCompositionKeyboardShortcut?.(event)) return;
+  if (!isEditableTarget(event.target) && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
     event.preventDefault();
     event.shiftKey ? redo() : undo();
   }

@@ -55,6 +55,39 @@ function measurementResultModel(object) {
     return { canvasText: value, primaryText: value, secondaryText: 'שטח ואיזון לובן' };
   }
 
+  if (['ellipse', 'circle'].includes(object.type) && object.points.length === 4) {
+    const widthPx = distance(object.points[0], object.points[1]);
+    const heightPx = distance(object.points[0], object.points[3]);
+    const areaPx2 = Math.PI * widthPx * heightPx / 4;
+    const primaryText = state.formula.nibPx
+      ? `${fmt(widthPx / state.formula.nibPx, 2)} × ${fmt(heightPx / state.formula.nibPx, 2)} עובי קולמוס`
+      : `${fmt(widthPx, 1)} × ${fmt(heightPx, 1)} פיקסלים`;
+    return { canvasText: primaryText, primaryText, secondaryText: `שטח ${fmt(areaPx2, 0)} פיקסלים²` };
+  }
+
+  if (object.type === 'rowAlign') {
+    const detectedCandidates = object.rowAlignment?.candidates || [];
+    const candidates = detectedCandidates.filter(candidate => candidate.eligible === true);
+    const maximumDeviation = candidates.length
+      ? Math.max(...candidates.map(candidate => currentRowDeviation(candidate).value ?? 0))
+      : null;
+    const deviationUnit = currentRowDeviation(candidates[0]).unitLabel;
+    const primaryText = object.rowAlignment?.baselineY == null
+      ? 'נדרש אישור ב׳, כ׳ או נ׳ רגילה'
+      : `${candidates.length} מושבים יציבים`;
+    return {
+      canvasText: maximumDeviation == null
+        ? primaryText
+        : `סטייה מרבית ${fmt(maximumDeviation, 2)} ${deviationUnit}`,
+      primaryText,
+      secondaryText: maximumDeviation == null
+        ? detectedCandidates.length
+          ? `${detectedCandidates.length} מועמדים ממתינים לסיווג`
+          : 'לא נמצאו מועמדים יציבים'
+        : `סטייה מרבית ${fmt(maximumDeviation, 2)} ${deviationUnit}`
+    };
+  }
+
   if (['length', 'nib', 'gap'].includes(object.type) && object.points.length >= 2) {
     const px = object.type === 'gap' ? measurementLengthPx(object) : distance(object.points[0], object.points[1]);
     const ratio = object.type === 'gap'
@@ -70,7 +103,12 @@ function measurementResultModel(object) {
   }
 
   if (object.type === 'angle' && object.points.length >= 2) {
-    const primaryText = `${fmt(objectAngle(object), 1)}°`;
+    const signed = object.semanticMetricId === 'slants-parallels'
+      ? MASTER_SYSTEM.signedVerticalAngle(object.points[0], object.points[1])
+      : null;
+    const primaryText = signed == null
+      ? `${fmt(objectAngle(object), 1)}°`
+      : `${signed > 0 ? '+' : ''}${fmt(Math.abs(signed) < .05 ? 0 : signed, 1)}°`;
     return {
       canvasText: primaryText,
       primaryText,
@@ -202,6 +240,7 @@ function selectObject(id, options = {}) {
   if (!preserveVectorSelection) state.letterVectorSelection = null;
   const object = state.objects.find(item => item.id === id);
   if (object) {
+    enforceSemanticStyle(object);
     ui.name.value = object.name || '';
     ui.color.value = object.color || '#ef4444';
     ui.lineWidth.value = object.lineWidth || 4;
@@ -244,6 +283,26 @@ function renderResults() {
     const area = measuredArea(object);
     html += `<p class="result-emphasis">${fmt(area, 0)} פיקסלים²</p>`;
     html += '<p class="result-note">התחום ניתן להשוואה לשטחים אחרים ברשימה.</p>';
+  } else if (['ellipse', 'circle'].includes(object.type)) {
+    const widthPx = distance(object.points[0], object.points[1]);
+    const heightPx = distance(object.points[0], object.points[3]);
+    const areaPx2 = Math.PI * widthPx * heightPx / 4;
+    html += state.formula.nibPx
+      ? `<p class="result-emphasis">${fmt(widthPx / state.formula.nibPx, 2)} × ${fmt(heightPx / state.formula.nibPx, 2)} עובי קולמוס</p>`
+      : `<p class="result-emphasis">${fmt(widthPx, 1)} × ${fmt(heightPx, 1)} פיקסלים</p>`;
+    html += `<p>שטח: ${fmt(areaPx2, 0)} פיקסלים²</p>`;
+  } else if (object.type === 'rowAlign') {
+    const candidates = (object.rowAlignment?.candidates || []).filter(candidate => candidate.eligible === true);
+    html += object.rowAlignment?.baselineY == null
+      ? '<p class="result-emphasis">טרם אושרו מושבי ייחוס</p>'
+      : `<p class="result-emphasis">קו הייחוס נקבע לפי ${candidates.length} מושבים יציבים</p>`;
+    if (candidates.length) {
+      html += `<p>${candidates.map((candidate, index) => {
+        const deviation = currentRowDeviation(candidate);
+        return `מושב ${index + 1}: ${fmt(deviation.value, 2)} ${deviation.unitLabel} מעל הקו`;
+      }).join('<br>')}</p>`;
+    }
+    html += '<p class="result-note">הזיהוי מאתר תחתיות אופקיות וארוכות, אך הקו נוצר רק לאחר אישור ב׳, כ׳ או נ׳ רגילה. ן׳ סופית וי׳ אינן קובעות את הקו.</p>';
   } else if (object.type === 'length') {
     const px = distance(object.points[0], object.points[1]);
     html += state.formula.nibPx
@@ -268,7 +327,13 @@ function renderResults() {
         : `זוהה אוטומטית מתחתית השורה העליונה ועד ראש השורה הבאה${Number.isFinite(object.gapDetection.confidence) ? ` · ביטחון ${fmt(object.gapDetection.confidence * 100, 0)}%` : ''}.`}</p>`;
     }
   } else if (object.type === 'angle') {
-    html += `<p class="result-emphasis">${fmt(objectAngle(object), 1)}°</p><p>ייחוס: ${angleReferenceLabel(object.angleRef || ui.angleRef.value)}</p>`;
+    const signed = object.semanticMetricId === 'slants-parallels' && object.points.length >= 2
+      ? MASTER_SYSTEM.signedVerticalAngle(object.points[0], object.points[1])
+      : null;
+    const angleText = signed == null
+      ? `${fmt(objectAngle(object), 1)}°`
+      : `${signed > 0 ? '+' : ''}${fmt(Math.abs(signed) < .05 ? 0 : signed, 1)}°`;
+    html += `<p class="result-emphasis">${angleText}</p><p>ייחוס: ${signed == null ? angleReferenceLabel(object.angleRef || ui.angleRef.value) : 'סטייה חתומה מן האנך'}</p>`;
   } else if (object.type === 'kastel') {
     const widthPx = (distance(object.points[0], object.points[1]) + distance(object.points[3], object.points[2])) / 2;
     const heightPx = (distance(object.points[0], object.points[3]) + distance(object.points[1], object.points[2])) / 2;
@@ -507,11 +572,35 @@ function renderControls() {
   if (measurementPropertiesPanel) measurementPropertiesPanel.hidden = selectedLetter;
   if (selectedResultPanel) selectedResultPanel.hidden = selectedLetter;
   syncLetterControls(selectedLetter ? selected : null);
-  ui.fillEnabled.disabled = !selected || !['area', 'kastel', 'nibRegion'].includes(selected.type);
-  ui.fillAlpha.disabled = !selected || !['area', 'kastel', 'nibRegion'].includes(selected.type);
+  ui.fillEnabled.disabled = !selected || !['area', 'kastel', 'nibRegion', 'ellipse', 'circle'].includes(selected.type);
+  ui.fillAlpha.disabled = !selected || !['area', 'kastel', 'nibRegion', 'ellipse', 'circle'].includes(selected.type);
   if (ui.category) ui.category.disabled = !selected;
   if (ui.assessment) ui.assessment.disabled = !selected;
   if (ui.note) ui.note.disabled = !selected;
+  if (ui.color) {
+    const fixedSemanticColor = !!selected && !!MASTER_SYSTEM.metricIdFor({
+      semanticMetricId: selected.semanticMetricId,
+      formulaKey: selected.formulaKey,
+      category: selected.category,
+      type: selected.type
+    });
+    ui.color.disabled = !selected || fixedSemanticColor;
+    ui.color.title = fixedSemanticColor ? 'הצבע קבוע לפי משמעות המדידה' : 'צבע לסימון מותאם אישית';
+    const hint = $('semanticColorHint');
+    if (hint) {
+      hint.hidden = !selected || !fixedSemanticColor;
+      if (fixedSemanticColor) {
+        const metricId = MASTER_SYSTEM.metricIdFor({
+          semanticMetricId: selected.semanticMetricId,
+          formulaKey: selected.formulaKey,
+          category: selected.category,
+          type: selected.type
+        });
+        hint.style.setProperty('--semantic-color', selected.color || '#64748b');
+        hint.textContent = `צבע ${MASTER_SYSTEM.metric(metricId)?.name || 'המדד'} קבוע לפי משמעות המדידה ונשמר בסימון, בתוצאה ובהדמיה.`;
+      }
+    }
+  }
   const activeKastel = selected?.type === 'kastel'
     ? selected
     : selected?.type === 'thirds'
@@ -523,12 +612,12 @@ function renderControls() {
   if (guidesPanel) guidesPanel.hidden = !activeKastel;
   const thirdsButton = $('thirdsToggleBtn');
   if (thirdsButton) {
-    thirdsButton.disabled = !state.objects.some(item => item.type === 'kastel');
+    thirdsButton.disabled = false;
     thirdsButton.classList.toggle('active', actionKastel?.overlays?.thirdsVisible === true);
   }
   const structureButton = $('detectStructureBtn');
   if (structureButton) {
-    structureButton.disabled = !state.objects.some(item => item.type === 'kastel');
+    structureButton.disabled = false;
     structureButton.classList.toggle('active', actionKastel?.overlays?.structureVisible === true);
   }
   for (const input of [ui.roofTopGuide, ui.roofGuide, ui.seatGuide, ui.seatBottomGuide]) {
@@ -584,6 +673,7 @@ function renderAll() {
   renderResults();
   renderFormulaUI();
   renderControls();
+  globalThis.MEDIDAOT_PROFESSIONAL_TOOLS?.renderProfessionalPanel?.();
 }
 
 function nearestPointIndex(points, imagePoint, thresholdScreen = 18) {
@@ -719,7 +809,7 @@ function hitTest(imagePoint) {
     const handle = nearestPointIndex(object.points, imagePoint, 22);
     if (handle >= 0) return { object, handle, segment: null };
     const contour = object.type === 'area' ? flattenedAreaPoints(object) : object.points;
-    if (['area', 'kastel', 'nibRegion'].includes(object.type) && object.points.length >= 3 && pointInPolygon(imagePoint, contour)) {
+    if (['area', 'kastel', 'nibRegion', 'rowAlign', 'ellipse', 'circle'].includes(object.type) && object.points.length >= 3 && pointInPolygon(imagePoint, contour)) {
       return { object, handle: null, segment: null };
     }
     if (['length', 'nib', 'gap'].includes(object.type) && object.points.length >= 2 && pointLineDistance(imagePoint, object.points[0], object.points[1]) < threshold) {
@@ -748,6 +838,7 @@ function captureInteractionState() {
   return {
     objects: structuredCloneSafe(state.objects),
     formula: structuredCloneSafe(state.formula),
+    professionalSuite: structuredCloneSafe(state.professionalSuite),
     draft: structuredCloneSafe(state.draft),
     draftHistory: structuredCloneSafe(state.draftHistory),
     selectedId: state.selectedId,
@@ -768,6 +859,7 @@ function restoreInteractionState(saved) {
   if (!saved) return;
   state.objects = structuredCloneSafe(saved.objects);
   state.formula = mergeFormula(saved.formula || {});
+  if (saved.professionalSuite) restoreProfessionalSuite(saved.professionalSuite);
   state.draft = structuredCloneSafe(saved.draft);
   state.draftHistory = structuredCloneSafe(saved.draftHistory || []);
   state.selectedId = saved.selectedId;
@@ -910,12 +1002,17 @@ function pointerDown(event) {
     if (hit.letterVectorHandle) {
       state.selectedPoint = null;
       state.selectedSegment = null;
-      const groupedIds = state.letterVectorSelection?.id === hit.object.id
+      const automaticGroupIds = [...new Set(hit.letterVectorHandle.groupIds || [])];
+      const existingGroupIds = state.letterVectorSelection?.id === hit.object.id
         ? [...new Set(state.letterVectorSelection.handleIds || [])]
         : [];
+      const groupedIds = automaticGroupIds.length > 1
+        ? automaticGroupIds
+        : existingGroupIds;
       if (hit.letterVectorHandle.kind === 'anchor' && groupedIds.length > 1 &&
-          groupedIds.includes(hit.letterVectorHandle.id)) {
+          (automaticGroupIds.length > 1 || groupedIds.includes(hit.letterVectorHandle.id))) {
         const engine = globalThis.MEDIDAOT_VECTOR_ENGINE;
+        hit.object.correctionHandleIds = [...groupedIds];
         state.dragging = {
           ...dragBase,
           type: 'letterVectorGroup',
@@ -931,6 +1028,9 @@ function pointerDown(event) {
         };
         statusText.textContent = `גרור להזזת ${groupedIds.length} נקודות העוגן יחד`;
       } else {
+        if (hit.letterVectorHandle.kind === 'anchor') {
+          hit.object.correctionHandleIds = [hit.letterVectorHandle.id];
+        }
         state.letterVectorSelection = {
           id: hit.object.id,
           handleIds: [hit.letterVectorHandle.id],
@@ -964,7 +1064,14 @@ function pointerDown(event) {
       state.letterVectorSelection = null;
       state.selectedPoint = { target: 'object', id: hit.object.id, index: hit.handle };
       state.selectedSegment = null;
-      state.dragging = { ...dragBase, type: 'handle', handle: hit.handle };
+      state.dragging = {
+        ...dragBase,
+        type: 'handle',
+        handle: hit.handle,
+        original: ['ellipse', 'circle'].includes(hit.object.type)
+          ? structuredCloneSafe(hit.object.points)
+          : null
+      };
       statusText.textContent = 'הנקודה נבחרה. גרור למיקום המדויק';
     } else if (Number.isInteger(hit.segment)) {
       state.letterVectorSelection = null;
@@ -1003,6 +1110,9 @@ function pointerDown(event) {
   else if (state.tool === 'gap') handleFixedPointTool('gap', imagePoint, 2);
   else if (state.tool === 'angle') handleFixedPointTool('angle', imagePoint, 2);
   else if (state.tool === 'kastel') handleRectPointer('kastel', imagePoint);
+  else if (state.tool === 'rowAlign') handleRectPointer('rowAlign', imagePoint);
+  else if (state.tool === 'ellipse') handleRectPointer('ellipse', imagePoint);
+  else if (state.tool === 'circle') handleRectPointer('circle', imagePoint);
   else if (state.tool === 'thirds') handleThirdsPointer(imagePoint);
   if (state.dragging && state.dragging.pointerId == null) state.dragging.pointerId = event.pointerId;
 }
@@ -1080,7 +1190,17 @@ function handleAreaPointer(imagePoint) {
 
 function handleFixedPointTool(type, imagePoint, count) {
   if (!ensureCompatibleDraft(type)) return;
-  if (!state.draft) state.draft = makeObject(type, [], { color: TOOL_COLORS[type] });
+  if (!state.draft) {
+    const pending = state.professionalSuite?.pendingMeasurement;
+    state.draft = makeObject(type, [], {
+      color: TOOL_COLORS[type],
+      semanticMetricId: pending?.semanticMetricId,
+      category: pending?.category,
+      formulaKey: pending?.formulaKey
+    });
+    if (pending?.name) state.draft.name = pending.name;
+    if (pending?.letter) state.draft.letterRole = pending.letter;
+  }
   const index = nearestPointIndex(state.draft.points, imagePoint, 19);
   if (index >= 0) {
     state.selectedPoint = { target: 'draft', index };
@@ -1104,6 +1224,7 @@ function handleFixedPointTool(type, imagePoint, count) {
     }
     if (type === 'angle') state.draft.angleRef = ui.angleRef.value;
     commitDraft(type === 'nib' ? 'עובי הקולמוס כויל' : 'המדידה נוספה');
+    if (state.professionalSuite) state.professionalSuite.pendingMeasurement = null;
   } else {
     statusText.textContent = 'סמן נקודה שנייה';
     renderAll();
@@ -1112,12 +1233,18 @@ function handleFixedPointTool(type, imagePoint, count) {
 
 function handleRectPointer(type, imagePoint) {
   if (!ensureCompatibleDraft(type)) return;
+  const pending = state.professionalSuite?.pendingMeasurement;
   state.draft = makeObject(type, [imagePoint, imagePoint, imagePoint, imagePoint], {
     color: TOOL_COLORS[type],
+    semanticMetricId: pending?.semanticMetricId,
+    category: pending?.category,
+    formulaKey: pending?.formulaKey,
     closed: false,
     fillEnabled: false,
     fillAlpha: 0
   });
+  if (pending?.name) state.draft.name = pending.name;
+  if (pending?.letter) state.draft.letterRole = pending.letter;
   state.dragging = { type: 'drawRect', objectType: type, start: imagePoint };
   state.selectedPoint = null;
   state.selectedSegment = null;

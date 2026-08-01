@@ -9,6 +9,7 @@ const statusText = $('statusText');
 const zoomText = $('zoomText');
 const results = $('results');
 const listEl = $('measurementsList');
+const MASTER_SYSTEM = globalThis.MEDIDAOT_MASTER_SYSTEM;
 
 const BUILTIN_VARIABLES = [
   { id: 'common-gap', name: 'מרווח מצוי / קלאסי', builtin: true },
@@ -26,19 +27,32 @@ const BUILTIN_VARIABLES = [
 ];
 
 const TOOL_COLORS = {
-  area: '#ef4444', nib: '#7c3aed', nibRegion: '#9333ea', gap: '#0f766e', length: '#2563eb',
-  angle: '#d97706', kastel: '#e11d48', thirds: '#16a34a'
+  area: MASTER_SYSTEM.colorFor({ semanticMetricId: 'white-balance' }),
+  nib: MASTER_SYSTEM.colorFor({ semanticMetricId: 'nib' }),
+  nibRegion: MASTER_SYSTEM.colorFor({ semanticMetricId: 'nib' }),
+  gap: MASTER_SYSTEM.colorFor({ semanticMetricId: 'gaps' }),
+  length: MASTER_SYSTEM.colorFor({ semanticMetricId: 'widths' }),
+  angle: MASTER_SYSTEM.colorFor({ semanticMetricId: 'slants-parallels' }),
+  kastel: MASTER_SYSTEM.colorFor({ semanticMetricId: 'reference-template' }), thirds: MASTER_SYSTEM.colorFor({ semanticMetricId: 'thirds' }),
+  rowAlign: MASTER_SYSTEM.colorFor({ semanticMetricId: 'straightness' }),
+  ellipse: MASTER_SYSTEM.colorFor({ semanticMetricId: 'circle-ellipse' }),
+  circle: MASTER_SYSTEM.colorFor({ semanticMetricId: 'circle-ellipse' })
 };
 const KASTEL_GUIDE_COLORS = {
-  thirds: '#16a34a',
-  roof: '#0f766e',
-  seat: '#2563eb',
-  seatTrend: '#d97706'
+  thirds: MASTER_SYSTEM.colorFor({ semanticMetricId: 'thirds' }),
+  roof: MASTER_SYSTEM.colorFor({ semanticMetricId: 'roofs' }),
+  seat: MASTER_SYSTEM.colorFor({ semanticMetricId: 'seats' }),
+  seatTrend: MASTER_SYSTEM.colorFor({ semanticMetricId: 'slants-parallels' })
 };
 
 const SEMANTIC_CATEGORIES = [
+  { id: 'width', name: 'רוחבים' },
+  { id: 'height', name: 'גבהים' },
   { id: 'nib', name: 'עובי קולמוס' },
+  { id: 'straightness', name: 'ישרות' },
+  { id: 'weight', name: 'משקלים' },
   { id: 'white-space', name: 'לובן ושטחים' },
+  { id: 'optical-center', name: 'מרכז אופטי' },
   { id: 'roof', name: 'גגות' },
   { id: 'seat', name: 'מושבים' },
   { id: 'stem', name: 'ירכות ודפנות' },
@@ -48,7 +62,9 @@ const SEMANTIC_CATEGORIES = [
   { id: 'word-gap', name: 'מרווח בין מילים' },
   { id: 'line-gap', name: 'מרווח בין השיטין' },
   { id: 'thirds', name: 'חוק השלישים' },
+  { id: 'slant', name: 'נטיות ומקבילות' },
   { id: 'angle', name: 'זוויות' },
+  { id: 'geometry', name: 'עיגולים ואליפסות' },
   { id: 'reference-template', name: 'תבנית אות' },
   { id: 'other', name: 'אחר' }
 ];
@@ -77,6 +93,7 @@ const state = {
   activePointerId: null,
   touchEditPointerId: null,
   interactionBefore: null,
+  loadGeneration: 0,
   calibrationAnalysisToken: 0,
   activeCalibrationRegionId: null,
   formula: {
@@ -104,7 +121,21 @@ const state = {
     updatedAt: null
   },
   projectDocument: null,
-  referenceDataset: []
+  referenceDataset: [],
+  professionalSuite: {
+    activeGroup: 'regaim',
+    activeMetricId: null,
+    descriptions: MASTER_SYSTEM.mergeDescriptions(),
+    measurementNotes: MASTER_SYSTEM.mergeMeasurementNotes(),
+    pendingMeasurement: null,
+    composition: {
+      background: { kind: 'parchment-light', color: '#f3e4bf', imageSrc: null },
+      items: [],
+      selectedId: null,
+      nextId: 1
+    },
+    correctionSessions: []
+  }
 };
 
 const ui = {
@@ -308,7 +339,7 @@ function normalizeQuadPoints(points) {
   return [top[0], top[1], bottom[1], bottom[0]];
 }
 function normalizeQuadObject(object) {
-  if (object && ['kastel', 'nibRegion'].includes(object.type) && object.points?.length === 4) {
+  if (object && ['kastel', 'nibRegion', 'rowAlign', 'ellipse', 'circle'].includes(object.type) && object.points?.length === 4) {
     object.points = normalizeQuadPoints(object.points);
   }
   return object;
@@ -340,10 +371,28 @@ function objectAngle(object) {
   return angleFromLine(object.points[0], object.points[1], object.angleRef || ui.angleRef.value);
 }
 
+function currentRowDeviation(candidate, nibPx = state.formula.nibPx) {
+  const px = Number.isFinite(+candidate?.deviationPx) ? +candidate.deviationPx : null;
+  const calibrated = px != null && Number.isFinite(+nibPx) && +nibPx > 0;
+  return {
+    px,
+    nib: calibrated ? px / +nibPx : null,
+    value: calibrated ? px / +nibPx : px,
+    unitLabel: calibrated ? 'עובי קולמוס' : 'פיקסלים'
+  };
+}
+
 function captureSnapshot() {
   return {
     objects: structuredCloneSafe(state.objects),
     formula: structuredCloneSafe(state.formula),
+    // Source undo keeps only lightweight source-facing UI state. Composition
+    // vectors, uploaded backgrounds and editable professional copy have their
+    // own lifecycle and must not be duplicated into as many as 80 snapshots.
+    professionalSuite: {
+      activeGroup: state.professionalSuite?.activeGroup || 'regaim',
+      activeMetricId: state.professionalSuite?.activeMetricId || null
+    },
     nextId: state.nextId
   };
 }
@@ -355,6 +404,18 @@ function cancelCalibrationAnalysis() {
 function restoreSnapshot(snapshotData) {
   state.objects = structuredCloneSafe(snapshotData.objects || []);
   state.formula = mergeFormula(snapshotData.formula || {});
+  if (snapshotData.professionalSuite) {
+    const independentProfessionalState = {
+      descriptions: state.professionalSuite?.descriptions,
+      measurementNotes: state.professionalSuite?.measurementNotes,
+      composition: state.professionalSuite?.composition,
+      correctionSessions: state.professionalSuite?.correctionSessions
+    };
+    restoreProfessionalSuite({
+      ...snapshotData.professionalSuite,
+      ...independentProfessionalState
+    });
+  }
   cancelCalibrationAnalysis();
   state.activeCalibrationRegionId = state.formula.calibration?.regionObjectId || null;
   state.nextId = snapshotData.nextId || nextAvailableId();
@@ -364,6 +425,43 @@ function restoreSnapshot(snapshotData) {
   state.letterVectorSelection = null;
   analysisOverlay.hidden = true;
   renderAll();
+}
+
+function mergeProfessionalSuite(saved = {}) {
+  const composition = saved.composition || {};
+  return {
+    activeGroup: saved.activeGroup === 'aman' ? 'aman' : 'regaim',
+    activeMetricId: MASTER_SYSTEM.metric(saved.activeMetricId) ? saved.activeMetricId : null,
+    descriptions: MASTER_SYSTEM.mergeDescriptions(saved.descriptions),
+    measurementNotes: MASTER_SYSTEM.mergeMeasurementNotes(saved.measurementNotes),
+    // A pending tool choice is transient UI state, never project data.
+    pendingMeasurement: null,
+    composition: {
+      width: Number.isFinite(+composition.width) && +composition.width > 0 ? +composition.width : 1600,
+      height: Number.isFinite(+composition.height) && +composition.height > 0 ? +composition.height : 900,
+      background: {
+        kind: composition.background?.kind || 'parchment-light',
+        color: composition.background?.color || '#f3e4bf',
+        imageSrc: composition.background?.imageSrc || null
+      },
+      items: Array.isArray(composition.items) ? structuredCloneSafe(composition.items) : [],
+      selectedId: composition.selectedId || null,
+      nextId: Number.isSafeInteger(+composition.nextId) && +composition.nextId > 0 ? +composition.nextId : 1
+    },
+    correctionSessions: Array.isArray(saved.correctionSessions)
+      ? structuredCloneSafe(saved.correctionSessions)
+      : []
+  };
+}
+function restoreProfessionalSuite(saved = {}) {
+  const merged = mergeProfessionalSuite(saved);
+  if (!state.professionalSuite || typeof state.professionalSuite !== 'object') {
+    state.professionalSuite = merged;
+    return state.professionalSuite;
+  }
+  for (const key of Object.keys(state.professionalSuite)) delete state.professionalSuite[key];
+  Object.assign(state.professionalSuite, merged);
+  return state.professionalSuite;
 }
 function snapshot() {
   state.history.push(captureSnapshot());
@@ -442,14 +540,16 @@ function defaultName(type) {
   const names = {
     area: 'שטח ואיזון לובן', length: 'אורך', angle: 'זווית', kastel: 'קעסטעל',
     thirds: 'חוק השלישים — בדיקת מיקום', nib: 'עובי קולמוס', nibRegion: 'אזור כיול קולמוס',
-    gap: selectedVariableName(), letterTemplate: 'תבנית אות'
+    gap: selectedVariableName(), letterTemplate: 'תבנית אות', rowAlign: 'יישור השורה',
+    ellipse: 'אליפסה', circle: 'עיגול'
   };
   return names[type] || 'מדידה';
 }
 function typeLabel(type) {
   const names = {
     area: 'שטח', length: 'אורך', angle: 'זווית', kastel: 'קעסטעל', thirds: 'חוק השלישים',
-    nib: 'קולמוס', nibRegion: 'אזור כיול', gap: 'מרווח', letterTemplate: 'תבנית אות'
+    nib: 'קולמוס', nibRegion: 'אזור כיול', gap: 'מרווח', letterTemplate: 'תבנית אות',
+    rowAlign: 'יישור שורה', ellipse: 'אליפסה', circle: 'עיגול'
   };
   return names[type] || 'מדידה';
 }
@@ -472,14 +572,23 @@ function makeObject(type, points, overrides = {}) {
   const style = styleFromUI();
   const lineOnly = ['length', 'angle', 'nib', 'gap', 'thirds'].includes(type);
   const category = overrides.category || defaultCategory(type, overrides.formulaKey);
+  const semanticMetricId = MASTER_SYSTEM.metricIdFor({
+    semanticMetricId: overrides.semanticMetricId,
+    formulaKey: overrides.formulaKey || (type === 'gap' ? state.formula.selectedVariable : null),
+    category,
+    type
+  });
   const clonedPoints = (points || []).map(point => ({ x: +point.x, y: +point.y }));
-  return {
+  const object = {
     id: state.nextId++,
     uid: typeof globalThis.crypto?.randomUUID === 'function' ? globalThis.crypto.randomUUID() : `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`,
     type,
     points: clonedPoints,
     name: defaultName(type),
-    color: overrides.color || style.color || TOOL_COLORS[type] || '#ef4444',
+    semanticMetricId,
+    color: semanticMetricId
+      ? MASTER_SYSTEM.colorFor({ semanticMetricId })
+      : overrides.color || style.color || TOOL_COLORS[type] || '#64748b',
     lineWidth: overrides.lineWidth || style.lineWidth || 4,
     fillAlpha: lineOnly ? 0 : style.fillAlpha,
     fillEnabled: lineOnly ? false : style.fillEnabled,
@@ -501,12 +610,15 @@ function makeObject(type, points, overrides = {}) {
       ...(overrides.display || {})
     }
   };
+  return enforceSemanticStyle(object);
 }
 
 function defaultCategory(type, formulaKey = state.formula.selectedVariable) {
   if (type === 'nib' || type === 'nibRegion') return 'nib';
   if (type === 'area') return 'white-space';
   if (type === 'letterTemplate') return 'reference-template';
+  if (type === 'rowAlign') return 'straightness';
+  if (type === 'ellipse' || type === 'circle') return 'geometry';
   if (type === 'kastel' || type === 'thirds') return 'thirds';
   if (type === 'angle') return 'angle';
   if (type === 'gap') {
@@ -518,6 +630,34 @@ function defaultCategory(type, formulaKey = state.formula.selectedVariable) {
     return 'letter-gap';
   }
   return 'other';
+}
+
+function semanticColorForObject(object, fallback = '#64748b') {
+  if (!object) return fallback;
+  const semanticMetricId = MASTER_SYSTEM.metricIdFor({
+    semanticMetricId: object.semanticMetricId,
+    formulaKey: object.formulaKey,
+    category: object.category,
+    type: object.type
+  });
+  return semanticMetricId
+    ? MASTER_SYSTEM.colorFor({ semanticMetricId }, fallback)
+    : object.color || fallback;
+}
+
+function enforceSemanticStyle(object) {
+  if (!object) return object;
+  const semanticMetricId = MASTER_SYSTEM.metricIdFor({
+    semanticMetricId: object.semanticMetricId,
+    formulaKey: object.formulaKey,
+    category: object.category,
+    type: object.type
+  });
+  if (semanticMetricId) {
+    object.semanticMetricId = semanticMetricId;
+    object.color = MASTER_SYSTEM.colorFor({ semanticMetricId });
+  }
+  return object;
 }
 
 function areaSegmentCount(object) {
@@ -703,6 +843,7 @@ function drawGapDetectionBoundaries(object) {
 }
 
 function drawObject(object, selected, draft) {
+  enforceSemanticStyle(object);
   const points = object.points.map(imageToScreen);
   if (!points.length) return;
   const resultLabelVisible = draft || isResultLabelVisible(object);
@@ -759,6 +900,23 @@ function drawObject(object, selected, draft) {
         : midpoint(points[0], points[1]);
       label(anchor, measurementResultModel(object).canvasText, object.color, object.type === 'kastel' ? 'below' : 'above');
     }
+  } else if (object.type === 'rowAlign') {
+    if (typeof drawRowAlignmentObject === 'function') {
+      drawRowAlignmentObject(ctx, object, { selected, draft, points });
+    } else {
+      ctx.setLineDash([7, 5]);
+      ctx.strokeRect(points[0].x, points[0].y, points[2].x - points[0].x, points[2].y - points[0].y);
+    }
+  } else if (object.type === 'ellipse' || object.type === 'circle') {
+    const left = Math.min(points[0].x, points[2].x);
+    const right = Math.max(points[0].x, points[2].x);
+    const top = Math.min(points[0].y, points[2].y);
+    const bottom = Math.max(points[0].y, points[2].y);
+    ctx.beginPath();
+    ctx.ellipse((left + right) / 2, (top + bottom) / 2, (right - left) / 2, (bottom - top) / 2, 0, 0, Math.PI * 2);
+    if (object.fillEnabled) ctx.fill();
+    ctx.stroke();
+    if (!draft && resultLabelVisible) label({ x: (left + right) / 2, y: bottom }, measurementResultModel(object).canvasText, object.color, 'below');
   } else if (['length', 'nib', 'gap'].includes(object.type)) {
     if (points.length > 1) {
       if (object.type === 'gap') drawGapDetectionBoundaries(object);

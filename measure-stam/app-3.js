@@ -14,6 +14,9 @@ function commitDraft(message) {
   state.selectedPoint = null;
   state.selectedSegment = null;
   state.letterVectorSelection = null;
+  if (state.professionalSuite?.pendingMeasurement?.semanticMetricId === object.semanticMetricId) {
+    state.professionalSuite.pendingMeasurement = null;
+  }
   syncFormulaFromObject(object);
   if (object.type === 'gap' && object.formulaKey === 'between-lines') {
     refreshBetweenLinesSummary();
@@ -162,20 +165,35 @@ function finishRectDraft(objectType, rollbackSnapshot) {
   const height = distance(state.draft.points[0], state.draft.points[3]);
   if (width * state.view.scale < 12 || height * state.view.scale < 12) {
     clearDraftState();
-    statusText.textContent = objectType === 'kastel' ? 'הקעסטעל קטן מדי ובוטל' : 'אזור הכיול קטן מדי ובוטל';
+    statusText.textContent = objectType === 'kastel'
+      ? 'הקעסטעל קטן מדי ובוטל'
+      : objectType === 'nibRegion'
+        ? 'אזור הכיול קטן מדי ובוטל'
+        : 'התחום קטן מדי ובוטל';
     renderAll();
     return null;
   }
   state.draft.closed = true;
   const object = commitDraft(objectType === 'kastel'
     ? 'הקעסטעל נוצר. כעת אפשר להחיל חוק שלישים או לזהות גג, חלל ומושב'
-    : 'אזור הכיול נוצר ומנותח כעת');
+    : objectType === 'nibRegion'
+      ? 'אזור הכיול נוצר ומנותח כעת'
+      : objectType === 'rowAlign'
+        ? 'השורה סומנה ומנותחת כעת'
+        : objectType === 'circle'
+          ? 'העיגול נוצר ונמדד'
+          : 'האליפסה נוצרה ונמדדה');
   if (objectType === 'kastel') {
     initializeKastelGuides(object);
     setTool('pan');
     statusText.textContent = 'הקעסטעל נוצר ונבחר. גרור כל פינה כדי להרחיב או לעצב אותו';
   }
   if (objectType === 'nibRegion') analyzeCalibrationRegion(object, rollbackSnapshot);
+  if (objectType === 'rowAlign' && typeof analyzeRowAlignment === 'function') {
+    analyzeRowAlignment(object);
+    setTool('pan');
+  }
+  if (objectType === 'ellipse' || objectType === 'circle') setTool('pan');
   return object;
 }
 
@@ -196,6 +214,31 @@ function validEditableKastel(points) {
     polygonArea(points) * state.view.scale * state.view.scale >= 144 &&
     !segmentsProperlyIntersect(points[0], points[1], points[2], points[3]) &&
     !segmentsProperlyIntersect(points[1], points[2], points[3], points[0]);
+}
+
+function resizedAxisAlignedRect(points, handleIndex, imagePoint, lockSquare = false) {
+  if (!Array.isArray(points) || points.length !== 4 || !Number.isInteger(handleIndex)) return points;
+  const opposite = points[(handleIndex + 2) % 4];
+  let target = { x: imagePoint.x, y: imagePoint.y };
+  if (lockSquare) {
+    const dx = target.x - opposite.x;
+    const dy = target.y - opposite.y;
+    const side = Math.max(Math.abs(dx), Math.abs(dy));
+    target = {
+      x: opposite.x + Math.sign(dx || (handleIndex === 0 || handleIndex === 3 ? -1 : 1)) * side,
+      y: opposite.y + Math.sign(dy || (handleIndex === 0 || handleIndex === 1 ? -1 : 1)) * side
+    };
+  }
+  const left = Math.min(opposite.x, target.x);
+  const right = Math.max(opposite.x, target.x);
+  const top = Math.min(opposite.y, target.y);
+  const bottom = Math.max(opposite.y, target.y);
+  return [
+    { x: left, y: top },
+    { x: right, y: top },
+    { x: right, y: bottom },
+    { x: left, y: bottom }
+  ];
 }
 
 function handleTouchPointerMove(event) {
@@ -268,7 +311,14 @@ function pointerMove(event) {
     state.view.y = drag.view.y + (screenPoint.y - drag.start.y);
   } else if (drag.type === 'drawRect') {
     const a = drag.start;
-    state.draft.points = [a, { x: imagePoint.x, y: a.y }, imagePoint, { x: a.x, y: imagePoint.y }];
+    let target = imagePoint;
+    if (drag.objectType === 'circle') {
+      const dx = imagePoint.x - a.x;
+      const dy = imagePoint.y - a.y;
+      const side = Math.max(Math.abs(dx), Math.abs(dy));
+      target = { x: a.x + Math.sign(dx || 1) * side, y: a.y + Math.sign(dy || 1) * side };
+    }
+    state.draft.points = [a, { x: target.x, y: a.y }, target, { x: a.x, y: target.y }];
   } else if (drag.type === 'vectorizeLasso') {
     if (appendLassoPoint(state.vectorizeLasso, imagePoint)) drag.moved = true;
   } else if (drag.type === 'letterAnchorLasso') {
@@ -281,7 +331,9 @@ function pointerMove(event) {
       drag.historyCommitted = true;
     }
     if (state.draft.type === 'area') moveAreaAnchor(state.draft, drag.handle, imagePoint);
-    else state.draft.points[drag.handle] = imagePoint;
+    else if (['ellipse', 'circle'].includes(state.draft.type)) {
+      state.draft.points = resizedAxisAlignedRect(state.draft.points, drag.handle, imagePoint, state.draft.type === 'circle');
+    } else state.draft.points[drag.handle] = imagePoint;
     state.selectedPoint = { target: 'draft', index: drag.handle };
   } else if (drag.type === 'draftCurveHandle' && state.draft?.type === 'area') {
     if (!dragPassedThreshold(drag, screenPoint)) return;
@@ -299,7 +351,9 @@ function pointerMove(event) {
     const object = state.objects.find(item => item.id === drag.id);
     if (object) {
       if (object.type === 'area') moveAreaAnchor(object, drag.handle, imagePoint);
-      else object.points[drag.handle] = imagePoint;
+      else if (['ellipse', 'circle'].includes(object.type)) {
+        object.points = resizedAxisAlignedRect(drag.original || object.points, drag.handle, imagePoint, object.type === 'circle');
+      } else object.points[drag.handle] = imagePoint;
       object.auto = false;
       if (object.type === 'gap') {
         captureGapNormalization(object, state.formula.nibPx, 'manual-endpoint-correction');
@@ -514,6 +568,10 @@ function pointerUp(event) {
         statusText.textContent = 'הפינה לא הוזזה משום שהמסגרת הייתה מצטלבת או קורסת';
       }
     }
+    if (movedObject?.type === 'rowAlign' && typeof analyzeRowAlignment === 'function') {
+      normalizeQuadObject(movedObject);
+      analyzeRowAlignment(movedObject);
+    }
   }
   if (completedDrag?.moved) renderAll();
   state.dragging = null;
@@ -664,7 +722,7 @@ function settleDraftBeforeToolChange(nextTool) {
     return 'completed';
   }
 
-  if (['kastel', 'nibRegion'].includes(draftType)) {
+  if (['kastel', 'nibRegion', 'rowAlign', 'ellipse', 'circle'].includes(draftType)) {
     const completed = finishRectDraft(draftType, rollbackSnapshot);
     return completed ? 'completed' : 'cancelled';
   }
@@ -684,7 +742,9 @@ function setTool(tool) {
   document.querySelectorAll('.tool[data-tool]').forEach(button => button.classList.toggle('active', button.dataset.tool === tool));
   $('gapsPanelBtn')?.classList.toggle('active', tool === 'gap');
   $('autoNibToolBtn')?.classList.remove('active');
-  if (TOOL_COLORS[tool]) ui.color.value = TOOL_COLORS[tool];
+  const pendingMetricId = state.professionalSuite?.pendingMeasurement?.semanticMetricId;
+  if (pendingMetricId) ui.color.value = MASTER_SYSTEM.colorFor({ semanticMetricId: pendingMetricId });
+  else if (TOOL_COLORS[tool]) ui.color.value = TOOL_COLORS[tool];
   const messages = {
     pan: 'אצבע מזיזה אות; Apple Pencil עורך נקודות; שתי אצבעות מזיזות ומגדילות',
     area: 'מדידת שטח ואיזון לובן: סמן נקודות ב־Apple Pencil',
@@ -694,6 +754,9 @@ function setTool(tool) {
     length: 'אורך חופשי: סמן שתי נקודות',
     angle: 'זווית: סמן שתי נקודות לאורך הקו',
     kastel: 'קעסטעל: גרור מסגרת סביב האות',
+    rowAlign: 'יישור השורה: גרור מסגרת סביב השורה ובדוק תחתיות של מושבים יציבים',
+    ellipse: 'אליפסה: גרור מסגרת ליצירת אליפסה מדידה',
+    circle: 'עיגול: גרור מסגרת ליצירת עיגול מדיד',
     vectorize: 'אות מצולמת לווקטור: הקף את האות במסלול חופשי ב־Apple Pencil',
   };
   const outcomeMessage = draftOutcome === 'completed'
@@ -707,18 +770,35 @@ function setTool(tool) {
   renderAll();
 }
 
-document.querySelectorAll('.tool[data-tool]').forEach(button => button.addEventListener('click', () => setTool(button.dataset.tool)));
+document.querySelectorAll('.tool[data-tool]').forEach(button => button.addEventListener('click', () => {
+  if (state.professionalSuite) state.professionalSuite.pendingMeasurement = null;
+  globalThis.MEDIDAOT_PROFESSIONAL_TOOLS?.switchWorkspaceMode?.('source');
+  setTool(button.dataset.tool);
+}));
 $('thirdsToggleBtn').addEventListener('click', toggleKastelThirds);
 $('detectStructureBtn').addEventListener('click', detectActiveKastelStructure);
-$('undoBtn').addEventListener('click', undo);
-$('redoBtn').addEventListener('click', redo);
+$('undoBtn').addEventListener('click', () => {
+  const professional = globalThis.MEDIDAOT_PROFESSIONAL_TOOLS;
+  professional?.isCompositionMode?.() ? professional.undoComposition() : undo();
+});
+$('redoBtn').addEventListener('click', () => {
+  const professional = globalThis.MEDIDAOT_PROFESSIONAL_TOOLS;
+  professional?.isCompositionMode?.() ? professional.redoComposition() : redo();
+});
 $('deletePointBtn').addEventListener('click', deleteSelectedPoint);
 $('closeAreaBtn').addEventListener('click', closeAreaDraft);
 $('curveSegmentBtn').addEventListener('click', curveSelectedSegment);
 $('straightenSegmentBtn').addEventListener('click', straightenSelectedSegment);
 $('cancelDraftBtn').addEventListener('click', cancelDraft);
-$('deleteBtn').addEventListener('click', deleteSelectedObject);
+$('deleteBtn').addEventListener('click', () => {
+  const professional = globalThis.MEDIDAOT_PROFESSIONAL_TOOLS;
+  professional?.isCompositionMode?.() ? professional.deleteCompositionItem() : deleteSelectedObject();
+});
 $('clearBtn').addEventListener('click', () => {
+  if (globalThis.MEDIDAOT_PROFESSIONAL_TOOLS?.isCompositionMode?.()) {
+    statusText.textContent = '„ניקוי כל הסימונים” שייך למקור; מחיקת אות בקנבה נעשית בכפתור הקנבה';
+    return;
+  }
   if (!state.objects.length && !state.draft) return;
   snapshot();
   state.objects = [];
@@ -978,9 +1058,14 @@ function activateFormulaTab(tab) {
   $('gapsTab').classList.toggle('active', tab === 'gaps');
 }
 document.querySelectorAll('[data-formula-tab]').forEach(button => button.addEventListener('click', () => activateFormulaTab(button.dataset.formulaTab)));
-$('startNibBtn').addEventListener('click', () => setTool('nib'));
-$('startNibRegionBtn').addEventListener('click', () => setTool('nibRegion'));
-$('startGapBtn').addEventListener('click', () => setTool('gap'));
+function startStandardMeasurementTool(tool) {
+  if (state.professionalSuite) state.professionalSuite.pendingMeasurement = null;
+  globalThis.MEDIDAOT_PROFESSIONAL_TOOLS?.switchWorkspaceMode?.('source');
+  setTool(tool);
+}
+$('startNibBtn').addEventListener('click', () => startStandardMeasurementTool('nib'));
+$('startNibRegionBtn').addEventListener('click', () => startStandardMeasurementTool('nibRegion'));
+$('startGapBtn').addEventListener('click', () => startStandardMeasurementTool('gap'));
 $('analyzeBtn').addEventListener('click', () => {
   const automatic = globalThis.MEDIDAOT_AUTO_MEASURE;
   if (automatic?.runNib) automatic.runNib({ userInitiated: true }).catch(() => {});
@@ -1123,13 +1208,13 @@ for (const element of [ui.name, ui.color, ui.lineWidth, ui.fillAlpha, ui.fillEna
   element.addEventListener('input', updateSelectedStyle);
   element.addEventListener('change', updateSelectedStyle);
 }
-function updateSelectedStyle() {
+function updateSelectedStyle(event) {
   const object = state.objects.find(item => item.id === state.selectedId);
   if (!object) return;
   object.name = ui.name.value.trim() || defaultName(object.type);
   object.color = ui.color.value;
   object.lineWidth = +ui.lineWidth.value;
-  if (['area', 'kastel', 'nibRegion'].includes(object.type)) {
+  if (['area', 'kastel', 'nibRegion', 'ellipse', 'circle'].includes(object.type)) {
     object.fillAlpha = +ui.fillAlpha.value / 100;
     object.fillEnabled = ui.fillEnabled.checked;
   }
@@ -1141,10 +1226,21 @@ function updateSelectedStyle() {
   }
   object.assessment = ui.assessment?.value || object.assessment || 'unclassified';
   object.note = ui.note?.value.trim() || '';
+  object.semanticMetricId = MASTER_SYSTEM.metricIdFor(event?.target === ui.category
+    ? { category: object.category, type: object.type }
+    : {
+        semanticMetricId: object.semanticMetricId,
+        formulaKey: object.formulaKey,
+        category: object.category,
+        type: object.type
+      });
+  enforceSemanticStyle(object);
+  ui.color.value = object.color;
   object.auto = false;
   markObjectModified(object);
   renderList();
   renderResults();
+  renderControls();
   draw();
 }
 ui.unit.addEventListener('change', renderAll);
@@ -1208,6 +1304,7 @@ for (const [input, key] of KASTEL_GUIDE_INPUTS) {
 $('imageInput').addEventListener('change', event => {
   const file = event.target.files?.[0];
   if (!file) return;
+  const loadGeneration = ++state.loadGeneration;
   const now = new Date().toISOString();
   state.sourceMeta = {
     id: createStableId('image'),
@@ -1223,18 +1320,25 @@ $('imageInput').addEventListener('change', event => {
   };
   state.projectDocument = null;
   const reader = new FileReader();
-  reader.onload = () => loadImageSource(reader.result, true);
+  reader.onload = () => loadImageSource(reader.result, true, null, loadGeneration);
   reader.readAsDataURL(file);
   event.target.value = '';
 });
 
-function loadImageSource(source, resetProject, preparedImage = null) {
+function loadImageSource(source, resetProject, preparedImage = null, requestedGeneration = null) {
+  const loadGeneration = requestedGeneration ?? ++state.loadGeneration;
+  if (loadGeneration !== state.loadGeneration) return;
   const image = preparedImage || new Image();
   const handleLoad = () => {
+    if (loadGeneration !== state.loadGeneration) return;
     state.image = image;
     state.imageSrc = source;
     emptyState.style.display = 'none';
     if (resetProject) {
+      const retainedProfessionalInfo = {
+        descriptions: state.professionalSuite?.descriptions,
+        measurementNotes: state.professionalSuite?.measurementNotes
+      };
       state.objects = [];
       state.draft = null;
       state.draftHistory = [];
@@ -1246,6 +1350,7 @@ function loadImageSource(source, resetProject, preparedImage = null) {
       state.history = [];
       state.future = [];
       state.formula = mergeFormula({});
+      restoreProfessionalSuite(retainedProfessionalInfo);
     }
     fitImage();
     const savedView = !resetProject ? state.projectDocument?.uiState?.view : null;
@@ -1254,10 +1359,14 @@ function loadImageSource(source, resetProject, preparedImage = null) {
       zoomText.textContent = `${Math.round(state.view.scale * 100)}%`;
     }
     renderAll();
+    if (resetProject) {
+      globalThis.MEDIDAOT_PROFESSIONAL_TOOLS?.refreshProfessionalSuiteAfterProjectLoad?.({ resetHistory: true });
+    }
     for (const kastel of state.objects.filter(item => item.type === 'kastel' && !item.guides)) initializeKastelGuides(kastel);
     if (resetProject) {
       statusText.textContent = 'התמונה נטענה. מזהה כעת את עובי הקולמוס מן הגגות…';
       setTimeout(() => {
+        if (loadGeneration !== state.loadGeneration) return;
         const automatic = globalThis.MEDIDAOT_AUTO_MEASURE;
         if (automatic?.analyzeLoadedImage) {
           automatic.analyzeLoadedImage({ apply: true })
@@ -1277,7 +1386,9 @@ function loadImageSource(source, resetProject, preparedImage = null) {
     return;
   }
   image.onload = handleLoad;
-  image.onerror = () => alert('לא ניתן לפתוח את התמונה');
+  image.onerror = () => {
+    if (loadGeneration === state.loadGeneration) alert('לא ניתן לפתוח את התמונה');
+  };
   image.src = source;
 }
 

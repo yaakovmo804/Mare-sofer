@@ -13,7 +13,7 @@
   <link rel="manifest" href="manifest-medidaot.webmanifest" />
   <link rel="apple-touch-icon" sizes="180x180" href="assets/medidaot-apple-touch-180.png" />
   <link rel="icon" type="image/png" sizes="32x32" href="assets/medidaot-favicon-32.png" />
-  <link rel="stylesheet" href="styles.css?v=20260731m" />
+  <link rel="stylesheet" href="styles.css?v=20260801b" />
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -42,6 +42,10 @@
 
     <main class="workspace-shell">
       <aside class="toolbar panel" aria-label="כלי עבודה">
+        <section class="tool-section professional-launch">
+          <h2>השיטה המקצועית</h2>
+          <button id="professionalMenuBtn" class="tool master-tool" type="button"><span class="tool-icon">ר״א</span><span>רגעים / אמן</span></button>
+        </section>
         <section class="tool-section">
           <h2>ניווט ועריכה</h2>
           <button class="tool active" data-tool="pan"><span class="tool-icon">✋</span><span>בחירה, הזזה וזום</span></button>
@@ -72,6 +76,9 @@
           <button class="tool" data-tool="kastel"><span class="tool-icon">◇</span><span>קעסטעל</span></button>
           <button id="thirdsToggleBtn" class="tool" type="button"><span class="tool-icon">⅓</span><span>חוק השלישים</span></button>
           <button id="detectStructureBtn" class="tool" type="button"><span class="tool-icon">▤</span><span>זהה גג, חלל ומושב</span></button>
+          <button class="tool" data-tool="rowAlign" aria-label="יישור השורה"><span class="tool-icon">≋</span><span>יישור השורה</span></button>
+          <button class="tool" data-tool="circle" aria-label="עיגול"><span class="tool-icon">○</span><span>עיגול</span></button>
+          <button class="tool" data-tool="ellipse" aria-label="אליפסה"><span class="tool-icon">⬭</span><span>אליפסה</span></button>
         </section>
 
         <section class="tool-section edit-tools">
@@ -85,10 +92,15 @@
           <button id="cancelDraftBtn" class="tool danger" disabled><span class="tool-icon">×</span><span>ביטול סימון נוכחי</span></button>
           <button id="deleteBtn" class="tool danger" disabled><span class="tool-icon">🗑</span><span>מחיקת מדידה</span></button>
           <button id="clearBtn" class="tool danger"><span class="tool-icon">⌫</span><span>ניקוי כל הסימונים</span></button>
+          <p class="tool-context-note">„עיגול המקטע” פועל לאחר בחירת מקטע בשטח מסומן. עיגול ואליפסה מלאים נמצאים בכלים הגאומטריים.</p>
         </section>
       </aside>
 
       <section class="canvas-panel panel" aria-label="משטח המדידה">
+        <nav id="workspaceModeBar" class="workspace-mode-bar" aria-label="סביבת עבודה">
+          <button class="active" type="button" data-workspace-mode="source" aria-pressed="true">מקור ומדידה</button>
+          <button type="button" data-workspace-mode="composition" aria-pressed="false">קנבה נקייה</button>
+        </nav>
         <div id="emptyState" class="empty-state">
           <img class="empty-app-icon" src="assets/medidaot-icon-512.png" alt="" />
           <h2>העלה צילום של אות, מילה או שורה</h2>
@@ -100,6 +112,26 @@
           <span>מזהה גגות, עובי קולמוס ושורות כתב…</span>
         </div>
         <canvas id="canvas"></canvas>
+        <section id="compositionWorkspace" class="composition-workspace" hidden aria-label="קנבה נקייה להרכבת כתב">
+          <div class="composition-toolbar" data-interface-surface>
+            <label>רקע
+              <select id="compositionBackgroundSelect">
+                <option value="parchment-light">קלף בהיר</option>
+                <option value="parchment-warm">קלף חם</option>
+                <option value="white">לבן נקי</option>
+                <option value="transparent">שקוף</option>
+                <option value="custom">רקע שהועלה</option>
+              </select>
+            </label>
+            <button id="compositionBackgroundButton" class="btn compact" type="button">העלאת רקע</button>
+            <input id="compositionBackgroundInput" type="file" accept="image/*" hidden />
+            <button id="compositionDuplicateBtn" class="btn compact" type="button" disabled>שכפול אות</button>
+            <button id="compositionDeleteBtn" class="btn compact danger" type="button" disabled>מחיקת אות</button>
+            <button id="compositionExportBtn" class="btn compact primary" type="button" disabled>ייצוא הקנבה</button>
+          </div>
+          <canvas id="compositionCanvas" tabindex="0" role="application" aria-label="קנבה נקייה, 0 אותיות"></canvas>
+          <p id="compositionEmptyHint" class="composition-empty-hint">בחר אות וקטורית במשטח המקור ולחץ „העבר לקנבה”. ניתן להעביר כמה אותיות ולבנות מילה.</p>
+        </section>
         <section id="letterDrawer" class="letter-drawer" aria-label="לוח צורת האותיות" hidden>
           <div class="letter-drawer-head">
             <div>
@@ -115,12 +147,36 @@
           <div id="letterKeyboard" class="letter-keyboard" dir="rtl"></div>
         </section>
         <div class="statusbar">
-          <span id="statusText">מוכן</span>
+          <span id="statusText" role="status" aria-live="polite">מוכן</span>
           <span id="zoomText">100%</span>
         </div>
       </section>
 
       <aside class="properties panel">
+        <section id="professionalSuitePanel" class="property-section professional-suite" hidden data-interface-surface>
+          <div class="section-title-row">
+            <div>
+              <h2>רגעים / אמן</h2>
+              <p>מערכת אחת למדידה, להשוואה ולהדמיית תיקון מקושרת.</p>
+            </div>
+            <button id="closeProfessionalSuiteBtn" class="icon-button" type="button" aria-label="סגירה">×</button>
+          </div>
+          <div class="master-group-tabs" role="tablist" aria-label="רגעים ואמן">
+            <button class="active" type="button" data-master-group="regaim" role="tab">רגעים</button>
+            <button type="button" data-master-group="aman" role="tab">אמן</button>
+          </div>
+          <p id="masterGroupSummary" class="microcopy"></p>
+          <div id="masterMetricGrid" class="master-metric-grid"></div>
+          <h3 class="reference-tools-title">כלים והגדרות משלימים</h3>
+          <div id="professionalReferenceInfo" class="professional-reference-info" aria-label="הגדרות מקצועיות נוספות"></div>
+          <div id="professionalComparison" class="professional-comparison"></div>
+        </section>
+        <section id="compositionInspector" class="property-section composition-inspector" hidden>
+          <h2>קנבה נקייה</h2>
+          <p class="microcopy">כאן עובדים רק על עותקי האותיות. כלי המדידה ועריכת אות המקור מושהים כדי שלא לבצע שינוי נסתר.</p>
+          <p class="microcopy">גרור אות על המשטח, גרור את ידית הפינה לשינוי גודל, או השתמש בחצים להזזה מדויקת. Undo ו־Redo שייכים לקנבה בלבד.</p>
+          <button class="btn compact primary full" type="button" data-workspace-mode="source">חזרה למקור ולמדידה</button>
+        </section>
         <section class="property-section formula-card">
           <div class="section-title-row">
             <h2>נוסחת הכתב</h2>
@@ -172,8 +228,13 @@
           <label>שם המדידה<input id="nameInput" type="text" placeholder="למשל: ירך ימנית" /></label>
           <label>קטגוריה מקצועית
             <select id="categorySelect">
+              <option value="width">רוחבים</option>
+              <option value="height">גבהים</option>
               <option value="nib">עובי קולמוס</option>
+              <option value="straightness">ישרות</option>
+              <option value="weight">משקלים</option>
               <option value="white-space">לובן ושטחים</option>
+              <option value="optical-center">מרכז אופטי</option>
               <option value="roof">גגות</option>
               <option value="seat">מושבים</option>
               <option value="stem">ירכות ודפנות</option>
@@ -184,6 +245,8 @@
               <option value="line-gap">מרווח בין השיטין</option>
               <option value="thirds">חוק השלישים</option>
               <option value="angle">זוויות</option>
+              <option value="slant">נטיות ומקבילות</option>
+              <option value="geometry">עיגולים ואליפסות</option>
               <option value="reference-template">תבנית אות</option>
               <option value="other">אחר</option>
             </select>
@@ -198,9 +261,10 @@
           </label>
           <label>הערה מקצועית<textarea id="noteInput" rows="2" placeholder="למשל: מרפסת מוגזמת"></textarea></label>
           <div class="two-cols">
-            <label>צבע<input id="colorInput" type="color" value="#ef4444" /></label>
+            <label>צבע המדד<input id="colorInput" type="color" value="#ef4444" /></label>
             <label>עובי קו<input id="lineWidthInput" type="range" min="1" max="14" value="4" /></label>
           </div>
+          <p id="semanticColorHint" class="semantic-color-hint" hidden>הצבע נעול לפי משמעות המדידה ונשמר גם בסימון, בתוצאה ובהדמיה.</p>
           <label>שקיפות מילוי<input id="fillAlphaInput" type="range" min="0" max="80" value="18" /></label>
           <label class="check"><input id="fillEnabledInput" type="checkbox" checked /> מילוי פנימי</label>
           <p class="microcopy">אורכים ומרווחים מוצגים ביחידות עובי קולמוס. ערך הפיקסלים נשמר רק לצורך החישוב. שטחים נשמרים בפיקסלים².</p>
@@ -250,11 +314,20 @@
           <label class="check"><input id="letterGridInput" type="checkbox" checked /> רשת עזר</label>
           <label class="check"><input id="letterLockAspectInput" type="checkbox" checked /> שמירת יחס בידיות הפינה</label>
           <label class="check"><input id="letterEditAnchorsInput" type="checkbox" /> עריכת נקודות עוגן וידיות Bézier</label>
+          <label>דרגת שליטה וקטורית
+            <select id="letterVectorLevelSelect">
+              <option value="structural">1 — מבנה</option>
+              <option value="organs">2 — איברים</option>
+              <option value="curves">3 — עקומות</option>
+              <option value="full">4 — מלא</option>
+            </select>
+          </label>
           <button id="letterAnchorLassoBtn" class="btn compact full" type="button" disabled>בחירת קבוצת עוגנים בסימון חופשי</button>
           <p id="letterAnchorReadout" class="microcopy">מקור האות נשמר כמסלול Bézier עריך. שינוי העובי מחושב במסכת תצוגה לא־הרסנית ואינו יוצר מסלול SVG חדש.</p>
           <p id="letterSizeReadout" class="microcopy">—</p>
           <div class="button-row">
             <button id="duplicateLetterBtn" class="btn compact" type="button">שכפול</button>
+            <button id="transferLetterBtn" class="btn compact primary" type="button">העבר לקנבה</button>
             <button id="resetLetterRatioBtn" class="btn compact" type="button">מקור הלוח</button>
             <button id="deleteLetterBtn" class="btn compact danger" type="button">מחיקה</button>
           </div>
@@ -293,6 +366,8 @@
       <p><b>שטח ואיזון לובן:</b> אפשר להוסיף עשרות נקודות סביב התחום. בסיום גע בנקודה הראשונה או לחץ „סיום וסגירת השטח”. מעבר לכלי אחר סוגר אוטומטית שטח תקין; סימון חלקי שאינו יכול להיות מדידה מבוטל.</p>
       <p><b>עיגול מקטע:</b> גע ביהלום שבין שתי נקודות וגרור אותו, או בחר מקטע ולחץ „עיגול המקטע”.</p>
       <p><b>לוח צורת האותיות:</b> כל אות מונחת בגודלה היחסי המקורי מן הלוח, בלי השוואת גבהים. אפשר להזיז ולמתוח אותה. מקור ה־Bézier נשאר עריך; שינוי עובי הקולמוס הוא תצוגה לא־הרסנית בתוך מסגרת קבועה ואינו מחליף את מסלול המקור. מצב עריכת עוגנים מציג את נקודות המסלול ואת ידיות ה־Bézier.</p>
+      <p><b>דרגות הווקטור והקנבה:</b> „מבנה” משנה מסגרת; „איברים” מציג קבוצות מקומיות בטוחות שאינן מערבבות מסלולים, וסימון חופשי מגדיר איבר מדויק; „עקומות” מציג עוגנים; „מלא” מציג גם ידיות Bézier. „העבר לקנבה” יוצר עותק נקי ונפרד שאפשר לצרף למילה על רקע קלף או רקע שהועלה.</p>
+      <p><b>רגעים / אמן:</b> לכל מדד צבע קבוע והסבר שניתן לעריכה. יישור השורה דורש סיווג מלא של מועמדי ב׳, כ׳ ונ׳ רגילה לפני יצירת קו; ן׳ וי׳ אינן קובעות אותו. נטיות נשמרות כסטייה חתומה מן האנך, והדמיית תיקון נוצרת בקנבה בלי לשנות את המקור.</p>
       <p><b>אות מצולמת לווקטור:</b> סמן מסלול חופשי סביב האות. האפליקציה שומרת מסגרת מקור בצבע שבחרת ומייצרת ממנה וקטור נפרד. במצב עריכת עוגנים אפשר להקיף קבוצת עוגנים ולהזיז את כולם יחד.</p>
       <p><b>מחיקת נקודה:</b> גע בנקודה כדי לבחור אותה, ולאחר מכן לחץ „מחיקת נקודה”. במצב בחירה ניתן גם לגרור נקודה למקום מדויק.</p>
       <p><b>מגע:</b> כל התפריטים, החלוניות והגלילה פועלים באצבע. על משטח העבודה אצבע אחת מזיזה אות מן הלוח, ושתי אצבעות מזיזות ומגדילות את התמונה. Apple Pencil משמש למדידה, לסימון חופשי ולעריכת נקודות מדויקת; מעבר שלו לתפריט מבטל את משיכת הקנבס.</p>
@@ -305,17 +380,33 @@
       <button id="closeHelp" class="btn primary">סגור</button>
     </dialog>
 
+    <dialog id="metricInfoDialog" class="metric-info-dialog" data-interface-surface aria-labelledby="metricInfoTitle">
+      <div class="section-title-row">
+        <div><span id="metricInfoSwatch" class="metric-info-swatch"></span><h2 id="metricInfoTitle">הגדרה מקצועית</h2></div>
+        <button id="closeMetricInfoBtn" class="icon-button" type="button" aria-label="סגירה">×</button>
+      </div>
+      <p class="microcopy">הנוסחים נשמרים באפליקציה ובקובץ הפרויקט. שינוי הטקסט אינו משנה את אלגוריתם המדידה.</p>
+      <label>הסבר כללי<textarea id="metricInfoText" rows="5"></textarea></label>
+      <label>כיצד האפליקציה מודדת<textarea id="metricMeasurementText" rows="5"></textarea></label>
+      <div class="button-row">
+        <button id="saveMetricInfoBtn" class="btn primary" type="button">שמירת ההסבר</button>
+        <button id="resetMetricInfoBtn" class="btn" type="button">איפוס לנוסח המקורי</button>
+      </div>
+    </dialog>
+
     <button id="helpBtn" class="floating-help" aria-label="עזרה">?</button>
   </div>
-  <script src="letter-assets.js?v=20260731m"></script>
-  <script src="letter-vector-engine.js?v=20260731m"></script>
-  <script src="app-1.js?v=20260731m"></script>
-  <script src="region-vector.js?v=20260731m"></script>
-  <script src="letter-tools.js?v=20260731m"></script>
-  <script src="app-2.js?v=20260731m"></script>
-  <script src="app-3.js?v=20260731m"></script>
-  <script src="app-4.js?v=20260731m"></script>
-  <script src="auto-measure.js?v=20260731m"></script>
-  <script src="stability-patch.js?v=20260731m"></script>
+  <script src="master-system.js?v=20260801b"></script>
+  <script src="letter-assets.js?v=20260801b"></script>
+  <script src="letter-vector-engine.js?v=20260801b"></script>
+  <script src="app-1.js?v=20260801b"></script>
+  <script src="region-vector.js?v=20260801b"></script>
+  <script src="letter-tools.js?v=20260801b"></script>
+  <script src="app-2.js?v=20260801b"></script>
+  <script src="app-3.js?v=20260801b"></script>
+  <script src="app-4.js?v=20260801b"></script>
+  <script src="professional-tools.js?v=20260801b"></script>
+  <script src="auto-measure.js?v=20260801b"></script>
+  <script src="stability-patch.js?v=20260801b"></script>
 </body>
 </html>

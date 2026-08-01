@@ -956,7 +956,13 @@ function normalizeLetterTemplateObject(object) {
   if (object.letterVector && Number.isFinite(+object.letterVector.weight)) {
     object.letterVector.weight = object.letterWeight;
   }
-  object.letterEditAnchors = object.letterEditAnchors === true;
+  const vectorLevels = new Set(['structural', 'organs', 'curves', 'full']);
+  object.vectorDetailLevel = vectorLevels.has(object.vectorDetailLevel)
+    ? object.vectorDetailLevel
+    : object.letterEditAnchors === true
+      ? 'full'
+      : 'structural';
+  object.letterEditAnchors = object.vectorDetailLevel !== 'structural';
   object.letterGridVisible = object.letterGridVisible !== false;
   object.letterLockAspect = object.letterLockAspect !== false;
   object.role = 'reference-overlay';
@@ -1154,12 +1160,93 @@ function letterHandlePositions(object) {
   };
 }
 
-function letterVectorHandles(object) {
-  if (!isLetterTemplate(object) || !object.letterEditAnchors) return [];
+function allLetterVectorHandles(object) {
+  if (!isLetterTemplate(object)) return [];
   return letterVectorEngine()?.enumerateHandles?.(object, {
     asset: letterAsset(object),
     coordinateSpace: 'image'
   }) || [];
+}
+
+function representativeOrganHandle(group, groupLabel) {
+  if (!group.length) return null;
+  const center = group.reduce((sum, handle) => ({
+    x: sum.x + handle.point.x / group.length,
+    y: sum.y + handle.point.y / group.length
+  }), { x: 0, y: 0 });
+  const representative = group.reduce((best, handle) => (
+    distance(handle.point, center) < distance(best.point, center) ? handle : best
+  ), group[0]);
+  return {
+    ...representative,
+    groupIds: group.map(handle => handle.id),
+    groupLabel,
+    groupCount: group.length
+  };
+}
+
+function organLevelVectorHandles(handles) {
+  const anchorsByPath = new Map();
+  for (const handle of handles) {
+    if (handle.kind !== 'anchor') continue;
+    const pathIndex = Number.isInteger(handle.pathIndex) ? handle.pathIndex : 0;
+    if (!anchorsByPath.has(pathIndex)) anchorsByPath.set(pathIndex, []);
+    anchorsByPath.get(pathIndex).push(handle);
+  }
+
+  const groups = [];
+  for (const [pathIndex, pathAnchors] of [...anchorsByPath.entries()].sort((a, b) => a[0] - b[0])) {
+    pathAnchors.sort((a, b) => a.commandIndex - b.commandIndex || String(a.id).localeCompare(String(b.id)));
+    const runs = [];
+    for (const anchor of pathAnchors) {
+      const currentRun = runs.at(-1);
+      const previous = currentRun?.at(-1);
+      if (!currentRun || anchor.commandIndex > previous.commandIndex + 1) runs.push([anchor]);
+      else currentRun.push(anchor);
+    }
+    for (let runIndex = 0; runIndex < runs.length; runIndex++) {
+      const run = runs[runIndex];
+      const groupCount = Math.min(6, Math.max(1, Math.round(Math.sqrt(run.length))));
+      for (let groupIndex = 0; groupIndex < groupCount; groupIndex++) {
+        const start = Math.floor(groupIndex * run.length / groupCount);
+        const end = Math.floor((groupIndex + 1) * run.length / groupCount);
+        const group = run.slice(start, end);
+        const handle = representativeOrganHandle(group, `path:${pathIndex}:run:${runIndex}:group:${groupIndex}`);
+        if (handle) groups.push(handle);
+      }
+    }
+  }
+  return groups;
+}
+
+function anchorIdsInsideLasso(handles, points) {
+  return [...new Set(handles
+    .filter(handle => handle.kind === 'anchor' && pointInPolygon(handle.point, points))
+    .map(handle => handle.id))];
+}
+
+function letterVectorHandles(object) {
+  if (!isLetterTemplate(object) || !object.letterEditAnchors) return [];
+  const handles = allLetterVectorHandles(object);
+  if (object.vectorDetailLevel === 'organs') {
+    const automaticGroups = organLevelVectorHandles(handles);
+    const selectedIds = state.letterVectorSelection?.id === object.id
+      ? [...new Set(state.letterVectorSelection.handleIds || [])]
+      : [];
+    if (!selectedIds.length) return automaticGroups;
+    const selectedSet = new Set(selectedIds);
+    const selectedAnchors = handles.filter(handle => handle.kind === 'anchor' && selectedSet.has(handle.id));
+    const preciseGroup = representativeOrganHandle(selectedAnchors, `custom:${selectedIds.join('|')}`);
+    if (!preciseGroup) return automaticGroups;
+    return [
+      preciseGroup,
+      ...automaticGroups.filter(group => !group.groupIds.some(id => selectedSet.has(id)))
+    ];
+  }
+  if (object.vectorDetailLevel === 'curves') {
+    return handles.filter(handle => handle.kind === 'anchor');
+  }
+  return object.vectorDetailLevel === 'full' ? handles : [];
 }
 
 function drawLetterVectorHandles(object) {
@@ -1234,13 +1321,15 @@ function drawLetterVectorHandles(object) {
 
   for (const handle of handles) {
     const point = imageToScreen(handle.point);
-    const selected = selectedHandleIds.has(handle.id);
+    const selected = selectedHandleIds.has(handle.id)
+      || handle.groupIds?.some(id => selectedHandleIds.has(id));
     ctx.beginPath();
     if (handle.kind === 'anchor') {
       ctx.fillStyle = selected ? '#f59e0b' : '#ffffff';
       ctx.strokeStyle = selected ? '#92400e' : '#0369a1';
       ctx.lineWidth = selected ? 2.4 : 1.45;
-      ctx.arc(point.x, point.y, selected ? 5.8 : 3.6, 0, Math.PI * 2);
+      const organRadius = handle.groupIds?.length > 1 ? 5.2 : 0;
+      ctx.arc(point.x, point.y, Math.max(selected ? 5.8 : 3.6, organRadius), 0, Math.PI * 2);
     } else {
       const radius = selected ? 5 : 3;
       ctx.fillStyle = selected ? '#f59e0b' : '#cffafe';
@@ -1323,10 +1412,17 @@ function nearestLetterHandle(object, imagePoint, thresholdScreen = 20) {
 
 function nearestLetterVectorHandle(object, imagePoint, thresholdScreen = 16) {
   if (!isLetterTemplate(object) || !object.letterEditAnchors) return null;
-  return letterVectorEngine()?.hitTestHandle?.(object, imagePoint, {
-    asset: letterAsset(object),
-    radius: thresholdScreen / Math.max(.03, state.view.scale)
-  }) || null;
+  const target = imageToScreen(imagePoint);
+  let best = null;
+  let bestDistance = Infinity;
+  for (const handle of letterVectorHandles(object)) {
+    const current = distance(target, imageToScreen(handle.point));
+    if (current <= thresholdScreen && current < bestDistance) {
+      best = handle;
+      bestDistance = current;
+    }
+  }
+  return best;
 }
 
 function resizeLetterFromHandle(originalPoints, handle, imagePoint, lockAspect) {
@@ -1465,6 +1561,7 @@ function addLetterTemplate(letter, tradition = activeLetterTradition) {
     letterOutlineWidth: 2.5,
     letterWeight: 1,
     letterEditAnchors: false,
+    vectorDetailLevel: 'structural',
     letterGridVisible: true,
     letterLockAspect: true,
     display: { resultLabelVisible: false }
@@ -1512,13 +1609,21 @@ function syncLetterControls(object = selectedLetterTemplate()) {
   $('letterGridInput').checked = object.letterGridVisible !== false;
   $('letterLockAspectInput').checked = object.letterLockAspect !== false;
   $('letterEditAnchorsInput').checked = object.letterEditAnchors === true;
-  $('letterAnchorLassoBtn').disabled = object.letterEditAnchors !== true;
+  const vectorLevelSelect = $('letterVectorLevelSelect');
+  if (vectorLevelSelect) vectorLevelSelect.value = object.vectorDetailLevel;
+  $('letterAnchorLassoBtn').disabled = object.vectorDetailLevel === 'structural';
   const vectorStats = letterVectorEngine()?.stats?.(object, letterAsset(object));
   const selectedAnchorCount = state.letterVectorSelection?.id === object.id
     ? new Set(state.letterVectorSelection.handleIds || []).size
     : 0;
+  const vectorLevelLabels = {
+    structural: 'מבנה: הזזה ושינוי מסגרת בלבד',
+    organs: `איברים: ${letterVectorHandles(object).length} קבוצות מקומיות רציפות; סימון חופשי מגדיר איבר מדויק`,
+    curves: 'עקומות: נקודות העוגן ללא ידיות הבקרה',
+    full: 'מלא: כל נקודות העוגן וידיות ה־Bézier'
+  };
   $('letterAnchorReadout').textContent = vectorStats?.available
-    ? `${vectorStats.anchors} נקודות עוגן · ${vectorStats.controls} ידיות Bézier${vectorStats.materialized ? ' · נשמרו עריכות אישיות' : ' · מקור Bézier מלא'}${selectedAnchorCount ? ` · נבחרו ${selectedAnchorCount} עוגנים להזזה משותפת` : ''}${photographed ? ' · הווקטור נוצר מן האזור המצולם ונשאר עריך' : ` · שינוי העובי הוא תצוגה לא־הרסנית עם הגנת רכיבים וחללים${Math.abs((object.letterWeight || 1) - 1) > .001 ? ' · הקו המקווקו הוא מסלול המקור הנערך' : ''}`}`
+    ? `${vectorLevelLabels[object.vectorDetailLevel]} · המקור המלא כולל ${vectorStats.anchors} נקודות עוגן ו־${vectorStats.controls} ידיות${vectorStats.materialized ? ' · נשמרו עריכות אישיות' : ' · מקור Bézier מלא'}${selectedAnchorCount ? ` · נבחרו ${selectedAnchorCount} עוגנים להזזה משותפת` : ''}${photographed ? ' · הווקטור נוצר מן האזור המצולם ונשאר עריך' : ` · שינוי העובי הוא תצוגה לא־הרסנית עם הגנת רכיבים וחללים${Math.abs((object.letterWeight || 1) - 1) > .001 ? ' · הקו המקווקו הוא מסלול המקור הנערך' : ''}`}`
     : 'המסלול הווקטורי אינו זמין.';
   const rect = letterObjectRect(object);
   const visual = letterVisualRect(object) || rect;
@@ -1683,7 +1788,7 @@ function createPhotographedVector(points) {
   const trace = globalThis.MEDIDAOT_REGION_VECTOR.vectorizeImageData(
     context.getImageData(0, 0, sampleWidth, sampleHeight),
     relativePolygon,
-    { maximumAnchors: 520 }
+    { maximumAnchors: 260 }
   );
 
   snapshot();
@@ -1732,6 +1837,7 @@ function createPhotographedVector(points) {
     letterOutlineWidth: 2.5,
     letterWeight: 1,
     letterEditAnchors: true,
+    vectorDetailLevel: 'organs',
     letterGridVisible: true,
     letterLockAspect: true,
     display: { resultLabelVisible: false },
@@ -1748,7 +1854,7 @@ function createPhotographedVector(points) {
   state.vectorizeLasso = null;
   setTool('pan');
   selectObject(vector.id);
-  statusText.textContent = `נוצר וקטור עריך עם ${trace.vector.handleCounts.anchors} נקודות עוגן; מסגרת המקור נשארה במקומה`;
+  statusText.textContent = `נוצר וקטור מלא עם ${trace.vector.handleCounts.anchors} נקודות עוגן; דרגת האיברים מציגה קבוצות מסלול בטוחות, וסימון חופשי מגדיר איבר מדויק. מסגרת המקור נשארה במקומה`;
   return { frame, vector, trace };
 }
 
@@ -1805,15 +1911,14 @@ function finishLetterAnchorLasso() {
     draw();
     return [];
   }
-  const selected = letterVectorHandles(object)
-    .filter(handle => handle.kind === 'anchor' && pointInPolygon(handle.point, points))
-    .map(handle => handle.id);
+  const selected = anchorIdsInsideLasso(allLetterVectorHandles(object), points);
   state.letterVectorSelection = selected.length ? {
     id: object.id,
     handleIds: selected,
     primaryHandleId: selected[0],
     handleId: selected[0]
   } : null;
+  object.correctionHandleIds = [...selected];
   syncLetterControls(object);
   statusText.textContent = selected.length
     ? `נבחרו ${selected.length} נקודות עוגן; גרור אחת מהן כדי להזיז את הקבוצה`
@@ -1940,7 +2045,8 @@ $('letterLockAspectInput')?.addEventListener('change', event => {
 $('letterEditAnchorsInput')?.addEventListener('change', event => {
   const object = selectedLetterTemplate();
   if (!object) return;
-  object.letterEditAnchors = event.target.checked;
+  object.vectorDetailLevel = event.target.checked ? 'full' : 'structural';
+  object.letterEditAnchors = object.vectorDetailLevel !== 'structural';
   state.letterVectorSelection = null;
   state.letterVectorLasso = null;
   $('letterAnchorLassoBtn')?.classList.remove('active');
@@ -1949,6 +2055,29 @@ $('letterEditAnchorsInput')?.addEventListener('change', event => {
   statusText.textContent = object.letterEditAnchors
     ? 'מצב עריכת עוגנים פעיל: גרור נקודה בודדת, או הקף קבוצת עוגנים'
     : 'מצב עריכת העוגנים נסגר; האות נשארה וקטורית';
+});
+$('letterVectorLevelSelect')?.addEventListener('change', event => {
+  const object = selectedLetterTemplate();
+  if (!object) return;
+  snapshot();
+  object.vectorDetailLevel = ['structural', 'organs', 'curves', 'full'].includes(event.target.value)
+    ? event.target.value
+    : 'structural';
+  object.letterEditAnchors = object.vectorDetailLevel !== 'structural';
+  object.correctionHandleIds = [];
+  state.letterVectorSelection = null;
+  state.letterVectorLasso = null;
+  $('letterAnchorLassoBtn')?.classList.remove('active');
+  markObjectModified(object);
+  syncLetterControls(object);
+  draw();
+  const messages = {
+    structural: 'דרגת מבנה: אפשר להזיז ולשנות את מסגרת האות, והווקטור המלא נשמר מתחתיה',
+    organs: 'דרגת איברים: כל נקודת שליטה מזיזה קבוצת עוגנים מקומית',
+    curves: 'דרגת עקומות: מוצגות כל נקודות העוגן ללא עומס ידיות',
+    full: 'דרגה מלאה: כל נקודות העוגן וידיות ה־Bézier מוצגות לעריכה מדויקת'
+  };
+  statusText.textContent = messages[object.vectorDetailLevel];
 });
 $('duplicateLetterBtn')?.addEventListener('click', duplicateSelectedLetter);
 $('resetLetterRatioBtn')?.addEventListener('click', resetSelectedLetterRatio);
