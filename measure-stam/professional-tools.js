@@ -150,7 +150,9 @@ function renderProfessionalPanel() {
     action.className = 'metric-action';
     action.textContent = metricEntryLabel(entry);
     const small = document.createElement('small');
-    small.textContent = metrics.length > 1 ? 'פתח אפשרויות מדידה והסבר' : primary.tool ? 'הפעל כלי' : 'הסבר והגדרה';
+    small.textContent = metrics.length > 1
+      ? 'פתח — מצב כל כלי מוצג בנפרד'
+      : primary.operationLabel || (primary.tool ? 'כלי פעיל' : 'מידע בלבד');
     action.append(small);
     action.addEventListener('click', () => metrics.length > 1 ? showCompoundMetricEntry(entry) : activateProfessionalMetric(primary.id));
     const info = document.createElement('span');
@@ -217,7 +219,7 @@ function showCompoundMetricEntry(entry) {
     const run = document.createElement('button');
     run.className = 'btn compact';
     run.type = 'button';
-    run.textContent = metric.tool ? `הפעל ${metric.name}` : metric.name;
+    run.textContent = `${metric.name} — ${metric.operationLabel || (metric.tool ? 'כלי פעיל' : 'מידע בלבד')}`;
     run.style.borderColor = metric.color;
     run.addEventListener('click', () => activateProfessionalMetric(metric.id));
     const info = document.createElement('button');
@@ -402,6 +404,10 @@ function renderProfessionalReport(metricId) {
   note.className = 'microcopy';
   note.textContent = metricDescription(metricId);
   box.append(note);
+  const capability = document.createElement('p');
+  capability.className = `metric-capability ${metric.operationMode || 'information'}`;
+  capability.textContent = metric.operationLabel || (metric.tool ? 'כלי פעיל' : 'מידע בלבד');
+  box.append(capability);
 
   if (metricId === 'balconies') {
     const samples = state.objects
@@ -661,7 +667,7 @@ function buildCorrectionPanel(angleMeasurements) {
   targetLabel.append(targetInput);
   const note = document.createElement('p');
   note.className = 'microcopy';
-  note.textContent = 'הסימן + או − קובע את כיוון הסטייה מן האנך. אם סומנה קבוצת עוגנים היא תשמש לתיקון; אחרת תיבחר קבוצת האיברים הקרובה למדידה. ההדמיה נוצרת כעותק בקנבה והמקור אינו משתנה. תיקון אוטומטי לפי קעסטעל, רוחב, מקום יציאה ומשקל יופעל רק לאחר הגדרת מערכת הכללים.';
+  note.textContent = 'הסימן + או − קובע את כיוון הסטייה מן האנך. אם סומנה קבוצת עוגנים היא תשמש לתיקון; אחרת תיבחר רק ירך שזוהתה כאיבר מתאר ונמצאת סמוך למדידה — לא קבוצה שרירותית. ההדמיה נוצרת כעותק בקנבה והמקור אינו משתנה. תיקון אוטומטי לפי קעסטעל, רוחב, מקום יציאה ומשקל יופעל רק לאחר הגדרת מערכת הכללים.';
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'btn compact primary full';
@@ -901,13 +907,15 @@ function drawRowAlignmentObject(context, object, { selected, draft, points }) {
         context.stroke();
         context.setLineDash([]);
       }
-      const currentDeviation = currentRowDeviation(candidate);
-      const candidateLabel = candidate.eligible && hasBaseline
-        ? `${candidate.letter}׳ · ${fmt(currentDeviation.value, 2)} ${currentDeviation.unitLabel}`
-        : candidate.confirmed
-          ? `מועמד ${index + 1} · לא לייחוס`
-          : `מועמד ${index + 1} · דורש אישור`;
-      label(center, candidateLabel, color);
+      if (isResultLabelVisible(object)) {
+        const currentDeviation = currentRowDeviation(candidate);
+        const candidateLabel = candidate.eligible && hasBaseline
+          ? `${candidate.letter}׳ · ${fmt(currentDeviation.value, 2)} ${currentDeviation.unitLabel}`
+          : candidate.confirmed
+            ? `מועמד ${index + 1} · לא לייחוס`
+            : `מועמד ${index + 1} · דורש אישור`;
+        label(center, candidateLabel, color);
+      }
     }
   }
   context.restore();
@@ -1407,7 +1415,12 @@ function correctionHandleSelection(source, measurement) {
     state.letterVectorSelection?.id === source.id ? state.letterVectorSelection.handleIds || [] : []
   ))];
   if (explicit.length) return { ids: explicit, method: 'manual-selection' };
-  const groups = organLevelVectorHandles(allLetterVectorHandles(source));
+  const groups = typeof semanticFeatureHandles === 'function'
+    ? semanticFeatureHandles(source, allLetterVectorHandles(source)).filter(feature => (
+        feature.semanticType === 'stem-organ' && feature.topologyStatus === 'bound-organ-subpath' &&
+        (feature.groupIds || []).length >= 2
+      ))
+    : [];
   if (!groups.length || !measurement?.points?.length) return { ids: [], method: null };
   const target = measurement.points.reduce((sum, point) => ({
     x: sum.x + point.x / measurement.points.length,
@@ -1423,7 +1436,7 @@ function correctionHandleSelection(source, measurement) {
   ), groups[0]);
   return {
     ids: [...new Set(nearest.groupIds?.length ? nearest.groupIds : [nearest.id])],
-    method: 'nearest-organ-group'
+    method: 'nearest-semantic-stem-organ'
   };
 }
 
@@ -1513,7 +1526,9 @@ function createCorrectionPreview(measurementId, sourceId, targetAngle) {
       tipImage: featureTip,
       pivotImage: pivot,
       currentAngleDeg: currentSigned,
-      moveAdjacentControls: true
+      moveAdjacentControls: true,
+      moveInternalControlsOnly: true,
+      transformMode: 'rotate'
     });
   } else {
     const moves = handles.map(handle => ({

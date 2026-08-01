@@ -930,6 +930,11 @@ function normalizeLetterTemplateObject(object) {
   if (!Array.isArray(object.points) || object.points.length !== 4) return object;
   const rect = letterObjectRect(object);
   object.points = letterRectPoints(rect.x, rect.y, Math.max(.1, rect.width), Math.max(.1, rect.height));
+  const vectorEngine = letterVectorEngine();
+  if (object.letterVector && vectorEngine?.migrateVectorData &&
+      (+object.letterVector.schemaVersion || 1) < vectorEngine.vectorSchemaVersion) {
+    object.letterVector = vectorEngine.migrateVectorData(object.letterVector);
+  }
   const photographed = isPhotographedVector(object);
   const tradition = photographed
     ? 'custom'
@@ -1194,36 +1199,19 @@ function representativeOrganHandle(group, groupLabel) {
   };
 }
 
-function organLevelVectorHandles(handles) {
-  const anchorsByPath = new Map();
-  for (const handle of handles) {
-    if (handle.kind !== 'anchor') continue;
-    const pathIndex = Number.isInteger(handle.pathIndex) ? handle.pathIndex : 0;
-    if (!anchorsByPath.has(pathIndex)) anchorsByPath.set(pathIndex, []);
-    anchorsByPath.get(pathIndex).push(handle);
-  }
-
+function organLevelVectorHandles(handles, organDefinitions = []) {
+  const byId = new Map(handles.filter(handle => handle.kind === 'anchor').map(handle => [handle.id, handle]));
   const groups = [];
-  for (const [pathIndex, pathAnchors] of [...anchorsByPath.entries()].sort((a, b) => a[0] - b[0])) {
-    pathAnchors.sort((a, b) => a.commandIndex - b.commandIndex || String(a.id).localeCompare(String(b.id)));
-    const runs = [];
-    for (const anchor of pathAnchors) {
-      const currentRun = runs.at(-1);
-      const previous = currentRun?.at(-1);
-      if (!currentRun || anchor.commandIndex > previous.commandIndex + 1) runs.push([anchor]);
-      else currentRun.push(anchor);
-    }
-    for (let runIndex = 0; runIndex < runs.length; runIndex++) {
-      const run = runs[runIndex];
-      const groupCount = Math.min(6, Math.max(1, Math.round(Math.sqrt(run.length))));
-      for (let groupIndex = 0; groupIndex < groupCount; groupIndex++) {
-        const start = Math.floor(groupIndex * run.length / groupCount);
-        const end = Math.floor((groupIndex + 1) * run.length / groupCount);
-        const group = run.slice(start, end);
-        const handle = representativeOrganHandle(group, `path:${pathIndex}:run:${runIndex}:group:${groupIndex}`);
-        if (handle) groups.push(handle);
-      }
-    }
+  for (const organ of organDefinitions || []) {
+    if (organ?.topologyStatus !== 'exclusive-contour-arc' || !Array.isArray(organ.paths) || !organ.paths.length) continue;
+    const members = [...new Set(organ?.anchorIds || [])].map(id => byId.get(id)).filter(Boolean);
+    const representative = representativeOrganHandle(members, `organ:${organ?.id || groups.length}`);
+    if (!representative) continue;
+    representative.organId = organ.id || null;
+    representative.semanticType = organ.type === 'stem' ? 'stem-organ' : 'vector-organ';
+    representative.semanticLabel = organ.label || 'איבר וקטורי';
+    representative.topologyStatus = organ.topologyStatus || 'explicit';
+    groups.push(representative);
   }
   return groups;
 }
@@ -1283,8 +1271,9 @@ function pairedJunctionAnchorHandles(feature, features, localAnchors, baseTolera
 
 function semanticFeatureCanEdit(feature, group, singleAnchorTolerance = 1.5) {
   const distinctAnchorCount = new Set((group || []).map(handle => handle?.id).filter(Boolean)).size;
+  if (feature?.editable === false) return false;
   if (feature?.type === 'roof-endpoint' || feature?.type === 'component-axis') return false;
-  if (feature?.type === 'stem-axis' || feature?.type === 'roof-stem-junction') {
+  if (['stem-axis', 'stem-organ', 'roof-stem-junction'].includes(feature?.type)) {
     return distinctAnchorCount >= 2;
   }
   if (distinctAnchorCount !== 1) return false;
@@ -1312,7 +1301,11 @@ function semanticFeatureHandles(object, handles) {
     const point = feature.point || feature.root || feature.tip;
     if (!point || !Number.isFinite(+point.x) || !Number.isFinite(+point.y)) continue;
     let group = [];
-    if (feature.type === 'stem-axis' && feature.root && feature.tip) {
+    const hasTopologyBinding = Array.isArray(feature.anchorIds) && feature.anchorIds.length > 0;
+    if (hasTopologyBinding) {
+      const boundIds = new Set(feature.anchorIds);
+      group = anchors.filter(handle => boundIds.has(handle.id));
+    } else if (feature.type === 'stem-axis' && feature.root && feature.tip) {
       const tolerance = Math.max(baseTolerance, (+feature.widthPx || 0) * 1.25);
       group = localAnchors
         .filter(entry => {
@@ -1329,7 +1322,7 @@ function semanticFeatureHandles(object, handles) {
     } else if (feature.type === 'roof-stem-junction') {
       group = pairedJunctionAnchorHandles(feature, features, localAnchors, baseTolerance);
     }
-    if (!group.length) {
+    if (!group.length && !hasTopologyBinding) {
       const nearest = localAnchors.reduce((best, entry) => (
         distance(entry.local, point) < distance(best.local, point) ? entry : best
       ), localAnchors[0]);
@@ -1357,6 +1350,9 @@ function semanticFeatureHandles(object, handles) {
       featureId: feature.id,
       semanticType: feature.type,
       semanticLabel: feature.label || feature.type,
+      organId: feature.organId || null,
+      landmarkRole: feature.role || null,
+      topologyStatus: feature.topologyStatus || (hasTopologyBinding ? 'unbound-reference' : 'legacy-inferred'),
       editable,
       geometryStatus: feature.geometryStatus || 'current',
       semanticStale: feature.geometryStatus === 'stale' || feature.stale === true,
@@ -1381,25 +1377,44 @@ function letterVectorHandles(object) {
   if (!isLetterTemplate(object) || !object.letterEditAnchors) return [];
   const handles = allLetterVectorHandles(object);
   const semanticHandles = semanticFeatureHandles(object, handles);
-  if (object.vectorDetailLevel === 'structural') return semanticHandles;
+  if (object.vectorDetailLevel === 'structural') {
+    return semanticHandles.filter(handle => handle.semanticType !== 'stem-organ');
+  }
   if (object.vectorDetailLevel === 'organs') {
-    const automaticGroups = organLevelVectorHandles(handles);
     const selectedIds = state.letterVectorSelection?.id === object.id
       ? [...new Set(state.letterVectorSelection.handleIds || [])]
       : [];
-    const claimedIds = new Set(semanticHandles.flatMap(handle => handle.groupIds || [handle.id]));
-    const remainingGroups = automaticGroups.filter(group =>
-      !(group.groupIds || [group.id]).some(id => claimedIds.has(id))
-    );
-    if (!selectedIds.length) return [...semanticHandles, ...remainingGroups];
+    const independentOrganIds = new Set((object.letterVector?.organs || [])
+      .filter(organ => organ.topologyStatus === 'exclusive-contour-arc' && Array.isArray(organ.paths) && organ.paths.length)
+      .map(organ => organ.id));
+    const organHandles = semanticHandles.filter(handle => (
+      independentOrganIds.has(handle.organId) &&
+      ['stem-organ', 'stem-axis', 'roof-stem-junction'].includes(handle.semanticType)
+    ));
+    if (!selectedIds.length) return organHandles;
     const selectedSet = new Set(selectedIds);
     const selectedAnchors = handles.filter(handle => handle.kind === 'anchor' && selectedSet.has(handle.id));
     const preciseGroup = representativeOrganHandle(selectedAnchors, `custom:${selectedIds.join('|')}`);
-    if (!preciseGroup) return [...semanticHandles, ...remainingGroups];
+    if (!preciseGroup) return organHandles;
+    const retainedSelection = state.letterVectorSelection?.id === object.id
+      ? state.letterVectorSelection
+      : null;
+    const retainedSemantic = semanticHandles.find(handle => (
+      retainedSelection?.featureId && handle.featureId === retainedSelection.featureId
+    ));
+    if (retainedSelection?.organId) {
+      preciseGroup.featureId = retainedSemantic?.featureId || retainedSelection.featureId || null;
+      preciseGroup.semanticType = retainedSemantic?.semanticType || retainedSelection.semanticType || 'stem-organ';
+      preciseGroup.semanticLabel = retainedSemantic?.semanticLabel || 'ירך שלמה';
+      preciseGroup.organId = retainedSemantic?.organId || retainedSelection.organId;
+      preciseGroup.rootImage = retainedSemantic?.rootImage || retainedSelection.rootImage || null;
+      preciseGroup.tipImage = retainedSemantic?.tipImage || retainedSelection.tipImage || null;
+      preciseGroup.topologyStatus = retainedSemantic?.topologyStatus || 'bound-organ-subpath';
+      preciseGroup.editable = true;
+    }
     return [
-      ...semanticHandles,
-      preciseGroup,
-      ...remainingGroups.filter(group => !group.groupIds.some(id => selectedSet.has(id)))
+      ...organHandles.filter(handle => !(handle.groupIds || [handle.id]).some(id => selectedSet.has(id))),
+      preciseGroup
     ];
   }
   if (object.vectorDetailLevel === 'curves') {
@@ -1986,6 +2001,79 @@ function selectedSemanticVectorFeature(object = selectedLetterTemplate()) {
   return letterVectorHandles(object).find(handle => handle.featureId === selection.featureId) || null;
 }
 
+function selectedStemAxisFeature(object = selectedLetterTemplate()) {
+  const selected = selectedSemanticVectorFeature(object);
+  if (selected?.semanticType === 'stem-axis') return selected;
+  const organId = selected?.organId || state.letterVectorSelection?.organId;
+  if (!organId || !object) return null;
+  return semanticFeatureHandles(object, allLetterVectorHandles(object)).find(handle => (
+    handle.semanticType === 'stem-axis' && handle.organId === organId
+  )) || null;
+}
+
+function refreshBoundVectorFeaturePoints(object, organId = null) {
+  const features = object?.letterVector?.features;
+  const engine = letterVectorEngine();
+  if (!Array.isArray(features) || !engine?.enumerateHandles) return;
+  const handleMap = new Map(engine.enumerateHandles(object, {
+    asset: letterAsset(object),
+    coordinateSpace: 'local'
+  }).filter(handle => handle.kind === 'anchor').map(handle => [handle.id, handle]));
+  const meanBoundPoint = feature => {
+    const bound = (feature.anchorIds || []).map(id => handleMap.get(id)).filter(Boolean);
+    if (!bound.length) return null;
+    return bound.reduce((sum, handle) => ({
+      x: sum.x + handle.point.x / bound.length,
+      y: sum.y + handle.point.y / bound.length
+    }), { x: 0, y: 0 });
+  };
+  const relevant = organId
+    ? features.filter(feature => feature.organId === organId)
+    : features;
+  for (const feature of relevant) {
+    if (!['stem-landmark', 'stem-organ'].includes(feature.type)) continue;
+    const point = meanBoundPoint(feature);
+    if (point) feature.point = point;
+  }
+  for (const axis of relevant.filter(feature => feature.type === 'stem-axis')) {
+    const landmarks = features.filter(feature => feature.stemId === axis.id && feature.type === 'stem-landmark');
+    const meanRole = prefix => {
+      const points = landmarks
+        .filter(feature => feature.role?.startsWith(prefix))
+        .map(meanBoundPoint)
+        .filter(Boolean);
+      if (!points.length) return null;
+      return points.reduce((sum, point) => ({
+        x: sum.x + point.x / points.length,
+        y: sum.y + point.y / points.length
+      }), { x: 0, y: 0 });
+    };
+    const root = meanRole('root-') || axis.root;
+    const tip = meanRole('terminal-') || axis.tip;
+    if (!root || !tip) continue;
+    axis.root = { ...root };
+    axis.point = { ...root };
+    axis.tip = { ...tip };
+    axis.angleDeg = Math.atan2(tip.x - root.x, tip.y - root.y) * 180 / Math.PI;
+    axis.geometryStatus = 'current';
+    for (const linked of features.filter(feature => feature.stemId === axis.id)) {
+      if (linked.type === 'roof-stem-junction') {
+        linked.root = { ...root };
+        linked.point = { ...root };
+        linked.tip = { ...tip };
+      } else if (linked.type === 'stem-organ') {
+        linked.root = { ...root };
+        linked.tip = { ...tip };
+        linked.point = midpoint(root, tip);
+      }
+      linked.geometryStatus = 'current';
+      delete linked.stale;
+      delete linked.staleReason;
+      delete linked.staleRevision;
+    }
+  }
+}
+
 function updateSemanticFeatureAfterHandleMove(object, selection, change = {}) {
   const features = object?.letterVector?.features;
   const engine = letterVectorEngine();
@@ -2045,6 +2133,7 @@ function updateSemanticFeatureAfterHandleMove(object, selection, change = {}) {
   delete feature.stale;
   delete feature.staleReason;
   delete feature.staleRevision;
+  if (feature.organId) refreshBoundVectorFeaturePoints(object, feature.organId);
 }
 
 function reconcileSemanticVectorFeatures(object) {
@@ -2174,12 +2263,19 @@ function reconcileSemanticVectorFeatures(object) {
     delete feature.stale;
     delete feature.staleReason;
     delete feature.staleRevision;
-    for (const junction of features.filter(item => item.stemId === feature.id)) {
-      junction.point = { ...feature.root };
-      junction.root = { ...feature.root };
-      junction.tip = { ...feature.tip };
-      junction.geometryStatus = 'current';
+    for (const linked of features.filter(item => item.stemId === feature.id)) {
+      if (linked.type === 'roof-stem-junction') {
+        linked.point = { ...feature.root };
+        linked.root = { ...feature.root };
+        linked.tip = { ...feature.tip };
+      } else if (linked.type === 'stem-organ') {
+        linked.point = midpoint(feature.root, feature.tip);
+        linked.root = { ...feature.root };
+        linked.tip = { ...feature.tip };
+      }
+      linked.geometryStatus = 'current';
     }
+    refreshBoundVectorFeaturePoints(object, feature.organId);
   }
   const roofEndpoints = features.filter(item => item.type === 'roof-endpoint' && item.point);
   for (const feature of roofEndpoints) {
@@ -2298,14 +2394,19 @@ function syncLetterControls(object = selectedLetterTemplate()) {
   if (vectorLevelSelect) vectorLevelSelect.value = object.vectorDetailLevel;
   $('letterAnchorLassoBtn').disabled = object.vectorDetailLevel === 'structural';
   const vectorStats = letterVectorEngine()?.stats?.(object, letterAsset(object));
+  const independentOrganCount = (object.letterVector?.organs || []).filter(organ => (
+    organ.topologyStatus === 'exclusive-contour-arc' && Array.isArray(organ.paths) && organ.paths.length
+  )).length;
   const selectedAnchorCount = state.letterVectorSelection?.id === object.id
     ? new Set(state.letterVectorSelection.handleIds || []).size
     : 0;
   const vectorLevelLabels = {
     structural: photographed
-      ? `מבנה: ${letterVectorHandles(object).length} נקודות בעלות משמעות — קצות גג, יציאת ירך וציר ירך`
+      ? `מבנה: ${letterVectorHandles(object).length} תחנות מתאר — חיבור, הצטמצמות, התעגלות וסיום ירך`
       : 'מבנה: הזזה ושינוי מסגרת בלבד',
-    organs: `איברים: ${letterVectorHandles(object).length} קבוצות מקומיות רציפות; סימון חופשי מגדיר איבר מדויק`,
+    organs: photographed
+      ? `איברים: ${independentOrganCount} ירכות כתת־מסלולים עצמאיים; סימון חופשי בוחר איבר שלם`
+      : 'איברים: אין קבוצות מומצאות; סימון חופשי בוחר רק את העוגנים שהוקפו',
     curves: 'עקומות: נקודות העוגן ללא ידיות הבקרה',
     full: 'מלא: כל נקודות העוגן וידיות ה־Bézier'
   };
@@ -2319,9 +2420,10 @@ function syncLetterControls(object = selectedLetterTemplate()) {
     : '';
   $('letterSizeReadout').textContent =
     `צורת האות: ${fmt(visual.width, 1)} × ${fmt(visual.height, 1)} פיקסלים${nibText} · מסגרת יחסית: ${fmt(rect.width, 1)} × ${fmt(rect.height, 1)}`;
-  const selectedFeature = selectedSemanticVectorFeature(object);
+  const selectedFeature = selectedStemAxisFeature(object);
   const tiltSection = $('letterAxisTiltSection');
-  const activeStemAxis = selectedFeature?.semanticType === 'stem-axis' && !selectedFeature.semanticStale;
+  const activeStemAxis = selectedFeature?.semanticType === 'stem-axis' &&
+    selectedFeature.topologyStatus === 'bound-organ-subpath' && !selectedFeature.semanticStale;
   if (tiltSection) tiltSection.hidden = !activeStemAxis;
   if (activeStemAxis) {
     const angle = Number.isFinite(+selectedFeature.axisAngleDeg)
@@ -2463,10 +2565,15 @@ function setSelectedLetterEditTarget(target) {
 
 function applySelectedLetterAxisTilt(targetAngle) {
   const object = selectedLetterTemplate();
-  const selectedFeature = selectedSemanticVectorFeature(object);
+  const selectedFeature = selectedStemAxisFeature(object);
   const engine = letterVectorEngine();
-  if (!object || selectedFeature?.semanticType !== 'stem-axis' || selectedFeature.semanticStale || !engine?.tiltObjectHandles) {
-    statusText.textContent = selectedFeature?.semanticStale
+  if (!object || selectedFeature?.semanticType !== 'stem-axis' ||
+      selectedFeature.topologyStatus !== 'bound-organ-subpath' ||
+      selectedFeature.semanticStale || !engine?.tiltObjectHandles) {
+    statusText.textContent = selectedFeature?.semanticType === 'stem-axis' &&
+      selectedFeature.topologyStatus !== 'bound-organ-subpath'
+      ? 'הציר הוא נקודת ייחוס בלבד ואין לו תת־מסלול ירך עצמאי; יש ליצור מחדש וקטור מן הצילום'
+      : selectedFeature?.semanticStale
       ? 'ציר הירך דורש זיהוי מחדש לאחר עריכת העוגנים; אין להחיל הטיה על ציר לא־מאומת'
       : 'יש לבחור תחילה את נקודת „ציר ירך” בדרגת מבנה או איברים';
     return null;
@@ -2485,13 +2592,11 @@ function applySelectedLetterAxisTilt(targetAngle) {
     tipImage: selectedFeature.tipImage,
     pivotImage: selectedFeature.rootImage,
     currentAngleDeg: current,
-    moveAdjacentControls: true
+    moveAdjacentControls: true,
+    moveInternalControlsOnly: true,
+    transformMode: 'rotate'
   });
-  const tangentDelta = Math.tan(target * Math.PI / 180) - Math.tan(current * Math.PI / 180);
-  const nextTipImage = {
-    x: selectedFeature.tipImage.x + (selectedFeature.rootImage.y - selectedFeature.tipImage.y) * tangentDelta,
-    y: selectedFeature.tipImage.y
-  };
+  const nextTipImage = result.transformedTip;
   const feature = object.letterVector.features?.find(item => item.id === selectedFeature.featureId);
   if (feature) {
     feature.root = engine.imageToLocal(object, selectedFeature.rootImage, { asset: letterAsset(object) });
@@ -2509,6 +2614,7 @@ function applySelectedLetterAxisTilt(targetAngle) {
     linked.point = feature ? { ...feature.root } : linked.point;
     linked.tip = feature ? { ...feature.tip } : linked.tip;
   }
+  refreshBoundVectorFeaturePoints(object, feature?.organId || selectedFeature.organId);
   object.correctionHandleIds = ids;
   object.auto = false;
   markObjectModified(object);
@@ -2518,7 +2624,10 @@ function applySelectedLetterAxisTilt(targetAngle) {
     primaryHandleId: selectedFeature.id,
     handleId: selectedFeature.id,
     featureId: selectedFeature.featureId,
-    semanticType: selectedFeature.semanticType
+    semanticType: selectedFeature.semanticType,
+    organId: selectedFeature.organId || null,
+    rootImage: selectedFeature.rootImage,
+    tipImage: result.transformedTip
   };
   renderAll();
   statusText.textContent = `ציר הירך הוטה ל־${target > 0 ? '+' : ''}${fmt(target, 1)}° סביב נקודת היציאה מן הגג`;
@@ -2629,7 +2738,7 @@ function createPhotographedVector(points, workflow = 'copy') {
   const maximumDimension = 2000;
   const maximumPixels = 4_000_000;
   const sampleScale = Math.min(
-    1,
+    2,
     maximumDimension / Math.max(bounds.width, bounds.height),
     Math.sqrt(maximumPixels / Math.max(1, bounds.width * bounds.height))
   );
@@ -2659,7 +2768,10 @@ function createPhotographedVector(points, workflow = 'copy') {
   const trace = globalThis.MEDIDAOT_REGION_VECTOR.vectorizeImageData(
     cropImageData,
     relativePolygon,
-    { maximumAnchors: 260 }
+    {
+      maximumAnchors: 220,
+      tolerance: Math.max(1.5, sampleScale * 1.1)
+    }
   );
   const colors = sampledRegionColors(cropImageData, relativePolygon, trace.threshold);
   const sourceMode = workflow === 'source-region';
@@ -2796,17 +2908,40 @@ function finishLetterAnchorLasso() {
     draw();
     return [];
   }
-  const selected = anchorIdsInsideLasso(allLetterVectorHandles(object), points);
+  const allHandles = allLetterVectorHandles(object);
+  const rawSelected = anchorIdsInsideLasso(allHandles, points);
+  const rawSet = new Set(rawSelected);
+  const semanticOrgans = semanticFeatureHandles(object, allHandles)
+    .filter(handle => (
+      handle.semanticType === 'stem-organ' && handle.topologyStatus === 'bound-organ-subpath' &&
+      (handle.groupIds || []).length >= 2
+    ));
+  const matchedOrgans = semanticOrgans.filter(handle => {
+    const ids = handle.groupIds || [];
+    const overlap = ids.filter(id => rawSet.has(id)).length;
+    return pointInPolygon(handle.point, points) || overlap / ids.length >= .35;
+  });
+  const selected = matchedOrgans.length
+    ? [...new Set(matchedOrgans.flatMap(handle => handle.groupIds || []))]
+    : rawSelected;
+  const primaryOrgan = matchedOrgans.length === 1 ? matchedOrgans[0] : null;
   state.letterVectorSelection = selected.length ? {
     id: object.id,
     handleIds: selected,
     primaryHandleId: selected[0],
-    handleId: selected[0]
+    handleId: selected[0],
+    featureId: primaryOrgan?.featureId || null,
+    semanticType: primaryOrgan?.semanticType || null,
+    organId: primaryOrgan?.organId || null,
+    rootImage: primaryOrgan?.rootImage || null,
+    tipImage: primaryOrgan?.tipImage || null
   } : null;
   object.correctionHandleIds = [...selected];
   syncLetterControls(object);
   statusText.textContent = selected.length
-    ? `נבחרו ${selected.length} נקודות עוגן; גרור אחת מהן כדי להזיז את הקבוצה`
+    ? matchedOrgans.length
+      ? `נבחר${matchedOrgans.length > 1 ? 'ו' : 'ה'} ${matchedOrgans.length} ${matchedOrgans.length > 1 ? 'ירכות שלמות' : 'ירך שלמה'}; גרירה מזיזה רק את תת־המסלול של כל ירך`
+      : `נבחרו ${selected.length} עוגנים מדויקים; גרירה מזיזה את הקבוצה בלי להזיז עוגנים מחוץ לסימון`
     : 'לא נמצאו נקודות עוגן בתוך הסימון';
   draw();
   return selected;
@@ -2999,8 +3134,12 @@ $('letterVectorLevelSelect')?.addEventListener('change', event => {
   syncLetterControls(object);
   draw();
   const messages = {
-    structural: 'דרגת מבנה: אפשר להזיז ולשנות את מסגרת האות, והווקטור המלא נשמר מתחתיה',
-    organs: 'דרגת איברים: כל נקודת שליטה מזיזה קבוצת עוגנים מקומית',
+    structural: isPhotographedVector(object)
+      ? 'דרגת מבנה: מוצגות תחנות אמיתיות במתאר — חיבור, הצטמצמות, התעגלות וסיום'
+      : 'דרגת מבנה: אפשר להזיז ולשנות את מסגרת האות, והווקטור המלא נשמר מתחתיה',
+    organs: isPhotographedVector(object)
+      ? 'דרגת איברים: ירך מזוהה נבחרת כתת־מסלול עצמאי; גרירה אינה משנה את מסלול הבסיס'
+      : 'דרגת איברים: הקפה חופשית בוחרת עוגנים מדויקים; אין חלוקה אוטומטית שרירותית',
     curves: 'דרגת עקומות: מוצגות כל נקודות העוגן ללא עומס ידיות',
     full: 'דרגה מלאה: כל נקודות העוגן וידיות ה־Bézier מוצגות לעריכה מדויקת'
   };

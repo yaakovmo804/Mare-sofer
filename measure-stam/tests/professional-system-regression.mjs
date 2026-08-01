@@ -21,6 +21,110 @@ function loadMasterSystem() {
   return context.MEDIDAOT_MASTER_SYSTEM;
 }
 
+function loadPointerInputRouting() {
+  const source = read('app-1.js');
+  const start = source.indexOf('const penTextEntryBlock');
+  const end = source.indexOf('for (const eventName of', start);
+  assert.ok(start >= 0 && end > start, 'pointer input routing must remain available');
+  const listeners = new Map();
+  const document = {
+    activeElement: null,
+    addEventListener(name, listener) { listeners.set(name, listener); }
+  };
+  class FakeElement {
+    constructor(tagName, { type = null, label = null } = {}) {
+      this.tagName = tagName.toLowerCase();
+      this.type = type;
+      this.label = label;
+      this.control = null;
+      this.blurCount = 0;
+    }
+    getAttribute(name) { return name === 'type' ? this.type : null; }
+    matches(selector) {
+      if (selector === 'input') return this.tagName === 'input';
+      if (selector === 'textarea, [contenteditable="true"]') return this.tagName === 'textarea';
+      return false;
+    }
+    closest(selector) {
+      if (selector === 'textarea, [contenteditable="true"], input') {
+        return ['textarea', 'input'].includes(this.tagName) ? this : null;
+      }
+      if (selector === 'label') return this.tagName === 'label' ? this : this.label;
+      return null;
+    }
+    blur() {
+      this.blurCount++;
+      if (document.activeElement === this) document.activeElement = null;
+    }
+  }
+  const context = vm.createContext({
+    Set,
+    performance: { now: () => 100 },
+    Element: FakeElement,
+    HTMLElement: FakeElement,
+    document,
+    statusText: { textContent: '' }
+  });
+  vm.runInContext(`${source.slice(start, end)}\nthis.routing = { handleDocumentPointerDown, handleBlockedPenFocus, handleBlockedPenClick, clearBlockedPenTextEntry };`, context);
+  return { ...context.routing, FakeElement, document, listeners, statusText: context.statusText };
+}
+
+function loadExportLabelHelpers() {
+  const source = read('app-4.js');
+  const start = source.indexOf('function drawExportScaleNote');
+  const end = source.indexOf('function drawObjectToContext', start);
+  assert.ok(start >= 0 && end > start, 'export label helpers must remain available');
+  const state = { image: { width: 300, height: 300 }, objects: [] };
+  const context = vm.createContext({
+    Math,
+    state,
+    clamp: (value, min, max) => Math.min(max, Math.max(min, value)),
+    midpoint: (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }),
+    polygonCentroid: points => points[0],
+    flattenedAreaPoints: object => object.points
+  });
+  vm.runInContext(`${source.slice(start, end)}\nthis.helpers = { drawExportScaleNote, exportResultLabelPoint };`, context);
+  return context.helpers;
+}
+
+function loadRowAlignmentDrawer() {
+  const source = read('professional-tools.js');
+  const start = source.indexOf('function drawRowAlignmentObject');
+  const end = source.indexOf('function slantCandidateIsLinkedToScan', start);
+  assert.ok(start >= 0 && end > start, 'row alignment drawer must remain available');
+  const labels = [];
+  const context = vm.createContext({
+    Math,
+    semanticColorForObject: () => '#2563eb',
+    imageToScreen: point => ({ ...point }),
+    midpoint: (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }),
+    currentRowDeviation: candidate => ({ value: candidate.deviationPx || 0, unitLabel: 'פיקסלים' }),
+    fmt: value => String(value),
+    label: (...args) => labels.push(args),
+    isResultLabelVisible: object => object.display?.resultLabelVisible !== false
+  });
+  vm.runInContext(`${source.slice(start, end)}\nthis.drawRowAlignmentObject = drawRowAlignmentObject;`, context);
+  return { drawRowAlignmentObject: context.drawRowAlignmentObject, labels };
+}
+
+function loadExportObjectDrawer() {
+  const source = read('app-4.js');
+  const start = source.indexOf('function drawObjectToContext');
+  const end = source.indexOf('function downloadBlob', start);
+  assert.ok(start >= 0 && end > start, 'export object drawer must remain available');
+  const state = { selectedId: null, image: { width: 300, height: 300 }, objects: [] };
+  const context = vm.createContext({
+    Math,
+    state,
+    enforceSemanticStyle() {},
+    hexToRgba: () => 'rgba(0,0,0,0)',
+    exportOverlayUnit: () => 1,
+    isResultLabelVisible: object => object.display?.resultLabelVisible !== false
+  });
+  vm.runInContext(`${source.slice(start, end)}\nthis.drawObjectToContext = drawObjectToContext;`, context);
+  return { drawObjectToContext: context.drawObjectToContext, state };
+}
+
 function loadLetterOrganHelpers() {
   const source = read('letter-tools.js');
   const start = source.indexOf('function representativeOrganHandle');
@@ -112,6 +216,7 @@ function loadSemanticReconcileHelper(handles) {
     Number,
     letterAsset: () => null,
     letterVectorEngine: () => engine,
+    refreshBoundVectorFeaturePoints: () => {},
     distance: (a, b) => Math.hypot(a.x - b.x, a.y - b.y)
   });
   vm.runInContext(`${source.slice(start, end)}\nthis.reconcileSemanticVectorFeatures = reconcileSemanticVectorFeatures;`, context);
@@ -245,11 +350,11 @@ test('the integrated shell exposes composition, vector levels, info and active g
     for (const tool of ['rowAlign', 'circle', 'ellipse']) {
       assert.match(html, new RegExp(`data-tool="${tool}"`));
     }
-    assert.match(html, /master-system\.js\?v=20260801c/);
-    assert.match(html, /professional-tools\.js\?v=20260801c/);
-    assert.match(html, /slant-analyzer\.js\?v=20260801c/);
+    assert.match(html, /master-system\.js\?v=20260801d/);
+    assert.match(html, /professional-tools\.js\?v=20260801d/);
+    assert.match(html, /slant-analyzer\.js\?v=20260801d/);
     assert.ok(
-      html.indexOf('slant-analyzer.js?v=20260801c') < html.indexOf('professional-tools.js?v=20260801c'),
+      html.indexOf('slant-analyzer.js?v=20260801d') < html.indexOf('professional-tools.js?v=20260801d'),
       'the analyzer must load before the professional integration'
     );
     assert.match(html, /id="compositionCanvas"[^>]*tabindex="0"/);
@@ -262,15 +367,21 @@ test('the integrated shell exposes composition, vector levels, info and active g
   }
 });
 
-test('Pencil gating and source-region vector editing remain non-destructive and explicit', () => {
+test('Pencil activates menus while text-entry focus and source-region editing remain explicit', () => {
   const app1 = read('app-1.js');
   const app2 = read('app-2.js');
   const app3 = read('app-3.js');
   const app4 = read('app-4.js');
   const letters = read('letter-tools.js');
   const engine = read('letter-vector-engine.js');
-  assert.match(app1, /event\.pointerType !== 'pen' \|\| precisionSurfaceInPath\(event\)/);
-  assert.match(app1, /stopImmediatePropagation\(\)/);
+  assert.match(app1, /function textEntryControl/);
+  assert.match(app1, /\['text', 'number', 'search', 'email', 'url', 'tel', 'password'\]/);
+  assert.match(app1, /const control = textEntryControl\(event\.target\)/);
+  assert.match(app1, /const activeTextEntry = textEntryControl\(document\.activeElement\)/);
+  assert.match(app1, /activeTextEntry instanceof HTMLElement/);
+  assert.match(app1, /document\.addEventListener\('keydown', clearBlockedPenTextEntry/);
+  assert.doesNotMatch(app1, /precisionSurfaceInPath/);
+  assert.doesNotMatch(app1, /Apple Pencil מיועד למשטח העבודה/);
   assert.match(app1, /event\.detail === 0/);
   assert.match(app3, /\[data-precision-surface\]/);
   assert.match(app2, /isSourceRegionEdit\(hit\.object\)/);
@@ -285,6 +396,48 @@ test('Pencil gating and source-region vector editing remain non-destructive and 
   assert.match(engine, /function tiltObjectHandles/);
   assert.match(engine, /Array\.isArray\(vector\.features\)/);
   assert.match(app4, /drawSourceEditPatches\(context, \{ exportQuality: true \}\)/);
+});
+
+test('Pencil pointer events block only text entry and close an already open text field', () => {
+  const routing = loadPointerInputRouting();
+  const makeEvent = (target, overrides = {}) => ({
+    target,
+    pointerType: 'pen',
+    detail: 1,
+    defaultPrevented: false,
+    stopped: false,
+    composedPath: () => [target],
+    preventDefault() { this.defaultPrevented = true; },
+    stopImmediatePropagation() { this.stopped = true; },
+    ...overrides
+  });
+  const firstText = new routing.FakeElement('input', { type: 'text' });
+  const secondText = new routing.FakeElement('input', { type: 'number' });
+  const menuButton = new routing.FakeElement('button');
+  const slider = new routing.FakeElement('input', { type: 'range' });
+
+  routing.document.activeElement = firstText;
+  const penTextEvent = makeEvent(secondText);
+  routing.handleDocumentPointerDown(penTextEvent);
+  assert.equal(penTextEvent.defaultPrevented, true);
+  assert.equal(firstText.blurCount, 1, 'an already open keyboard field is closed');
+  assert.equal(secondText.blurCount, 1, 'the Pencil target never receives text focus');
+  const penFocus = makeEvent(secondText, { pointerType: undefined });
+  routing.handleBlockedPenFocus(penFocus);
+  assert.equal(penFocus.defaultPrevented, true, 'the focus event synthesized by Pencil is rejected');
+
+  for (const target of [menuButton, slider]) {
+    const event = makeEvent(target);
+    routing.handleDocumentPointerDown(event);
+    assert.equal(event.defaultPrevented, false, 'Pencil keeps menu controls interactive');
+  }
+
+  const fingerEvent = makeEvent(secondText, { pointerType: 'touch' });
+  routing.handleDocumentPointerDown(fingerEvent);
+  assert.equal(fingerEvent.defaultPrevented, false, 'finger text entry remains available');
+  const fingerFocus = makeEvent(secondText, { pointerType: undefined });
+  routing.handleBlockedPenFocus(fingerFocus);
+  assert.equal(fingerFocus.defaultPrevented, false, 'finger focus is not mistaken for Scribble');
 });
 
 test('source replacement mask follows the retained vector and preserves omitted dark components', () => {
@@ -340,6 +493,11 @@ test('professional information and deferred letter families are data, not hidden
   const system = loadMasterSystem();
   const notes = system.defaultMeasurementNotes();
   assert.ok(system.METRICS.every(metric => notes[metric.id]?.length > 0));
+  assert.ok(system.METRICS.every(metric => metric.operationMode && metric.operationLabel),
+    'each card must disclose whether it is manual, assisted, informational or label-only');
+  assert.equal(system.metric('optical-center').operationMode, 'information');
+  assert.equal(system.metric('heights').operationMode, 'manual');
+  assert.equal(system.metric('stems').operationMode, 'label-only');
   assert.deepEqual(
     Array.from(system.LETTER_FAMILIES, family => [family.id, Array.from(family.letters), family.status]),
     [
@@ -349,13 +507,31 @@ test('professional information and deferred letter families are data, not hidden
   );
 });
 
+test('every advertised active metric resolves to a real canvas tool', () => {
+  const system = loadMasterSystem();
+  const html = read('index.html');
+  const app3 = read('app-3.js');
+  const toolIds = new Set([...html.matchAll(/data-tool="([^"]+)"/g)].map(match => match[1]));
+  const messageTable = /function setTool[\s\S]*?const messages = \{([\s\S]*?)\n  \};/.exec(app3)?.[1] || '';
+  for (const match of messageTable.matchAll(/^\s*([a-zA-Z]+):/gm)) toolIds.add(match[1]);
+  toolIds.add('thirds');
+  for (const metric of system.METRICS) {
+    if (['information', 'label-only'].includes(metric.operationMode)) {
+      assert.equal(metric.tool, null, `${metric.id} must not advertise an inactive tool`);
+      continue;
+    }
+    assert.ok(metric.tool, `${metric.id} must name the tool it activates`);
+    assert.ok(toolIds.has(metric.tool), `${metric.id} points to missing tool ${metric.tool}`);
+  }
+});
+
 test('local information persistence gives saved text priority and correction keeps semantic linkage', () => {
   const source = read('professional-tools.js');
   assert.match(source, /\.\.\.professionalSuite\.descriptions,[\s\S]*\.\.\.savedDescriptions/);
   assert.match(source, /medidaot-professional-info/);
   assert.match(source, /featureSelectionMethod/);
   assert.match(source, /semanticMetricId:\s*measurement\.semanticMetricId/);
-  assert.match(source, /nearest-organ-group/);
+  assert.match(source, /nearest-semantic-stem-organ/);
   assert.match(source, /function selectedFeatureAngle/);
   assert.match(source, /currentFeatureAngleDeg/);
   assert.match(source, /measurementAngleDeg/);
@@ -445,7 +621,7 @@ test('compound information and row candidates describe the action that is actual
   const app2 = read('app-2.js');
   assert.match(professional, /className = 'metric-info-stack'/);
   assert.match(professional, /openMetricInfo\(metric\.id\)/);
-  assert.match(professional, /אחרת תיבחר קבוצת האיברים הקרובה למדידה/);
+  assert.match(professional, /אחרת תיבחר רק ירך שזוהתה כאיבר מתאר/);
   assert.match(app2, /מועמדים ממתינים לסיווג/);
 });
 
@@ -466,6 +642,96 @@ test('composition is isolated, undoable and exported without diagnostic overlays
   assert.match(app4, /handleCompositionKeyboardShortcut/);
   assert.match(app4, /signedAngleDeg/);
   assert.match(app4, /refreshCompositionSourceAvailability/);
+});
+
+test('source image export includes the same visible measurement result labels as the canvas', () => {
+  const app4 = read('app-4.js');
+  assert.match(app4, /function exportResultLabelPoint/);
+  assert.match(app4, /isResultLabelVisible\(object\)/);
+  assert.match(app4, /measurementResultModel\(object\)\.canvasText/);
+  assert.match(app4, /drawExportScaleNote\(/);
+  assert.match(app4, /placement === 'below'/);
+  assert.match(app4, /candidateLabel = candidate\.eligible && hasBaseline/);
+  assert.match(app4, /currentRowDeviation\(candidate\)/);
+  assert.doesNotMatch(app4, /'slantScan', 'rowAlign'\]\.includes\(object\.type\)/);
+});
+
+test('export label placement keeps below-label measurements outside their geometry', () => {
+  const { drawExportScaleNote, exportResultLabelPoint } = loadExportLabelHelpers();
+  const placements = [];
+  const context = {
+    save() {}, restore() {}, setLineDash() {}, strokeRect() {}, fillText() {},
+    measureText: () => ({ width: 40 }),
+    fillRect(x, y, width, height) { placements.push({ x, y, width, height }); }
+  };
+  drawExportScaleNote(context, { x: 100, y: 100 }, 'above', '#000', 1, 'above');
+  drawExportScaleNote(context, { x: 100, y: 100 }, 'below', '#000', 1, 'below');
+  assert.equal(placements[0].y, 72);
+  assert.equal(placements[1].y, 108);
+  const ellipse = exportResultLabelPoint({
+    type: 'ellipse',
+    points: [{ x: 20, y: 20 }, { x: 80, y: 20 }, { x: 80, y: 70 }, { x: 20, y: 70 }]
+  });
+  assert.equal(ellipse.placement, 'below');
+  assert.equal(ellipse.point.y, 70);
+  const kastel = exportResultLabelPoint({
+    type: 'kastel',
+    points: [{ x: 10, y: 10 }, { x: 90, y: 10 }, { x: 90, y: 90 }, { x: 10, y: 90 }]
+  });
+  assert.equal(kastel.placement, 'below');
+  assert.equal(kastel.point.y, 90);
+});
+
+test('row alignment candidate labels obey the same visible toggle on canvas and export', () => {
+  const { drawRowAlignmentObject, labels } = loadRowAlignmentDrawer();
+  const context = {
+    save() {}, restore() {}, setLineDash() {}, beginPath() {}, moveTo() {}, lineTo() {}, closePath() {}, stroke() {}
+  };
+  const object = {
+    lineWidth: 3,
+    points: [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 50 }, { x: 0, y: 50 }],
+    display: { resultLabelVisible: false },
+    rowAlignment: {
+      baselineY: 42,
+      candidates: [{ x1: 20, x2: 40, y: 40, eligible: true, confirmed: true, letter: 'ב', deviationPx: 2 }]
+    }
+  };
+  drawRowAlignmentObject(context, object, { selected: false, draft: false, points: object.points });
+  assert.equal(labels.length, 0, 'hidden result labels must stay hidden on the canvas');
+  object.display.resultLabelVisible = true;
+  drawRowAlignmentObject(context, object, { selected: false, draft: false, points: object.points });
+  assert.equal(labels.length, 1, 'one visible candidate produces one canvas label');
+});
+
+test('an unselected thirds probe exports its visible dot instead of an orphan label', () => {
+  const { drawObjectToContext } = loadExportObjectDrawer();
+  const calls = { arcs: 0, fills: 0 };
+  const context = {
+    save() {}, restore() {}, beginPath() {}, setLineDash() {},
+    arc() { calls.arcs++; }, fill() { calls.fills++; }
+  };
+  drawObjectToContext(context, {
+    id: 7,
+    type: 'thirds',
+    points: [{ x: 40, y: 50 }],
+    color: '#16a34a',
+    lineWidth: 3,
+    display: { resultLabelVisible: false }
+  });
+  assert.deepEqual(calls, { arcs: 1, fills: 1 });
+});
+
+test('touch targets and professional cards disclose their actual interaction mode', () => {
+  const styles = read('styles.css');
+  const system = loadMasterSystem();
+  assert.match(styles, /metric-info[^}]*min-width:44px[^}]*min-height:44px/);
+  assert.match(styles, /button,[^}]*min-block-size:44px/);
+  assert.match(styles, /technical-details summary[^}]*min-block-size:44px/);
+  assert.match(system.metric('slants-parallels').measurementDescription, /תחום סריקה/);
+  for (const id of ['roofs', 'seats', 'stems']) {
+    assert.equal(system.metric(id).operationMode, 'label-only');
+    assert.match(system.metric(id).measurementDescription, /הכרטיס אינו מפעיל כלי/);
+  }
 });
 
 test('asynchronous source loads are generation-guarded and row deviations use current calibration', () => {
@@ -490,10 +756,11 @@ test('four vector control levels keep a full editable source under the coarse vi
   assert.match(source, /function organLevelVectorHandles/);
   assert.match(source, /groupIds:\s*group\.map/);
   assert.match(source, /vectorDetailLevel:\s*'structural'/);
-  assert.match(source, /maximumAnchors:\s*260/);
+  assert.match(source, /maximumAnchors:\s*220/);
+  assert.match(source, /sampleScale = Math\.min\([\s\S]*?2,/);
 });
 
-test('organ controls contain contiguous anchors from one vector path only', () => {
+test('organ controls expose only explicit organ definitions and never invent sqrt groups', () => {
   const { organLevelVectorHandles } = loadLetterOrganHelpers();
   const handles = [];
   for (let commandIndex = 0; commandIndex < 9; commandIndex++) {
@@ -519,21 +786,24 @@ test('organ controls contain contiguous anchors from one vector path only', () =
     point: { x: 50, y: 5 }
   });
 
-  const groups = Array.from(organLevelVectorHandles(handles));
-  assert.equal(groups.length, 6);
-  for (const group of groups) {
-    const members = Array.from(group.groupIds, id => {
-      const match = /^p(\d+):c(\d+):anchor$/.exec(id);
-      assert.ok(match, `unexpected member ${id}`);
-      return { pathIndex: +match[1], commandIndex: +match[2] };
-    });
-    assert.equal(new Set(members.map(member => member.pathIndex)).size, 1, 'an organ group may not mix paths');
-    for (let index = 1; index < members.length; index++) {
-      assert.equal(members[index].commandIndex, members[index - 1].commandIndex + 1, 'organ members must be contiguous in path order');
-    }
-    assert.match(group.groupLabel, new RegExp(`^path:${members[0].pathIndex}:run:\\d+:group:\\d+$`));
-  }
-  assert.ok(groups.some(group => Array.from(group.groupIds).join(',') === 'p0:c12:anchor,p0:c13:anchor'));
+  assert.deepEqual(Array.from(organLevelVectorHandles(handles)), [], 'no topology means no alleged organs');
+  assert.deepEqual(Array.from(organLevelVectorHandles(handles, [{
+    id: 'legacy-group', type: 'stem', topologyStatus: 'bound-contour',
+    anchorIds: ['p0:c1:anchor', 'p0:c2:anchor']
+  }])), [], 'a legacy flat anchor group is not advertised as an independent organ');
+  const definitions = [{
+    id: 'stem-right', type: 'stem', label: 'ירך ימנית', topologyStatus: 'exclusive-contour-arc',
+    paths: [{ rule: 'nonzero', commands: [{ type: 'M', x: 0, y: 0 }, { type: 'Z' }] }],
+    anchorIds: ['p0:c1:anchor', 'p0:c2:anchor', 'p0:c12:anchor', 'missing-anchor']
+  }];
+  const groups = Array.from(organLevelVectorHandles(handles, definitions));
+  assert.equal(groups.length, 1);
+  assert.deepEqual(Array.from(groups[0].groupIds), ['p0:c1:anchor', 'p0:c2:anchor', 'p0:c12:anchor']);
+  assert.equal(groups[0].organId, 'stem-right');
+  assert.equal(groups[0].semanticType, 'stem-organ');
+  assert.equal(groups[0].topologyStatus, 'exclusive-contour-arc');
+  const source = read('letter-tools.js');
+  assert.doesNotMatch(source, /Math\.round\(Math\.sqrt\(run\.length\)\)/);
 });
 
 test('organ-level freeform lasso selects exact full anchors instead of coarse representatives', () => {
@@ -551,7 +821,9 @@ test('organ-level freeform lasso selects exact full anchors instead of coarse re
     ['p0:c0:anchor', 'p0:c1:anchor', 'p1:c0:anchor']
   );
   const source = read('letter-tools.js');
-  assert.match(source, /anchorIdsInsideLasso\(allLetterVectorHandles\(object\), points\)/);
+  assert.match(source, /anchorIdsInsideLasso\(allHandles, points\)/);
+  assert.match(source, /semanticType === 'stem-organ'/);
+  assert.match(source, /overlap \/ ids\.length >= \.35/);
 });
 
 test('roof-stem junction editing uses an opposing outline pair instead of jumping one edge to the center', () => {

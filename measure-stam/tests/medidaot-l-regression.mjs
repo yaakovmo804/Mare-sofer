@@ -6,8 +6,8 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
-const TEST_VERSION = '20260801c';
-const TEST_CACHE_DATE = '2026-08-01c';
+const TEST_VERSION = '20260801d';
+const TEST_CACHE_DATE = '2026-08-01d';
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const appDirectory = path.resolve(testDirectory, '..');
 
@@ -82,6 +82,113 @@ function makeLetterObject(letter, layoutMode = 'source-cell-v2') {
       { x: 719.1, y: 841.64 }
     ]
   };
+}
+
+function makeIndependentOrganObject() {
+  const organId = 'stem-a';
+  const organAnchorIds = [0, 1, 2, 3].map(
+    commandIndex => `o:${organId}:p0:c${commandIndex}:anchor`
+  );
+  const sourcePaths = [{
+    rule: 'evenodd',
+    commands: [
+      { type: 'M', x: 10, y: 10 },
+      { type: 'L', x: 90, y: 10 },
+      { type: 'L', x: 90, y: 20 },
+      { type: 'L', x: 60, y: 20 },
+      { type: 'C', x1: 59, y1: 45, x2: 59, y2: 70, x: 58, y: 90 },
+      { type: 'C', x1: 53, y1: 94, x2: 47, y2: 94, x: 42, y: 90 },
+      { type: 'C', x1: 41, y1: 70, x2: 41, y2: 45, x: 40, y: 20 },
+      { type: 'L', x: 10, y: 20 },
+      { type: 'Z' }
+    ]
+  }];
+  const basePaths = [{
+    rule: 'evenodd',
+    commands: [
+      { type: 'M', x: 10, y: 10 },
+      { type: 'L', x: 90, y: 10 },
+      { type: 'L', x: 90, y: 20 },
+      { type: 'L', x: 60, y: 20 },
+      { type: 'L', x: 40, y: 20 },
+      { type: 'L', x: 10, y: 20 },
+      { type: 'Z' }
+    ]
+  }];
+  const organPaths = [{
+    rule: 'evenodd',
+    commands: [
+      { type: 'M', x: 40, y: 20 },
+      { type: 'C', x1: 41, y1: 45, x2: 41, y2: 70, x: 42, y: 90 },
+      { type: 'C', x1: 47, y1: 94, x2: 53, y2: 94, x: 58, y: 90 },
+      { type: 'C', x1: 59, y1: 70, x2: 59, y2: 45, x: 60, y: 20 },
+      { type: 'Z' }
+    ]
+  }];
+  return {
+    id: 'independent-organ-object',
+    type: 'letterTemplate',
+    template: { kind: 'image-region-vector', tradition: 'custom', layoutMode: 'tight-v1' },
+    points: [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 }],
+    letterEditAnchors: true,
+    vectorDetailLevel: 'organs',
+    letterVector: {
+      schemaVersion: 3,
+      sourceKey: 'photographed-selection', letter: '', tradition: 'custom',
+      style: 'photographed-letter', slug: 'photographed-selection',
+      viewBox: [0, 0, 100, 100], weight: 1, revision: 1,
+      paths: sourcePaths,
+      composition: {
+        schemaVersion: 3,
+        mode: 'organ-subpaths-v1',
+        basePaths,
+        connectorMode: 'paired-boundary-port-bridge'
+      },
+      handleCounts: { anchors: 10, controls: 6, total: 16 },
+      featureCoordinateSpace: 'vector-local',
+      featureAngleConvention: 'signed-clockwise-from-vertical',
+      features: [{
+        id: 'stem-axis-a', type: 'stem-axis', label: 'ציר ירך', organId,
+        topologyStatus: 'bound-organ-subpath',
+        anchorIds: organAnchorIds.slice(), point: { x: 50, y: 20 },
+        root: { x: 50, y: 20 }, tip: { x: 50, y: 90 }, angleDeg: 0
+      }, {
+        id: organId, type: 'stem-organ', label: 'ירך שלמה', organId, stemId: 'stem-axis-a',
+        topologyStatus: 'bound-organ-subpath',
+        anchorIds: organAnchorIds.slice(), point: { x: 50, y: 55 },
+        root: { x: 50, y: 20 }, tip: { x: 50, y: 90 }
+      }],
+      organs: [{
+        id: organId,
+        type: 'stem',
+        paths: organPaths,
+        anchorIds: organAnchorIds,
+        boundaryPorts: [{
+          id: 'root-left', role: 'root-left',
+          sourceAnchorId: 'p0:c4:anchor', organAnchorId: organAnchorIds[0],
+          sourcePoint: { x: 40, y: 20 }
+        }, {
+          id: 'root-right', role: 'root-right',
+          sourceAnchorId: 'p0:c3:anchor', organAnchorId: organAnchorIds[3],
+          sourcePoint: { x: 60, y: 20 }
+        }],
+        junction: {
+          id: 'stem-a-junction',
+          type: 'paired-boundary-port',
+          sourcePortIds: ['p0:c4:anchor', 'p0:c3:anchor'],
+          organPortIds: [organAnchorIds[0], organAnchorIds[3]]
+        },
+        transformMode: 'rigid-subpath',
+        topologyStatus: 'exclusive-contour-arc'
+      }]
+    }
+  };
+}
+
+function makeLassoOrganObject() {
+  const object = makeIndependentOrganObject();
+  object.id = 'lasso-organ-object';
+  return object;
 }
 
 function approximateInkArea(paths, cubicSteps = 18) {
@@ -600,7 +707,7 @@ test('semantic vector metadata clones independently and a stem tilts around its 
     }
   };
   const clone = vector.cloneVectorData(object);
-  assert.equal(clone.schemaVersion, 2);
+  assert.equal(clone.schemaVersion, 3, 'legacy schema 2 metadata must clone into the current schema');
   assert.equal(clone.featureCoordinateSpace, 'vector-local');
   assert.equal(clone.featureAngleConvention, 'signed-clockwise-from-vertical');
   assert.equal(clone.features[0].type, 'stem-axis');
@@ -616,7 +723,9 @@ test('semantic vector metadata clones independently and a stem tilts around its 
     rootImage: root.point,
     tipImage: tip.point,
     pivotImage: root.point,
-    moveAdjacentControls: true
+    moveAdjacentControls: true,
+    moveInternalControlsOnly: true,
+    transformMode: 'rotate'
   });
   const after = vector.enumerateHandles(object, { coordinateSpace: 'image' });
   const nextRoot = after.find(handle => handle.id === root.id);
@@ -624,8 +733,344 @@ test('semantic vector metadata clones independently and a stem tilts around its 
   closeTo(nextRoot.point.x, root.point.x, 1e-7, 'roof junction x must remain fixed');
   closeTo(nextRoot.point.y, root.point.y, 1e-7, 'roof junction y must remain fixed');
   closeTo(nextTip.point.x, nextRoot.point.x, 1e-7, 'zero-degree stem must end on the root axis');
+  closeTo(
+    Math.hypot(nextTip.point.x - nextRoot.point.x, nextTip.point.y - nextRoot.point.y),
+    Math.hypot(tip.point.x - root.point.x, tip.point.y - root.point.y),
+    1e-7,
+    'rigid axis rotation must preserve stem length'
+  );
   assert.equal(result.targetAngleDeg, 0);
+  assert.equal(result.transformMode, 'rotate');
   assert.ok(result.movedCoordinateCount >= 4, 'the stem and adjacent Bézier controls must tilt together');
+});
+
+test('a detected organ rotates rigidly while anchors outside the organ remain fixed', () => {
+  const object = {
+    id: 'rigid-organ',
+    type: 'letterTemplate',
+    template: { kind: 'image-region-vector', tradition: 'custom', layoutMode: 'tight-v1' },
+    points: [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 }],
+    letterVector: {
+      schemaVersion: 3,
+      sourceKey: 'photographed-selection', letter: '', tradition: 'custom',
+      style: 'photographed-letter', slug: 'photographed-selection',
+      viewBox: [0, 0, 100, 100], weight: 1, revision: 1,
+      paths: [{
+        rule: 'evenodd',
+        commands: [
+          { type: 'M', x: 10, y: 10 },
+          { type: 'C', x1: 20, y1: 10, x2: 36, y2: 18, x: 40, y: 20 },
+          { type: 'C', x1: 41, y1: 42, x2: 41, y2: 70, x: 42, y: 90 },
+          { type: 'C', x1: 47, y1: 94, x2: 53, y2: 94, x: 58, y: 90 },
+          { type: 'C', x1: 59, y1: 70, x2: 59, y2: 42, x: 60, y: 20 },
+          { type: 'C', x1: 64, y1: 18, x2: 80, y2: 10, x: 90, y: 10 },
+          { type: 'Z' }
+        ]
+      }],
+      handleCounts: { anchors: 6, controls: 10, total: 16 },
+      features: [],
+      organs: [{
+        id: 'stem-organ', type: 'stem',
+        anchorIds: ['p0:c1:anchor', 'p0:c2:anchor', 'p0:c3:anchor', 'p0:c4:anchor']
+      }]
+    }
+  };
+  const selectedIds = object.letterVector.organs[0].anchorIds;
+  const before = vector.enumerateHandles(object, { coordinateSpace: 'image' });
+  const beforeMap = new Map(before.map(handle => [handle.id, handle.point]));
+  const mean = ids => ids.reduce((sum, id) => ({
+    x: sum.x + beforeMap.get(id).x / ids.length,
+    y: sum.y + beforeMap.get(id).y / ids.length
+  }), { x: 0, y: 0 });
+  const root = mean(['p0:c1:anchor', 'p0:c4:anchor']);
+  const tip = mean(['p0:c2:anchor', 'p0:c3:anchor']);
+  const pairDistances = [];
+  for (let first = 0; first < selectedIds.length; first++) {
+    for (let second = first + 1; second < selectedIds.length; second++) {
+      pairDistances.push([
+        selectedIds[first], selectedIds[second],
+        Math.hypot(
+          beforeMap.get(selectedIds[first]).x - beforeMap.get(selectedIds[second]).x,
+          beforeMap.get(selectedIds[first]).y - beforeMap.get(selectedIds[second]).y
+        )
+      ]);
+    }
+  }
+  vector.tiltObjectHandles(object, selectedIds, 20, {
+    rootImage: root,
+    tipImage: tip,
+    pivotImage: root,
+    currentAngleDeg: 0,
+    moveAdjacentControls: true,
+    moveInternalControlsOnly: true,
+    transformMode: 'rotate'
+  });
+  const after = vector.enumerateHandles(object, { coordinateSpace: 'image' });
+  const afterMap = new Map(after.map(handle => [handle.id, handle.point]));
+  for (const [first, second, expected] of pairDistances) {
+    closeTo(
+      Math.hypot(afterMap.get(first).x - afterMap.get(second).x, afterMap.get(first).y - afterMap.get(second).y),
+      expected,
+      1e-7,
+      `${first}/${second} distance must stay rigid`
+    );
+  }
+  for (const externalId of ['p0:c0:anchor', 'p0:c5:anchor']) {
+    closeTo(afterMap.get(externalId).x, beforeMap.get(externalId).x, 1e-7, `${externalId} x must not move`);
+    closeTo(afterMap.get(externalId).y, beforeMap.get(externalId).y, 1e-7, `${externalId} y must not move`);
+  }
+});
+
+test('the public vector engine and render payload advertise contour topology schema v3', () => {
+  assert.equal(vector.vectorSchemaVersion, 3, 'the public engine schema must match photographed vectors');
+  const object = makeIndependentOrganObject();
+  const render = vector.getRenderVector(object);
+  assert.equal(render.schemaVersion, 3);
+  assert.equal(render.paths.length, 3, 'rendering composes the base, organ and explicit junction bridge');
+  assert.equal(JSON.stringify(render.paths[0]), JSON.stringify(object.letterVector.composition.basePaths[0]));
+  assert.equal(JSON.stringify(render.paths[1]), JSON.stringify(object.letterVector.organs[0].paths[0]));
+  assert.equal(render.paths[2].commands.at(-1).type, 'Z', 'the junction bridge is a closed fill path');
+  assert.equal(vector.stats(object).schemaVersion, 3);
+});
+
+test('saved schema v1 and v2 vectors migrate canonically to v3 without changing source contours', () => {
+  const paths = [{
+    rule: 'evenodd',
+    commands: [
+      { type: 'M', x: 10, y: 10 },
+      { type: 'C', x1: 20, y1: 10, x2: 40, y2: 80, x: 50, y: 90 },
+      { type: 'L', x: 10, y: 90 },
+      { type: 'Z' }
+    ]
+  }];
+  const legacyVectors = [1, 2].map(schemaVersion => ({
+    schemaVersion,
+    sourceKey: 'photographed-selection', letter: '', tradition: 'custom',
+    style: 'photographed-letter', slug: 'photographed-selection',
+    viewBox: [0, 0, 100, 100], weight: 1, revision: 4,
+    paths: structuredClone(paths),
+    ...(schemaVersion === 2 ? {
+      featureCoordinateSpace: 'vector-local',
+      featureAngleConvention: 'signed-clockwise-from-vertical',
+      features: [{
+        id: 'legacy-stem', type: 'stem-axis', label: 'ציר ירך',
+        point: { x: 10, y: 10 }, root: { x: 10, y: 10 }, tip: { x: 50, y: 90 }
+      }]
+    } : {})
+  }));
+
+  assert.equal(typeof vector.migrateVectorData, 'function', 'schema upgrades need one public migration entry point');
+  const migrated = legacyVectors.map(letterVector => vector.migrateVectorData(letterVector));
+
+  assert.deepEqual(
+    migrated.map(letterVector => letterVector.schemaVersion),
+    [3, 3],
+    'both old editable schemas must enter the current in-memory representation'
+  );
+  migrated.forEach((letterVector, index) => {
+    assert.equal(
+      JSON.stringify(letterVector.paths),
+      JSON.stringify(paths),
+      `schema ${index + 1} migration must preserve the immutable source contour`
+    );
+    assert.deepEqual(JSON.parse(JSON.stringify(letterVector.migration)), {
+      fromSchemaVersion: index + 1,
+      toSchemaVersion: 3,
+      mode: 'legacy-flat-vectors'
+    });
+  });
+  assert.equal(migrated[1].features[0].id, 'legacy-stem', 'v2 semantic metadata must survive migration');
+  assert.equal(legacyVectors[0].schemaVersion, 1, 'migration must not mutate the loaded snapshot');
+  assert.equal(legacyVectors[1].schemaVersion, 2, 'migration must not mutate the loaded snapshot');
+});
+
+test('translating an organ changes only its independent subpath and preserves source contours', () => {
+  const object = makeIndependentOrganObject();
+  const organ = object.letterVector.organs[0];
+  const sourceBefore = JSON.stringify(object.letterVector.paths);
+  const remainderBefore = JSON.stringify(object.letterVector.composition.basePaths);
+  const organBefore = JSON.stringify(organ.paths);
+  const handlesBefore = vector.enumerateHandles(object, { coordinateSpace: 'image' });
+  const byIdBefore = new Map(handlesBefore.map(handle => [handle.id, handle.point]));
+  for (const anchorId of organ.anchorIds) {
+    assert.ok(byIdBefore.has(anchorId), `${anchorId} must enumerate from organs[].paths`);
+  }
+
+  const delta = { x: 13, y: -7 };
+  vector.translateObjectHandles(object, organ.anchorIds, delta, {
+    moveAdjacentControls: true,
+    moveInternalControlsOnly: true
+  });
+
+  assert.equal(JSON.stringify(object.letterVector.paths), sourceBefore,
+    'organ translation must not rewrite the photographed source contour');
+  assert.equal(JSON.stringify(object.letterVector.composition.basePaths), remainderBefore,
+    'organ translation must not rewrite the static render remainder');
+  assert.notEqual(JSON.stringify(object.letterVector.organs[0].paths), organBefore,
+    'the independent organ geometry must receive the translation');
+  const byIdAfter = new Map(vector.enumerateHandles(object, { coordinateSpace: 'image' })
+    .map(handle => [handle.id, handle.point]));
+  for (const anchorId of organ.anchorIds) {
+    closeTo(byIdAfter.get(anchorId).x - byIdBefore.get(anchorId).x, delta.x, 1e-7, `${anchorId} x delta`);
+    closeTo(byIdAfter.get(anchorId).y - byIdBefore.get(anchorId).y, delta.y, 1e-7, `${anchorId} y delta`);
+  }
+});
+
+test('rotating an organ is rigid and leaves the source contour and remainder byte-identical', () => {
+  const object = makeIndependentOrganObject();
+  const organ = object.letterVector.organs[0];
+  const sourceBefore = JSON.stringify(object.letterVector.paths);
+  const remainderBefore = JSON.stringify(object.letterVector.composition.basePaths);
+  const organBefore = JSON.stringify(organ.paths);
+  const handlesBefore = vector.enumerateHandles(object, { coordinateSpace: 'image' });
+  const byIdBefore = new Map(handlesBefore.map(handle => [handle.id, handle.point]));
+  for (const anchorId of organ.anchorIds) {
+    assert.ok(byIdBefore.has(anchorId), `${anchorId} must enumerate from organs[].paths`);
+  }
+  const pairDistances = [];
+  for (let first = 0; first < organ.anchorIds.length; first++) {
+    for (let second = first + 1; second < organ.anchorIds.length; second++) {
+      const firstPoint = byIdBefore.get(organ.anchorIds[first]);
+      const secondPoint = byIdBefore.get(organ.anchorIds[second]);
+      pairDistances.push([
+        organ.anchorIds[first], organ.anchorIds[second],
+        Math.hypot(firstPoint.x - secondPoint.x, firstPoint.y - secondPoint.y)
+      ]);
+    }
+  }
+
+  vector.tiltObjectHandles(object, organ.anchorIds, 18, {
+    rootImage: { x: 50, y: 20 },
+    tipImage: { x: 50, y: 90 },
+    pivotImage: { x: 50, y: 20 },
+    currentAngleDeg: 0,
+    moveAdjacentControls: true,
+    moveInternalControlsOnly: true,
+    transformMode: 'rotate'
+  });
+
+  assert.equal(JSON.stringify(object.letterVector.paths), sourceBefore,
+    'organ rotation must not rewrite the photographed source contour');
+  assert.equal(JSON.stringify(object.letterVector.composition.basePaths), remainderBefore,
+    'organ rotation must not rewrite the static render remainder');
+  assert.notEqual(JSON.stringify(object.letterVector.organs[0].paths), organBefore,
+    'the independent organ geometry must receive the rotation');
+  const byIdAfter = new Map(vector.enumerateHandles(object, { coordinateSpace: 'image' })
+    .map(handle => [handle.id, handle.point]));
+  for (const [firstId, secondId, expectedDistance] of pairDistances) {
+    const firstPoint = byIdAfter.get(firstId);
+    const secondPoint = byIdAfter.get(secondId);
+    closeTo(
+      Math.hypot(firstPoint.x - secondPoint.x, firstPoint.y - secondPoint.y),
+      expectedDistance,
+      1e-7,
+      `${firstId}/${secondId} must retain rigid distance`
+    );
+  }
+});
+
+test('lasso selection retains organ feature metadata when rebuilt as the next drag handle', () => {
+  const object = makeLassoOrganObject();
+  const state = {
+    objects: [object],
+    selectedId: object.id,
+    letterVectorSelection: null,
+    letterVectorLasso: {
+      id: object.id,
+      points: [
+        { x: 35, y: 15 }, { x: 65, y: 15 },
+        { x: 65, y: 96 }, { x: 35, y: 96 }
+      ]
+    }
+  };
+  const pointInPolygon = (point, polygon) => {
+    let inside = false;
+    for (let index = 0, previous = polygon.length - 1; index < polygon.length; previous = index++) {
+      const first = polygon[index];
+      const second = polygon[previous];
+      const crosses = (first.y > point.y) !== (second.y > point.y) &&
+        point.x < (second.x - first.x) * (point.y - first.y) /
+          ((second.y - first.y) || Number.EPSILON) + first.x;
+      if (crosses) inside = !inside;
+    }
+    return inside;
+  };
+  const toolsContext = vm.createContext({
+    console,
+    Map,
+    WeakMap,
+    Set,
+    Math,
+    Number,
+    Object,
+    Array,
+    state,
+    distance: (first, second) => Math.hypot(second.x - first.x, second.y - first.y),
+    midpoint: (first, second) => ({ x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 }),
+    pointInPolygon,
+    isLetterTemplate: candidate => candidate?.type === 'letterTemplate',
+    allLetterVectorHandles: candidate => vector.enumerateHandles(candidate, { coordinateSpace: 'image' }),
+    letterVectorEngine: () => vector,
+    letterAsset: () => null,
+    MASTER_SYSTEM: {
+      signedVerticalAngle: (root, tip) => Math.atan2(tip.x - root.x, tip.y - root.y) * 180 / Math.PI
+    },
+    $: () => ({ classList: { remove() {} } }),
+    statusText: { textContent: '' },
+    syncLetterControls() {},
+    draw() {}
+  });
+  toolsContext.globalThis = toolsContext;
+  const source = readAppFile('letter-tools.js');
+  const helpersStart = source.indexOf('function representativeOrganHandle(');
+  const helpersEnd = source.indexOf('\nfunction drawLetterVectorHandles(', helpersStart);
+  const finishStart = source.indexOf('function finishLetterAnchorLasso(');
+  const finishEnd = source.indexOf('\nfunction runScheduledLetterWeightRender(', finishStart);
+  assert.ok(helpersStart >= 0 && helpersEnd > helpersStart, 'vector handle helper block must be present');
+  assert.ok(finishStart >= 0 && finishEnd > finishStart, 'lasso completion function must be present');
+  vm.runInContext(source.slice(helpersStart, helpersEnd), toolsContext, {
+    filename: 'letter-tools-vector-handles.js'
+  });
+  vm.runInContext(source.slice(finishStart, finishEnd), toolsContext, {
+    filename: 'letter-tools-lasso-finish.js'
+  });
+
+  const selectedIds = toolsContext.finishLetterAnchorLasso();
+  assert.equal(selectedIds.length, 4, 'the lasso must select the complete semantic organ');
+  const lassoSelection = JSON.parse(JSON.stringify(state.letterVectorSelection));
+  assert.deepEqual({
+    featureId: lassoSelection.featureId,
+    semanticType: lassoSelection.semanticType,
+    organId: lassoSelection.organId
+  }, {
+    featureId: 'stem-a',
+    semanticType: 'stem-organ',
+    organId: 'stem-a'
+  });
+  assert.ok(lassoSelection.rootImage && lassoSelection.tipImage,
+    'lasso selection must retain the organ axis endpoints');
+
+  const rebuiltHandles = toolsContext.letterVectorHandles(object);
+  const dragHandle = rebuiltHandles.find(handle => handle.groupLabel?.startsWith('custom:'));
+  assert.ok(dragHandle, 'the selected anchor group must be rebuilt for the next pointer drag');
+  const dragMetadata = JSON.parse(JSON.stringify({
+    featureId: dragHandle.featureId ?? null,
+    semanticType: dragHandle.semanticType ?? null,
+    organId: dragHandle.organId ?? null,
+    rootImage: dragHandle.rootImage ?? null,
+    tipImage: dragHandle.tipImage ?? null
+  }));
+  assert.deepEqual(
+    dragMetadata,
+    {
+      featureId: lassoSelection.featureId,
+      semanticType: lassoSelection.semanticType,
+      organId: lassoSelection.organId,
+      rootImage: lassoSelection.rootImage,
+      tipImage: lassoSelection.tipImage
+    },
+    'lasso -> hit-test -> drag must not erase the semantic organ identity or axis endpoints'
+  );
 });
 
 test('weight changes ink while preserving the glyph outer size at .55, 1, and 1.45', () => {
@@ -1316,6 +1761,7 @@ test('photographed vector source links round-trip through stable project identif
   const persistenceContext = vm.createContext({
     console,
     Map,
+    WeakMap,
     Set,
     Date,
     Math,
@@ -1331,6 +1777,9 @@ test('photographed vector source links round-trip through stable project identif
     RangeError,
     TextEncoder,
     Uint8Array,
+    Uint32Array,
+    Int32Array,
+    Float64Array,
     structuredClone,
     $: () => element,
     window: { addEventListener: noop },
@@ -1349,9 +1798,50 @@ test('photographed vector source links round-trip through stable project identif
   persistenceContext.globalThis = persistenceContext;
   vm.runInContext(readAppFile('master-system.js'), persistenceContext, { filename: 'master-system.js' });
   persistenceContext.MASTER_SYSTEM = persistenceContext.MEDIDAOT_MASTER_SYSTEM;
+  vm.runInContext(readAppFile('letter-vector-engine.js'), persistenceContext, { filename: 'letter-vector-engine.js' });
   vm.runInContext(readAppFile('app-4.js'), persistenceContext, { filename: 'app-4.js' });
   persistenceContext.measurementGeometry = () => ({ type: 'polygon', points: [] });
   persistenceContext.measurementMetrics = () => ({});
+  persistenceContext.mergeFormula = formula => structuredClone(formula || {});
+  persistenceContext.normalizeQuadPoints = points => points;
+  persistenceContext.enforceSemanticStyle = () => {};
+  persistenceContext.normalizeLetterTemplateObject = object => {
+    if ((+object.letterVector?.schemaVersion || 1) < persistenceContext.MEDIDAOT_VECTOR_ENGINE.vectorSchemaVersion) {
+      object.letterVector = persistenceContext.MEDIDAOT_VECTOR_ENGINE.migrateVectorData(object.letterVector);
+    }
+    return object;
+  };
+
+  const schema3Project = {
+    format: 'mirror-sofer.measure-stam.project',
+    schemaVersion: '3.0.0',
+    project: { id: 'schema3-project', title: 'legacy fixture' },
+    formula: { nibPx: 8 },
+    measurements: [{
+      id: 'legacy-vector-object',
+      uid: 'legacy-vector-object',
+      type: 'letterTemplate',
+      points: [{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 60 }, { x: 0, y: 60 }],
+      template: { kind: 'image-region-vector', tradition: 'custom' },
+      letterVector: {
+        schemaVersion: 1,
+        sourceKey: 'photographed-selection', letter: '', tradition: 'custom',
+        style: 'photographed-letter', slug: 'photographed-selection',
+        viewBox: [0, 0, 40, 60], weight: 1, revision: 1,
+        paths: [{ rule: 'evenodd', commands: [
+          { type: 'M', x: 5, y: 5 }, { type: 'L', x: 35, y: 5 },
+          { type: 'L', x: 35, y: 55 }, { type: 'L', x: 5, y: 55 }, { type: 'Z' }
+        ] }]
+      }
+    }]
+  };
+  const migratedSchema3 = persistenceContext.migrateProjectData(schema3Project);
+  const loadedSchema3 = persistenceContext.prepareLoadedObjects(migratedSchema3.objects).objects[0];
+  assert.equal(migratedSchema3.projectMeta.id, 'schema3-project');
+  assert.equal(loadedSchema3.type, 'letterTemplate');
+  assert.equal(loadedSchema3.letterVector.schemaVersion, 3);
+  assert.equal(loadedSchema3.letterVector.migration.fromSchemaVersion, 1);
+  assert.equal(loadedSchema3.letterVector.paths[0].commands.length, 5);
 
   const frame = {
     id: 41,
@@ -1436,7 +1926,7 @@ test('HTML, manifests, and service worker reference one complete release asset s
     assert.match(manifest.start_url, new RegExp(`(?:\\?|&)v=${TEST_VERSION}(?:&|$)`));
   }
 
-  assert.match(readAppFile('app-4.js'), /appVersion:\s*'2026\.08\.01c'/);
+  assert.match(readAppFile('app-4.js'), /appVersion:\s*'2026\.08\.01d'/);
 
   const serviceWorker = readAppFile('sw.js');
   const cacheNameMatch = serviceWorker.match(/const CACHE_NAME = '([^']+)'/);

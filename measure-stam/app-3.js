@@ -301,7 +301,7 @@ function pointerMove(event) {
       state.activePointerId === event.pointerId &&
       pointerIsOverInterface(event)) {
     pointerCancel(event);
-    statusText.textContent = 'הפעולה על משטח העבודה בוטלה; התפריטים פעילים באצבע';
+    statusText.textContent = 'הפעולה על משטח העבודה בוטלה; אפשר להפעיל את התפריטים בעט או באצבע';
     return;
   }
   event.preventDefault();
@@ -464,7 +464,8 @@ function pointerMove(event) {
         y: imagePoint.y - drag.start.y
       }, {
         asset: letterAsset(object),
-        moveAdjacentControls: true
+        moveAdjacentControls: true,
+        moveInternalControlsOnly: true
       });
       if (typeof updateSemanticFeatureAfterHandleMove === 'function') {
         updateSemanticFeatureAfterHandleMove(object, semanticSelection, {
