@@ -59,6 +59,12 @@ function dragPassedThreshold(drag, screenPoint, threshold = 3) {
   return false;
 }
 
+function shouldReconcileSemanticVectorDrag(drag, semanticSelection) {
+  if (semanticSelection?.featureId) return false;
+  if (drag?.type === 'letterVectorGroup') return true;
+  return drag?.type === 'letterVectorHandle' && drag.vectorHandleKind === 'anchor';
+}
+
 function markObjectModified(object) {
   if (!object) return;
   object.provenance = object.provenance || { origin: object.auto ? 'assisted' : 'human', createdAt: new Date().toISOString() };
@@ -180,6 +186,8 @@ function finishRectDraft(objectType, rollbackSnapshot) {
       ? 'אזור הכיול נוצר ומנותח כעת'
       : objectType === 'rowAlign'
         ? 'השורה סומנה ומנותחת כעת'
+        : objectType === 'slantScan'
+          ? 'האזור סומן ומנותח כעת לאיתור ירכות'
         : objectType === 'circle'
           ? 'העיגול נוצר ונמדד'
           : 'האליפסה נוצרה ונמדדה');
@@ -191,6 +199,10 @@ function finishRectDraft(objectType, rollbackSnapshot) {
   if (objectType === 'nibRegion') analyzeCalibrationRegion(object, rollbackSnapshot);
   if (objectType === 'rowAlign' && typeof analyzeRowAlignment === 'function') {
     analyzeRowAlignment(object);
+    setTool('pan');
+  }
+  if (objectType === 'slantScan' && typeof analyzeSlantScan === 'function') {
+    analyzeSlantScan(object);
     setTool('pan');
   }
   if (objectType === 'ellipse' || objectType === 'circle') setTool('pan');
@@ -278,12 +290,10 @@ function handleTouchPointerMove(event) {
   draw();
 }
 
-const MEDIDAOT_INTERFACE_SELECTOR = '.topbar,.toolbar,.properties,.letter-drawer,dialog,.floating-help,.standalone-hint';
-
 function pointerIsOverInterface(event) {
   if (typeof document.elementFromPoint !== 'function') return false;
   const element = document.elementFromPoint(event.clientX, event.clientY);
-  return !!element && element !== canvas && !!element.closest?.(MEDIDAOT_INTERFACE_SELECTOR);
+  return !!element && !element.closest?.('[data-precision-surface]');
 }
 
 function pointerMove(event) {
@@ -331,7 +341,7 @@ function pointerMove(event) {
       drag.historyCommitted = true;
     }
     if (state.draft.type === 'area') moveAreaAnchor(state.draft, drag.handle, imagePoint);
-    else if (['ellipse', 'circle'].includes(state.draft.type)) {
+    else if (['ellipse', 'circle', 'slantScan'].includes(state.draft.type)) {
       state.draft.points = resizedAxisAlignedRect(state.draft.points, drag.handle, imagePoint, state.draft.type === 'circle');
     } else state.draft.points[drag.handle] = imagePoint;
     state.selectedPoint = { target: 'draft', index: drag.handle };
@@ -351,7 +361,7 @@ function pointerMove(event) {
     const object = state.objects.find(item => item.id === drag.id);
     if (object) {
       if (object.type === 'area') moveAreaAnchor(object, drag.handle, imagePoint);
-      else if (['ellipse', 'circle'].includes(object.type)) {
+      else if (['ellipse', 'circle', 'slantScan'].includes(object.type)) {
         object.points = resizedAxisAlignedRect(drag.original || object.points, drag.handle, imagePoint, object.type === 'circle');
       } else object.points[drag.handle] = imagePoint;
       object.auto = false;
@@ -413,15 +423,28 @@ function pointerMove(event) {
     const object = state.objects.find(item => item.id === drag.id && isLetterTemplate(item));
     const engine = globalThis.MEDIDAOT_VECTOR_ENGINE;
     if (object && engine?.moveObjectHandle) {
+      const semanticSelection = state.letterVectorSelection?.id === object.id
+        ? { ...state.letterVectorSelection }
+        : null;
       engine.moveObjectHandle(object, drag.vectorHandleId, imagePoint, {
         asset: letterAsset(object),
         moveAdjacentControls: true
       });
+      if (typeof updateSemanticFeatureAfterHandleMove === 'function') {
+        updateSemanticFeatureAfterHandleMove(object, semanticSelection, { targetImage: imagePoint });
+      }
+      if (shouldReconcileSemanticVectorDrag(drag, semanticSelection) &&
+          typeof reconcileSemanticVectorFeatures === 'function') {
+        reconcileSemanticVectorFeatures(object);
+      }
       object.auto = false;
       markObjectModified(object);
       state.letterVectorSelection = {
+        ...(state.letterVectorSelection?.id === object.id ? state.letterVectorSelection : {}),
         id: object.id,
-        handleId: drag.vectorHandleId
+        handleId: drag.vectorHandleId,
+        primaryHandleId: drag.vectorHandleId,
+        handleIds: state.letterVectorSelection?.handleIds || [drag.vectorHandleId]
       };
       syncLetterControls(object);
     }
@@ -431,6 +454,9 @@ function pointerMove(event) {
     const object = state.objects.find(item => item.id === drag.id && isLetterTemplate(item));
     const engine = globalThis.MEDIDAOT_VECTOR_ENGINE;
     if (object && engine?.translateObjectHandles && drag.originalVector) {
+      const semanticSelection = state.letterVectorSelection?.id === object.id
+        ? { ...state.letterVectorSelection }
+        : null;
       object.letterVector = engine.cloneVectorData(drag.originalVector);
       object.letterWeight = object.letterVector.weight;
       engine.translateObjectHandles(object, drag.vectorHandleIds, {
@@ -440,9 +466,19 @@ function pointerMove(event) {
         asset: letterAsset(object),
         moveAdjacentControls: true
       });
+      if (typeof updateSemanticFeatureAfterHandleMove === 'function') {
+        updateSemanticFeatureAfterHandleMove(object, semanticSelection, {
+          deltaImage: { x: imagePoint.x - drag.start.x, y: imagePoint.y - drag.start.y }
+        });
+      }
+      if (shouldReconcileSemanticVectorDrag(drag, semanticSelection) &&
+          typeof reconcileSemanticVectorFeatures === 'function') {
+        reconcileSemanticVectorFeatures(object);
+      }
       object.auto = false;
       markObjectModified(object);
       state.letterVectorSelection = {
+        ...(state.letterVectorSelection?.id === object.id ? state.letterVectorSelection : {}),
         id: object.id,
         handleIds: [...drag.vectorHandleIds],
         primaryHandleId: state.letterVectorSelection?.primaryHandleId || drag.vectorHandleIds[0],
@@ -572,6 +608,10 @@ function pointerUp(event) {
       normalizeQuadObject(movedObject);
       analyzeRowAlignment(movedObject);
     }
+    if (movedObject?.type === 'slantScan' && typeof analyzeSlantScan === 'function') {
+      normalizeQuadObject(movedObject);
+      analyzeSlantScan(movedObject);
+    }
   }
   if (completedDrag?.moved) renderAll();
   state.dragging = null;
@@ -610,7 +650,7 @@ canvas.addEventListener('lostpointercapture', event => {
   if (state.activePointerId === event.pointerId && state.interactionBefore) pointerCancel(event);
 });
 document.addEventListener('pointerdown', event => {
-  if (!event.target?.closest?.(MEDIDAOT_INTERFACE_SELECTOR)) return;
+  if (event.target?.closest?.('[data-precision-surface]')) return;
   if (state.activePointerId === null || !state.interactionBefore) return;
   restoreInteractionState(state.interactionBefore);
   releaseActiveMeasurementPointer();
@@ -722,7 +762,7 @@ function settleDraftBeforeToolChange(nextTool) {
     return 'completed';
   }
 
-  if (['kastel', 'nibRegion', 'rowAlign', 'ellipse', 'circle'].includes(draftType)) {
+  if (['kastel', 'nibRegion', 'rowAlign', 'slantScan', 'ellipse', 'circle'].includes(draftType)) {
     const completed = finishRectDraft(draftType, rollbackSnapshot);
     return completed ? 'completed' : 'cancelled';
   }
@@ -755,6 +795,7 @@ function setTool(tool) {
     angle: 'זווית: סמן שתי נקודות לאורך הקו',
     kastel: 'קעסטעל: גרור מסגרת סביב האות',
     rowAlign: 'יישור השורה: גרור מסגרת סביב השורה ובדוק תחתיות של מושבים יציבים',
+    slantScan: 'נטיות ומקבילות: גרור מסגרת סביב שורה או אזור הכולל את הירכות',
     ellipse: 'אליפסה: גרור מסגרת ליצירת אליפסה מדידה',
     circle: 'עיגול: גרור מסגרת ליצירת עיגול מדיד',
     vectorize: 'אות מצולמת לווקטור: הקף את האות במסלול חופשי ב־Apple Pencil',
@@ -771,7 +812,9 @@ function setTool(tool) {
 }
 
 document.querySelectorAll('.tool[data-tool]').forEach(button => button.addEventListener('click', () => {
-  if (state.professionalSuite) state.professionalSuite.pendingMeasurement = null;
+  const pending = state.professionalSuite?.pendingMeasurement;
+  const pendingTool = pending?.tool || MASTER_SYSTEM.metric(pending?.semanticMetricId)?.tool || null;
+  if (state.professionalSuite && pendingTool !== button.dataset.tool) state.professionalSuite.pendingMeasurement = null;
   globalThis.MEDIDAOT_PROFESSIONAL_TOOLS?.switchWorkspaceMode?.('source');
   setTool(button.dataset.tool);
 }));
@@ -897,10 +940,12 @@ function deleteSelectedPoint() {
   }
   const object = state.objects.find(item => item.id === selection.id);
   if (!object) return;
-  if (object.type === 'kastel' || object.type === 'nibRegion') {
+  if (['kastel', 'nibRegion', 'slantScan'].includes(object.type)) {
     statusText.textContent = object.type === 'kastel'
       ? 'בקעסטעל מזיזים את ארבע הפינות; אין למחוק פינה'
-      : 'באזור כיול מזיזים את ארבע הפינות; אין למחוק פינה';
+      : object.type === 'slantScan'
+        ? 'באזור סריקת הירכות מזיזים את ארבע הפינות; אין למחוק פינה'
+        : 'באזור כיול מזיזים את ארבע הפינות; אין למחוק פינה';
     return;
   }
   const minimum = { area: 3, length: 2, angle: 2, nib: 2, gap: 2, thirds: 1 }[object.type] || 1;
@@ -1010,6 +1055,26 @@ function deleteSelectedObject() {
   snapshot();
   const deleted = state.objects.find(item => item.id === state.selectedId);
   state.objects = state.objects.filter(item => item.id !== state.selectedId);
+  if (deleted?.role === 'vector-source-frame') {
+    for (const vector of state.objects.filter(item => isLetterTemplate(item))) {
+      const frameId = vector.sourceFrameId ?? vector.sourceSelection?.frameId;
+      if (frameId !== deleted.id) continue;
+      vector.sourceFrameId = null;
+      vector.sourceSelection = { ...(vector.sourceSelection || {}), frameId: null, frameMissing: true };
+    }
+  }
+  if (isLetterTemplate(deleted)) {
+    const frameId = deleted.sourceFrameId ?? deleted.sourceSelection?.frameId;
+    const frame = state.objects.find(item => item.id === frameId && item.role === 'vector-source-frame');
+    if (frame?.linkedVectorId === deleted.id) frame.linkedVectorId = null;
+  }
+  if (deleted?.type === 'slantScan') {
+    const scanUid = deleted.uid || String(deleted.id);
+    state.objects = state.objects.filter(item => !(
+      item.type === 'angle' &&
+      (item.sourceScanId === deleted.id || item.sourceScanUid === scanUid)
+    ));
+  }
   if (deleted?.type === 'nibRegion') {
     cancelCalibrationAnalysis();
     state.formula.nibSamples = (state.formula.nibSamples || []).filter(sample => sample.sourceUid !== (deleted.uid || String(deleted.id)));

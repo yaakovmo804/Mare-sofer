@@ -156,6 +156,14 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
     return { x: finiteNumber(point?.x), y: finiteNumber(point?.y) };
   }
 
+  function clonePlainMetadata(value) {
+    if (Array.isArray(value)) return value.map(clonePlainMetadata);
+    if (!value || typeof value !== 'object') return value;
+    const copy = {};
+    for (const [key, entry] of Object.entries(value)) copy[key] = clonePlainMetadata(entry);
+    return copy;
+  }
+
   function cloneCommand(command) {
     if (!command || typeof command !== 'object') {
       throw new TypeError('A vector command must be an object.');
@@ -514,8 +522,8 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
   function cloneVectorData(source, options = {}) {
     const vector = getVectorSource(source, options);
     if (!vector) return null;
-    return {
-      schemaVersion: VECTOR_SCHEMA_VERSION,
+    const cloned = {
+      schemaVersion: Math.max(VECTOR_SCHEMA_VERSION, Math.trunc(finiteNumber(vector.schemaVersion, VECTOR_SCHEMA_VERSION))),
       sourceKey: vector.sourceKey || '',
       letter: vector.letter || '',
       tradition: normalizeTradition(vector.tradition),
@@ -527,6 +535,12 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
       paths: clonePaths(vector.paths),
       handleCounts: calculateHandleCountsFromPaths(vector.paths)
     };
+    if (Array.isArray(vector.features)) cloned.features = clonePlainMetadata(vector.features);
+    if (vector.trace && typeof vector.trace === 'object') cloned.trace = clonePlainMetadata(vector.trace);
+    for (const key of ['featureCoordinateSpace', 'featureAngleConvention']) {
+      if (typeof vector[key] === 'string' && vector[key]) cloned[key] = vector[key];
+    }
+    return cloned;
   }
 
   function commandSignature(paths) {
@@ -1583,6 +1597,103 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
     };
   }
 
+  function tiltObjectHandles(object, handleIds, targetAngleDeg, options = {}) {
+    const ids = [...new Set((handleIds || []).map(String))];
+    if (ids.length < 2) throw new TypeError('At least two vector anchor ids are required for an axis tilt.');
+    const vector = materializeObjectVector(object, options);
+    const transform = getLayoutTransform(object, { ...options, vector });
+    const selectedHandles = enumerateHandles(object, {
+      ...options,
+      vector,
+      materialize: false,
+      coordinateSpace: 'image'
+    }).filter(handle => handle.kind === 'anchor' && ids.includes(handle.id));
+    if (selectedHandles.length < 2) throw new TypeError('The selected vector feature does not contain two anchors.');
+
+    const sorted = [...selectedHandles].sort((a, b) => a.point.y - b.point.y);
+    const bandSize = Math.max(1, Math.ceil(sorted.length * .2));
+    const averagePoint = handles => handles.reduce((sum, handle) => ({
+      x: sum.x + handle.point.x / handles.length,
+      y: sum.y + handle.point.y / handles.length
+    }), { x: 0, y: 0 });
+    const detectedRoot = averagePoint(sorted.slice(0, bandSize));
+    const detectedTip = averagePoint(sorted.slice(-bandSize));
+    const root = options.rootImage && Number.isFinite(+options.rootImage.x) && Number.isFinite(+options.rootImage.y)
+      ? { x: +options.rootImage.x, y: +options.rootImage.y }
+      : detectedRoot;
+    const tip = options.tipImage && Number.isFinite(+options.tipImage.x) && Number.isFinite(+options.tipImage.y)
+      ? { x: +options.tipImage.x, y: +options.tipImage.y }
+      : detectedTip;
+    const signedVerticalAngle = (a, b) => {
+      let value = Math.atan2(b.x - a.x, a.y - b.y) * 180 / Math.PI;
+      while (value > 90) value -= 180;
+      while (value < -90) value += 180;
+      return value;
+    };
+    const currentAngleDeg = Number.isFinite(+options.currentAngleDeg)
+      ? +options.currentAngleDeg
+      : signedVerticalAngle(root, tip);
+    const target = clamp(finiteNumber(targetAngleDeg), -89, 89);
+    const currentTangent = Math.tan(currentAngleDeg * Math.PI / 180);
+    const targetTangent = Math.tan(target * Math.PI / 180);
+    const pivot = options.pivotImage && Number.isFinite(+options.pivotImage.x) && Number.isFinite(+options.pivotImage.y)
+      ? { x: +options.pivotImage.x, y: +options.pivotImage.y }
+      : root;
+
+    const coordinates = new Map();
+    const addCoordinate = (pathIndex, commandIndex, role) => {
+      const command = vector.paths[pathIndex]?.commands?.[commandIndex];
+      if (!command) return;
+      let xKey;
+      let yKey;
+      if (role === 'anchor' && ['M', 'L', 'C'].includes(command.type)) {
+        xKey = 'x'; yKey = 'y';
+      } else if (role === 'control-out' && command.type === 'C') {
+        xKey = 'x1'; yKey = 'y1';
+      } else if (role === 'control-in' && command.type === 'C') {
+        xKey = 'x2'; yKey = 'y2';
+      } else return;
+      coordinates.set(`${pathIndex}:${commandIndex}:${xKey}`, { command, xKey, yKey });
+    };
+    for (const id of ids) {
+      const handle = parseHandleId(id);
+      if (handle.role !== 'anchor') continue;
+      addCoordinate(handle.pathIndex, handle.commandIndex, handle.role);
+      if (options.moveAdjacentControls !== false) {
+        const commands = vector.paths[handle.pathIndex]?.commands || [];
+        for (const control of adjacentControls(commands, handle.commandIndex)) {
+          addCoordinate(handle.pathIndex, control.commandIndex, control.coordinate);
+        }
+      }
+    }
+    for (const coordinate of coordinates.values()) {
+      const image = transform.localToImage({
+        x: coordinate.command[coordinate.xKey],
+        y: coordinate.command[coordinate.yKey]
+      });
+      const tiltedImage = {
+        x: image.x + (pivot.y - image.y) * (targetTangent - currentTangent),
+        y: image.y
+      };
+      const local = transform.imageToLocal(tiltedImage);
+      coordinate.command[coordinate.xKey] = local.x;
+      coordinate.command[coordinate.yKey] = local.y;
+    }
+    touchVector(vector);
+    return {
+      ids,
+      movedCoordinateCount: coordinates.size,
+      root,
+      tip,
+      pivot,
+      currentAngleDeg,
+      targetAngleDeg: target,
+      revision: vector.revision,
+      counts: { ...vector.handleCounts },
+      vector
+    };
+  }
+
   function hitTestHandle(object, imagePoint, options = {}) {
     const radius = Math.max(1, finiteNumber(options.radius, 14));
     const handles = enumerateHandles(object, {
@@ -1856,6 +1967,7 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
     moveVectorHandle,
     moveObjectHandle,
     translateObjectHandles,
+    tiltObjectHandles,
     hitTestHandle,
     buildPath2D,
     hitTestFill,

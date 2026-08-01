@@ -2,7 +2,7 @@
   "name": "medidaot",
   "private": true,
   "scripts": {
-    "test": "node --test measure-stam/tests/medidaot-l-regression.mjs measure-stam/tests/letter-union-morphology.mjs measure-stam/tests/region-vector-regression.mjs measure-stam/tests/professional-system-regression.mjs"
+    "test": "node --test measure-stam/tests/medidaot-l-regression.mjs measure-stam/tests/letter-union-morphology.mjs measure-stam/tests/region-vector-regression.mjs measure-stam/tests/professional-system-regression.mjs measure-stam/tests/slant-analyzer-regression.mjs"
   },
   "devDependencies": {
     "@napi-rs/canvas": "0.1.100"
