@@ -13,7 +13,7 @@
   <link rel="manifest" href="manifest-medidaot.webmanifest" />
   <link rel="apple-touch-icon" sizes="180x180" href="assets/medidaot-apple-touch-180.png" />
   <link rel="icon" type="image/png" sizes="32x32" href="assets/medidaot-favicon-32.png" />
-  <link rel="stylesheet" href="styles.css?v=20260801b" />
+  <link rel="stylesheet" href="styles.css?v=20260801c" />
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -111,7 +111,7 @@
           <div class="spinner" aria-hidden="true"></div>
           <span>מזהה גגות, עובי קולמוס ושורות כתב…</span>
         </div>
-        <canvas id="canvas"></canvas>
+        <canvas id="canvas" data-precision-surface></canvas>
         <section id="compositionWorkspace" class="composition-workspace" hidden aria-label="קנבה נקייה להרכבת כתב">
           <div class="composition-toolbar" data-interface-surface>
             <label>רקע
@@ -129,7 +129,7 @@
             <button id="compositionDeleteBtn" class="btn compact danger" type="button" disabled>מחיקת אות</button>
             <button id="compositionExportBtn" class="btn compact primary" type="button" disabled>ייצוא הקנבה</button>
           </div>
-          <canvas id="compositionCanvas" tabindex="0" role="application" aria-label="קנבה נקייה, 0 אותיות"></canvas>
+          <canvas id="compositionCanvas" data-precision-surface tabindex="0" role="application" aria-label="קנבה נקייה, 0 אותיות"></canvas>
           <p id="compositionEmptyHint" class="composition-empty-hint">בחר אות וקטורית במשטח המקור ולחץ „העבר לקנבה”. ניתן להעביר כמה אותיות ולבנות מילה.</p>
         </section>
         <section id="letterDrawer" class="letter-drawer" aria-label="לוח צורת האותיות" hidden>
@@ -283,7 +283,12 @@
 
         <section id="vectorSourcePanel" class="property-section vector-source-controls">
           <h2>אות מצולמת לווקטור</h2>
-          <p class="microcopy">סמן ב־Apple Pencil מסלול חופשי סביב אות. מסגרת המקור תישאר במקומה, ומעליה תיווצר גרסה וקטורית נפרדת להזזה ולהשוואה.</p>
+          <p class="microcopy">בחר אם ליצור עותק נפרד או לערוך את אזור האות במקור, ואז הקף אותה ב־Apple Pencil.</p>
+          <div class="vector-workflow-toggle" role="group" aria-label="יעד העריכה הווקטורית">
+            <button type="button" class="active" data-vector-workflow="copy" aria-pressed="true">עותק וקטורי</button>
+            <button type="button" data-vector-workflow="source-region" aria-pressed="false">עיוות מקומי במקור</button>
+          </div>
+          <p id="vectorWorkflowHint" class="microcopy">הצילום נשמר ללא שינוי; הווקטור החדש יהיה עותק שאפשר להזיז ולהעביר לקנבה.</p>
           <div class="two-cols">
             <label>צבע מסגרת המקור<input id="vectorSourceColorInput" type="color" value="#f59e0b" /></label>
             <label>צבע הווקטור<input id="vectorOverlayColorInput" type="color" value="#2563eb" /></label>
@@ -297,6 +302,14 @@
             <span id="letterSelectedLabel" class="badge neutral">—</span>
           </div>
           <p class="microcopy">ידיות הפינה מגדילות ומקטינות תוך שמירת היחס. ידיות הצד מרחיבות, מצרות ומותחות כל ציר בנפרד.</p>
+          <div id="letterEditTargetSection" hidden>
+            <span class="field-caption">אופן העבודה באזור המצולם</span>
+            <div class="letter-edit-target-toggle" role="group" aria-label="אופן העבודה באזור המצולם">
+              <button id="letterTargetCopyBtn" type="button">עותק</button>
+              <button id="letterTargetSourceBtn" type="button">מקור פעיל</button>
+            </div>
+            <p id="letterEditTargetHint" class="microcopy"></p>
+          </div>
           <div class="letter-mode-toggle" role="group" aria-label="מראה התבנית">
             <button id="letterModeSolidBtn" class="active" type="button">מלא</button>
             <button id="letterModeOutlineBtn" type="button">חלול</button>
@@ -323,6 +336,15 @@
             </select>
           </label>
           <button id="letterAnchorLassoBtn" class="btn compact full" type="button" disabled>בחירת קבוצת עוגנים בסימון חופשי</button>
+          <section id="letterAxisTiltSection" class="axis-tilt-controls" hidden aria-label="הטיית ציר הירך">
+            <div class="section-title-row"><h3>הטיית ציר הירך</h3><output id="letterAxisTiltValue">0°</output></div>
+            <input id="letterAxisTiltInput" type="range" min="-35" max="35" step="0.5" value="0" aria-label="זווית יעד חתומה מן האנך" />
+            <div class="button-row">
+              <button id="applyLetterAxisTiltBtn" class="btn compact primary" type="button">החל על הירך שנבחרה</button>
+              <button id="resetLetterAxisTiltBtn" class="btn compact" type="button">אפס ציר</button>
+            </div>
+            <p class="microcopy">נקודת מפגש הגג־ירך נשארת קבועה; שאר נקודות הירך מוטות סביבה.</p>
+          </section>
           <p id="letterAnchorReadout" class="microcopy">מקור האות נשמר כמסלול Bézier עריך. שינוי העובי מחושב במסכת תצוגה לא־הרסנית ואינו יוצר מסלול SVG חדש.</p>
           <p id="letterSizeReadout" class="microcopy">—</p>
           <div class="button-row">
@@ -366,11 +388,11 @@
       <p><b>שטח ואיזון לובן:</b> אפשר להוסיף עשרות נקודות סביב התחום. בסיום גע בנקודה הראשונה או לחץ „סיום וסגירת השטח”. מעבר לכלי אחר סוגר אוטומטית שטח תקין; סימון חלקי שאינו יכול להיות מדידה מבוטל.</p>
       <p><b>עיגול מקטע:</b> גע ביהלום שבין שתי נקודות וגרור אותו, או בחר מקטע ולחץ „עיגול המקטע”.</p>
       <p><b>לוח צורת האותיות:</b> כל אות מונחת בגודלה היחסי המקורי מן הלוח, בלי השוואת גבהים. אפשר להזיז ולמתוח אותה. מקור ה־Bézier נשאר עריך; שינוי עובי הקולמוס הוא תצוגה לא־הרסנית בתוך מסגרת קבועה ואינו מחליף את מסלול המקור. מצב עריכת עוגנים מציג את נקודות המסלול ואת ידיות ה־Bézier.</p>
-      <p><b>דרגות הווקטור והקנבה:</b> „מבנה” משנה מסגרת; „איברים” מציג קבוצות מקומיות בטוחות שאינן מערבבות מסלולים, וסימון חופשי מגדיר איבר מדויק; „עקומות” מציג עוגנים; „מלא” מציג גם ידיות Bézier. „העבר לקנבה” יוצר עותק נקי ונפרד שאפשר לצרף למילה על רקע קלף או רקע שהועלה.</p>
-      <p><b>רגעים / אמן:</b> לכל מדד צבע קבוע והסבר שניתן לעריכה. יישור השורה דורש סיווג מלא של מועמדי ב׳, כ׳ ונ׳ רגילה לפני יצירת קו; ן׳ וי׳ אינן קובעות אותו. נטיות נשמרות כסטייה חתומה מן האנך, והדמיית תיקון נוצרת בקנבה בלי לשנות את המקור.</p>
-      <p><b>אות מצולמת לווקטור:</b> סמן מסלול חופשי סביב האות. האפליקציה שומרת מסגרת מקור בצבע שבחרת ומייצרת ממנה וקטור נפרד. במצב עריכת עוגנים אפשר להקיף קבוצת עוגנים ולהזיז את כולם יחד.</p>
+      <p><b>דרגות הווקטור והקנבה:</b> באות מצולמת „מבנה” מציג נקודות בעלות משמעות — קצות גג, מקום יציאת ירך וציר ירך; „איברים” מוסיף קבוצות מקומיות; „עקומות” מציג עוגנים; „מלא” מציג גם ידיות Bézier. בחירת ציר ירך פותחת הטיה סביב נקודת היציאה מן הגג. „העבר לקנבה” יוצר תמיד עותק נקי ונפרד.</p>
+      <p><b>רגעים / אמן:</b> לכל מדד צבע קבוע והסבר שניתן לעריכה. יישור השורה דורש סיווג מלא של מועמדי ב׳, כ׳ ונ׳ רגילה לפני יצירת קו; ן׳ וי׳ אינן קובעות אותו. „נטיות ומקבילות” סורק תחום מסומן, יוצר מדידת זווית חתומה לכל ירך מועמדת ודורש לסווג אותה כד׳, ה׳, ת׳ או „לא לכלול”; מדידה ידנית נשארת זמינה. הדמיית תיקון נוצרת בקנבה בלי לשנות את המקור.</p>
+      <p><b>אות מצולמת לווקטור:</b> לפני הסימון בחר „עותק וקטורי” או „עיוות מקומי במקור”. במצב מקור הדיו באזור מוחלף בשכבת וקטור לא־הרסנית; מחיקה או „איפוס למקור” מחזירות את הצילום. הווקטור החלק נשמר כמסלולי Bézier ולא כזיגזג של פיקסלים.</p>
       <p><b>מחיקת נקודה:</b> גע בנקודה כדי לבחור אותה, ולאחר מכן לחץ „מחיקת נקודה”. במצב בחירה ניתן גם לגרור נקודה למקום מדויק.</p>
-      <p><b>מגע:</b> כל התפריטים, החלוניות והגלילה פועלים באצבע. על משטח העבודה אצבע אחת מזיזה אות מן הלוח, ושתי אצבעות מזיזות ומגדילות את התמונה. Apple Pencil משמש למדידה, לסימון חופשי ולעריכת נקודות מדויקת; מעבר שלו לתפריט מבטל את משיכת הקנבס.</p>
+      <p><b>מגע:</b> כל התפריטים, השדות והגלילה פועלים באצבע או במקלדת. Apple Pencil פועל רק על משטחי העבודה לצורך מדידה ועריכת נקודות; נגיעה שלו בשדה אינה מפעילה Scribble ואינה פותחת מקלדת.</p>
       <p><b>עובי קולמוס:</b> הזיהוי האוטומטי סורק גגות ישרים, מסלק קצוות, ירכות ותגים, ומחשב חציון של חתכים עקביים. אפשר לתקן בקו ידני; בדיקה באזור נשארת כאפשרות מתקדמת.</p>
       <p><b>מרווחים:</b> „זהה בין השיטין” מאתר שורות סמוכות ומודד מתחתית השורה העליונה עד ראש השורה הבאה. יתר סוגי המרווחים ניתנים לסימון ידני. התוצאה מוצגת ביחידות עובי קולמוס.</p>
       <p><b>זווית:</b> שתי נקודות. ברירת המחדל מציגה את הסטייה מן הציר הקרוב, ולכן מתקבלים ערכים כגון 0°, 12° ו־13° ולא זווית משלימה.</p>
@@ -396,17 +418,18 @@
 
     <button id="helpBtn" class="floating-help" aria-label="עזרה">?</button>
   </div>
-  <script src="master-system.js?v=20260801b"></script>
-  <script src="letter-assets.js?v=20260801b"></script>
-  <script src="letter-vector-engine.js?v=20260801b"></script>
-  <script src="app-1.js?v=20260801b"></script>
-  <script src="region-vector.js?v=20260801b"></script>
-  <script src="letter-tools.js?v=20260801b"></script>
-  <script src="app-2.js?v=20260801b"></script>
-  <script src="app-3.js?v=20260801b"></script>
-  <script src="app-4.js?v=20260801b"></script>
-  <script src="professional-tools.js?v=20260801b"></script>
-  <script src="auto-measure.js?v=20260801b"></script>
-  <script src="stability-patch.js?v=20260801b"></script>
+  <script src="master-system.js?v=20260801c"></script>
+  <script src="letter-assets.js?v=20260801c"></script>
+  <script src="letter-vector-engine.js?v=20260801c"></script>
+  <script src="app-1.js?v=20260801c"></script>
+  <script src="region-vector.js?v=20260801c"></script>
+  <script src="letter-tools.js?v=20260801c"></script>
+  <script src="app-2.js?v=20260801c"></script>
+  <script src="app-3.js?v=20260801c"></script>
+  <script src="app-4.js?v=20260801c"></script>
+  <script src="slant-analyzer.js?v=20260801c"></script>
+  <script src="professional-tools.js?v=20260801c"></script>
+  <script src="auto-measure.js?v=20260801c"></script>
+  <script src="stability-patch.js?v=20260801c"></script>
 </body>
 </html>

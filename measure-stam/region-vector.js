@@ -69,10 +69,18 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
       const label = components.length + 1;
       queue[tail++] = start;
       labels[start] = label;
+      let left = width;
+      let top = height;
+      let right = -1;
+      let bottom = -1;
       while (head < tail) {
         const current = queue[head++];
         const x = current % width;
         const y = Math.floor(current / width);
+        left = Math.min(left, x);
+        top = Math.min(top, y);
+        right = Math.max(right, x);
+        bottom = Math.max(bottom, y);
         for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
           const nextX = x + dx;
           const nextY = y + dy;
@@ -83,7 +91,7 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
           queue[tail++] = next;
         }
       }
-      components.push({ label, area: tail });
+      components.push({ label, area: tail, left, top, right, bottom });
     }
     return { labels, components };
   }
@@ -391,7 +399,7 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
     };
     let tolerance = Math.max(
       Number.isFinite(+options.tolerance) ? +options.tolerance : 0,
-      .8,
+      1.25,
       Math.min(width, height) * .0025
     );
     let simplified;
@@ -435,16 +443,506 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
     };
   }
 
-  function buildVector(contours, width, height, metadata = {}) {
+  function numericMedian(values) {
+    if (!values.length) return null;
+    const ordered = values.slice().sort((first, second) => first - second);
+    const middle = Math.floor(ordered.length / 2);
+    return ordered.length % 2
+      ? ordered[middle]
+      : (ordered[middle - 1] + ordered[middle]) / 2;
+  }
+
+  function componentRowRuns(labels, width, component) {
+    const rows = [];
+    for (let y = component.top; y <= component.bottom; y++) {
+      const runs = [];
+      let start = -1;
+      for (let x = component.left; x <= component.right + 1; x++) {
+        const active = x <= component.right && labels[y * width + x] === component.label;
+        if (active && start < 0) start = x;
+        if (!active && start >= 0) {
+          runs.push({ left: start, right: x, width: x - start, center: (start + x) / 2 });
+          start = -1;
+        }
+      }
+      rows.push(runs);
+    }
+    return rows;
+  }
+
+  function runOverlap(first, second) {
+    return Math.max(0, Math.min(first.right, second.right) - Math.max(first.left, second.left));
+  }
+
+  function roofRunForRow(runs, reference, minimumWidth) {
+    let best = null;
+    for (const run of runs) {
+      if (run.width < minimumWidth) continue;
+      const overlap = runOverlap(run, reference);
+      if (overlap < Math.min(run.width, reference.width) * .45) continue;
+      if (!best || overlap > best.overlap || (overlap === best.overlap && run.width > best.run.width)) {
+        best = { run, overlap };
+      }
+    }
+    return best?.run || null;
+  }
+
+  function linearAxis(samples, rootY) {
+    const meanY = samples.reduce((sum, sample) => sum + sample.y, 0) / samples.length;
+    const meanX = samples.reduce((sum, sample) => sum + sample.x, 0) / samples.length;
+    let varianceY = 0;
+    let covariance = 0;
+    for (const sample of samples) {
+      const dy = sample.y - meanY;
+      varianceY += dy * dy;
+      covariance += dy * (sample.x - meanX);
+    }
+    const slope = varianceY > 1e-9 ? covariance / varianceY : 0;
+    const xAt = y => meanX + slope * (y - meanY);
+    const residual = Math.sqrt(samples.reduce((sum, sample) => (
+      sum + (sample.x - xAt(sample.y)) ** 2
+    ), 0) / samples.length);
+    const tipY = samples[samples.length - 1].y;
+    return {
+      root: { x: xAt(rootY), y: rootY },
+      tip: { x: xAt(tipY), y: tipY },
+      slope,
+      residual
+    };
+  }
+
+  function roundFeaturePoint(point) {
+    return {
+      x: Math.round(point.x * 1000) / 1000,
+      y: Math.round(point.y * 1000) / 1000
+    };
+  }
+
+  function fallbackComponentFeatures(labels, width, component, componentIndex) {
+    let count = 0;
+    let sumX = 0;
+    let sumY = 0;
+    const leftYs = [];
+    const rightYs = [];
+    const topXs = [];
+    const bottomXs = [];
+    for (let y = component.top; y <= component.bottom; y++) {
+      for (let x = component.left; x <= component.right; x++) {
+        if (labels[y * width + x] !== component.label) continue;
+        const centerX = x + .5;
+        const centerY = y + .5;
+        count++;
+        sumX += centerX;
+        sumY += centerY;
+        if (x === component.left) leftYs.push(centerY);
+        if (x === component.right) rightYs.push(centerY);
+        if (y === component.top) topXs.push(centerX);
+        if (y === component.bottom) bottomXs.push(centerX);
+      }
+    }
+    if (!count) return [];
+
+    const center = { x: sumX / count, y: sumY / count };
+    let xx = 0;
+    let xy = 0;
+    let yy = 0;
+    for (let y = component.top; y <= component.bottom; y++) {
+      for (let x = component.left; x <= component.right; x++) {
+        if (labels[y * width + x] !== component.label) continue;
+        const dx = x + .5 - center.x;
+        const dy = y + .5 - center.y;
+        xx += dx * dx;
+        xy += dx * dy;
+        yy += dy * dy;
+      }
+    }
+    const axisAngle = .5 * Math.atan2(2 * xy, xx - yy);
+    let axis = { x: Math.cos(axisAngle), y: Math.sin(axisAngle) };
+    if ((Math.abs(axis.y) >= Math.abs(axis.x) && axis.y < 0) ||
+        (Math.abs(axis.y) < Math.abs(axis.x) && axis.x < 0)) {
+      axis = { x: -axis.x, y: -axis.y };
+    }
+    let minimumProjection = Infinity;
+    let maximumProjection = -Infinity;
+    for (let y = component.top; y <= component.bottom; y++) {
+      for (let x = component.left; x <= component.right; x++) {
+        if (labels[y * width + x] !== component.label) continue;
+        const point = { x: x + .5, y: y + .5 };
+        const projection = (point.x - center.x) * axis.x + (point.y - center.y) * axis.y;
+        minimumProjection = Math.min(minimumProjection, projection);
+        maximumProjection = Math.max(maximumProjection, projection);
+      }
+    }
+    const axisStart = {
+      x: center.x + axis.x * minimumProjection,
+      y: center.y + axis.y * minimumProjection
+    };
+    const axisEnd = {
+      x: center.x + axis.x * maximumProjection,
+      y: center.y + axis.y * maximumProjection
+    };
+
+    const prefix = `component-${componentIndex}-fallback`;
+    const extremumDefinitions = [
+      ['left', 'קצה מתאר שמאלי', { x: component.left, y: numericMedian(leftYs) }],
+      ['right', 'קצה מתאר ימני', { x: component.right + 1, y: numericMedian(rightYs) }],
+      ['top', 'קצה מתאר עליון', { x: numericMedian(topXs), y: component.top }],
+      ['bottom', 'קצה מתאר תחתון', { x: numericMedian(bottomXs), y: component.bottom + 1 }]
+    ];
+    const features = [];
+    const usedPoints = new Set();
+    for (const [role, label, point] of extremumDefinitions) {
+      if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
+      const rounded = roundFeaturePoint(point);
+      const key = `${rounded.x},${rounded.y}`;
+      if (usedPoints.has(key)) continue;
+      usedPoints.add(key);
+      features.push({
+        id: `${prefix}-extreme-${role}`,
+        type: 'contour-extremum',
+        role,
+        label,
+        point: rounded,
+        confidence: .72,
+        componentIndex,
+        fallback: true
+      });
+    }
+    const root = roundFeaturePoint(axisStart);
+    const tip = roundFeaturePoint(axisEnd);
+    const trace = xx + yy;
+    const separation = Math.sqrt(Math.max(0, (xx - yy) ** 2 + 4 * xy ** 2));
+    const axisConfidence = trace > 0 ? clamp(.5 + .35 * separation / trace, .5, .85) : .5;
+    features.push({
+      id: `${prefix}-axis`,
+      type: 'component-axis',
+      label: 'ציר ראשי של הרכיב',
+      point: roundFeaturePoint(center),
+      root,
+      tip,
+      angleDeg: Math.round(Math.atan2(tip.x - root.x, tip.y - root.y) * 180000 / Math.PI) / 1000,
+      confidence: axisConfidence,
+      componentIndex,
+      fallback: true
+    });
+    return features;
+  }
+
+  function traceStemFromRun(rows, component, roof, rootRun, rootRow) {
+    const samples = [];
+    let previous = rootRun;
+    let missingRows = 0;
+    const maximumWidth = Math.max(rootRun.width * 2.8, roof.width * .48);
+    for (let y = rootRow; y <= component.bottom; y++) {
+      const runs = rows[y - component.top] || [];
+      let candidate = null;
+      let candidateScore = Infinity;
+      for (const run of runs) {
+        const overlap = runOverlap(run, previous);
+        const centerDistance = Math.abs(run.center - previous.center);
+        const reachable = overlap > 0 || centerDistance <= Math.max(3, previous.width * 1.25);
+        if (!reachable || run.width > maximumWidth) continue;
+        const score = centerDistance + Math.abs(run.width - previous.width) * .2 - overlap * .35;
+        if (score < candidateScore) {
+          candidate = run;
+          candidateScore = score;
+        }
+      }
+      if (!candidate) {
+        missingRows++;
+        if (missingRows > 2) break;
+        continue;
+      }
+      missingRows = 0;
+      samples.push({ x: candidate.center, y: y + .5, width: candidate.width });
+      previous = candidate;
+    }
+    if (samples.length < 4) return null;
+    const axis = linearAxis(samples, roof.bottom);
+    const extent = axis.tip.y - axis.root.y;
+    const medianWidth = numericMedian(samples.map(sample => sample.width)) || rootRun.width;
+    if (extent < Math.max(4, (component.bottom - component.top + 1) * .18)) return null;
+    if (extent / Math.max(1, medianWidth) < 1.25) return null;
+    const continuity = samples.length / Math.max(1, Math.round(extent));
+    const straightness = 1 - clamp(axis.residual / Math.max(1, medianWidth), 0, 1);
+    const elongation = clamp(extent / Math.max(1, medianWidth * 4), 0, 1);
+    return {
+      ...axis,
+      width: medianWidth,
+      sampleCount: samples.length,
+      confidence: clamp(.30 + continuity * .25 + straightness * .2 + elongation * .25, .35, .98)
+    };
+  }
+
+  function detectComponentFeatures(labels, width, component, componentIndex, largestArea) {
+    const componentWidth = component.right - component.left + 1;
+    const componentHeight = component.bottom - component.top + 1;
+    if (component.area < Math.max(24, largestArea * .012) || componentWidth < 6 || componentHeight < 6) {
+      return [];
+    }
+    const rows = componentRowRuns(labels, width, component);
+    const roofSearchBottom = Math.min(
+      component.bottom,
+      component.top + Math.max(2, Math.floor(componentHeight * .62))
+    );
+    let bestRoof = null;
+    for (let y = component.top; y <= roofSearchBottom; y++) {
+      for (const run of rows[y - component.top] || []) {
+        if (!bestRoof || run.width > bestRoof.run.width) bestRoof = { y, run };
+      }
+    }
+    if (!bestRoof || bestRoof.run.width < Math.max(5, componentWidth * .34)) return [];
+
+    const minimumBandWidth = bestRoof.run.width * .68;
+    let bandTop = bestRoof.y;
+    let bandBottom = bestRoof.y + 1;
+    const bandRuns = [bestRoof.run];
+    for (let y = bestRoof.y - 1; y >= component.top; y--) {
+      const run = roofRunForRow(rows[y - component.top] || [], bestRoof.run, minimumBandWidth);
+      if (!run) break;
+      bandRuns.unshift(run);
+      bandTop = y;
+    }
+    for (let y = bestRoof.y + 1; y <= component.bottom; y++) {
+      const run = roofRunForRow(rows[y - component.top] || [], bestRoof.run, minimumBandWidth);
+      if (!run) break;
+      bandRuns.push(run);
+      bandBottom = y + 1;
+    }
+    const roof = {
+      left: numericMedian(bandRuns.map(run => run.left)),
+      right: numericMedian(bandRuns.map(run => run.right)),
+      top: bandTop,
+      bottom: bandBottom
+    };
+    roof.width = roof.right - roof.left;
+    const roofHeight = roof.bottom - roof.top;
+    if (roofHeight > componentHeight * .38 || roof.width < roofHeight * 1.8) return [];
+    const roofCenterY = (roof.top + roof.bottom) / 2;
+    if (roofCenterY > component.top + componentHeight * .5) return [];
+    const roofSpanRatio = clamp(roof.width / componentWidth, 0, 1);
+    const roofThicknessRatio = clamp(roofHeight / Math.max(1, componentHeight * .18), 0, 1);
+    const roofConfidence = clamp(.38 + roofSpanRatio * .38 + roofThicknessRatio * .18, .45, .98);
+    const prefix = `component-${componentIndex}`;
+    const features = [
+      {
+        id: `${prefix}-roof-left`,
+        type: 'roof-endpoint',
+        label: 'קצה גג שמאלי',
+        point: roundFeaturePoint({ x: roof.left, y: roofCenterY }),
+        confidence: roofConfidence,
+        componentIndex
+      },
+      {
+        id: `${prefix}-roof-right`,
+        type: 'roof-endpoint',
+        label: 'קצה גג ימני',
+        point: roundFeaturePoint({ x: roof.right, y: roofCenterY }),
+        confidence: roofConfidence,
+        componentIndex
+      }
+    ];
+
+    if (roof.bottom > component.bottom) return features;
+    let rootRow = roof.bottom;
+    let rootRuns = [];
+    const roofReference = { left: roof.left, right: roof.right, width: roof.width };
+    const maximumProbeRow = Math.min(component.bottom, roof.bottom + Math.max(2, Math.round(componentHeight * .035)));
+    for (let y = roof.bottom; y <= maximumProbeRow; y++) {
+      const candidates = (rows[y - component.top] || []).filter(run => (
+        runOverlap(run, roofReference) > 0
+        && run.width >= 2
+        && run.width <= roof.width * .62
+      ));
+      if (candidates.length) {
+        rootRow = y;
+        rootRuns = candidates.slice(0, 8);
+        break;
+      }
+    }
+
+    let stemIndex = 0;
+    for (const rootRun of rootRuns) {
+      const stem = traceStemFromRun(rows, component, roof, rootRun, rootRow);
+      if (!stem) continue;
+      const root = roundFeaturePoint(stem.root);
+      const tip = roundFeaturePoint(stem.tip);
+      const confidence = Math.min(roofConfidence, stem.confidence);
+      const stemId = `${prefix}-stem-${stemIndex}`;
+      features.push({
+        id: stemId,
+        type: 'stem-axis',
+        label: 'ציר ירך',
+        point: root,
+        root,
+        tip,
+        angleDeg: Math.round(Math.atan2(tip.x - root.x, tip.y - root.y) * 180000 / Math.PI) / 1000,
+        confidence,
+        componentIndex,
+        widthPx: Math.round(stem.width * 1000) / 1000
+      });
+      features.push({
+        id: `${prefix}-junction-${stemIndex}`,
+        type: 'roof-stem-junction',
+        label: 'מקום יציאת הירך מן הגג',
+        point: root,
+        root,
+        tip,
+        confidence,
+        componentIndex,
+        stemId
+      });
+      stemIndex++;
+    }
+    return features;
+  }
+
+  function detectPhotographedFeatures(binary, width, height) {
+    const { labels, components } = connectedComponents(binary, width, height);
+    if (!components.length) return [];
+    const largestArea = Math.max(...components.map(component => component.area));
+    const meaningful = components
+      .filter(component => component.area >= Math.max(24, largestArea * .012))
+      .sort((first, second) => second.area - first.area || first.label - second.label)
+      .slice(0, 12);
+    const features = [];
+    let fallbackBudget = 40;
+    for (let index = 0; index < meaningful.length; index++) {
+      const detected = detectComponentFeatures(labels, width, meaningful[index], index, largestArea);
+      if (detected.length) {
+        features.push(...detected);
+        continue;
+      }
+      if (fallbackBudget <= 0) continue;
+      const fallback = fallbackComponentFeatures(labels, width, meaningful[index], index)
+        .slice(0, fallbackBudget);
+      features.push(...fallback);
+      fallbackBudget -= fallback.length;
+    }
+    return features;
+  }
+
+  function pointDistance(first, second) {
+    return Math.hypot(second.x - first.x, second.y - first.y);
+  }
+
+  function contourCornerFlags(points, options = {}) {
+    const threshold = clamp(
+      Number.isFinite(+options.cornerAngleDeg) ? +options.cornerAngleDeg : 55,
+      28,
+      100
+    ) * Math.PI / 180;
+    return points.map((point, index) => {
+      const previous = points[(index - 1 + points.length) % points.length];
+      const next = points[(index + 1) % points.length];
+      const incoming = { x: point.x - previous.x, y: point.y - previous.y };
+      const outgoing = { x: next.x - point.x, y: next.y - point.y };
+      const denominator = Math.hypot(incoming.x, incoming.y) * Math.hypot(outgoing.x, outgoing.y);
+      if (denominator < 1e-9) return true;
+      const cosine = clamp(
+        (incoming.x * outgoing.x + incoming.y * outgoing.y) / denominator,
+        -1,
+        1
+      );
+      return Math.acos(cosine) >= threshold;
+    });
+  }
+
+  function rotateClosedContourForStableClosure(points, cornerFlags) {
+    if (points.length < 4) return { points: points.slice(), cornerFlags: cornerFlags.slice() };
+    let bestIndex = 0;
+    let bestScore = Infinity;
+    for (let index = 0; index < points.length; index++) {
+      const previous = (index - 1 + points.length) % points.length;
+      const bothCorners = cornerFlags[index] && cornerFlags[previous];
+      const score = pointDistance(points[previous], points[index]) * (bothCorners ? .08 : 1);
+      if (score < bestScore) {
+        bestScore = score;
+        bestIndex = index;
+      }
+    }
+    return {
+      points: [...points.slice(bestIndex), ...points.slice(0, bestIndex)],
+      cornerFlags: [...cornerFlags.slice(bestIndex), ...cornerFlags.slice(0, bestIndex)]
+    };
+  }
+
+  function clampControlVector(vector, maximumLength) {
+    const length = Math.hypot(vector.x, vector.y);
+    if (!length || length <= maximumLength) return vector;
+    const scale = maximumLength / length;
+    return { x: vector.x * scale, y: vector.y * scale };
+  }
+
+  function cubicSegmentControls(points, cornerFlags, index) {
+    const start = points[index];
+    const end = points[index + 1];
+    const previous = points[(index - 1 + points.length) % points.length];
+    const following = points[(index + 2) % points.length];
+    const chord = { x: end.x - start.x, y: end.y - start.y };
+    const chordLength = Math.max(1e-6, Math.hypot(chord.x, chord.y));
+    const maximumControlLength = chordLength * .42;
+    let outgoing = cornerFlags[index]
+      ? { x: chord.x / 3, y: chord.y / 3 }
+      : { x: (end.x - previous.x) / 6, y: (end.y - previous.y) / 6 };
+    let incoming = cornerFlags[index + 1]
+      ? { x: chord.x / 3, y: chord.y / 3 }
+      : { x: (following.x - start.x) / 6, y: (following.y - start.y) / 6 };
+    outgoing = clampControlVector(outgoing, maximumControlLength);
+    incoming = clampControlVector(incoming, maximumControlLength);
+
+    /* A noisy raster sample can point a Catmull-Rom tangent backwards. Falling
+       back to the chord keeps the cubic inside its local edge corridor and
+       prevents tiny loops without sacrificing a real smooth tangent. */
+    if (outgoing.x * chord.x + outgoing.y * chord.y <= 0) {
+      outgoing = { x: chord.x / 3, y: chord.y / 3 };
+    }
+    if (incoming.x * chord.x + incoming.y * chord.y <= 0) {
+      incoming = { x: chord.x / 3, y: chord.y / 3 };
+    }
+    return {
+      x1: start.x + outgoing.x,
+      y1: start.y + outgoing.y,
+      x2: end.x - incoming.x,
+      y2: end.y - incoming.y
+    };
+  }
+
+  function contourToSmoothCommands(source, options = {}) {
+    const clean = removeCollinear(source);
+    if (clean.length < 3) return [];
+    const prepared = rotateClosedContourForStableClosure(
+      clean,
+      contourCornerFlags(clean, options)
+    );
+    const points = prepared.points;
+    const cornerFlags = prepared.cornerFlags;
+    const commands = [{ type: 'M', x: points[0].x, y: points[0].y }];
+    for (let index = 0; index < points.length - 1; index++) {
+      const controls = cubicSegmentControls(points, cornerFlags, index);
+      commands.push({
+        type: 'C',
+        ...controls,
+        x: points[index + 1].x,
+        y: points[index + 1].y
+      });
+    }
+    /* Z owns the shortest or a corner-to-corner closing edge. This avoids a
+       duplicate editable anchor at the M point while making the only linear
+       closure visually negligible (or structurally correct at a corner). */
+    commands.push({ type: 'Z' });
+    return commands;
+  }
+
+  function buildVector(contours, width, height, metadata = {}, features = [], options = {}) {
     const commands = [];
     for (const contour of contours) {
-      commands.push({ type: 'M', x: contour[0].x, y: contour[0].y });
-      for (const point of contour.slice(1)) commands.push({ type: 'L', x: point.x, y: point.y });
-      commands.push({ type: 'Z' });
+      commands.push(...contourToSmoothCommands(contour, options));
     }
-    const anchors = commands.filter(command => command.type === 'M' || command.type === 'L').length;
+    const anchors = commands.filter(command => ['M', 'L', 'C'].includes(command.type)).length;
+    const controls = commands.filter(command => command.type === 'C').length * 2;
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       sourceKey: 'photographed-selection',
       letter: '',
       tradition: 'custom',
@@ -454,8 +952,24 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
       weight: 1,
       revision: 1,
       paths: [{ rule: 'evenodd', commands }],
-      handleCounts: { anchors, controls: 0, total: anchors },
-      trace: { ...metadata, contourCount: contours.length, anchorCount: anchors }
+      handleCounts: { anchors, controls, total: anchors + controls },
+      featureCoordinateSpace: 'vector-local',
+      featureAngleConvention: 'signed-clockwise-from-vertical',
+      features: features.map(feature => ({
+        ...feature,
+        point: feature.point ? { ...feature.point } : undefined,
+        root: feature.root ? { ...feature.root } : undefined,
+        tip: feature.tip ? { ...feature.tip } : undefined
+      })),
+      trace: {
+        ...metadata,
+        contourCount: contours.length,
+        anchorCount: anchors,
+        controlCount: controls,
+        cubicCount: controls / 2,
+        featureCount: features.length,
+        stemCount: features.filter(feature => feature.type === 'stem-axis').length
+      }
     };
   }
 
@@ -491,22 +1005,26 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
     const rawContours = traceContours(binary, width, height);
     const simplified = simplifyContours(rawContours, width, height, options);
     if (!simplified.contours.length) throw new Error('The photographed letter did not produce a closed vector contour.');
+    const features = detectPhotographedFeatures(binary, width, height);
+    const vector = buildVector(simplified.contours, width, height, {
+      threshold,
+      selectedPixelCount,
+      inkPixelCount,
+      tolerance: simplified.tolerance,
+      selectionVertexCount: polygon.length,
+      droppedContourCount: simplified.droppedContourCount,
+      semanticMethod: 'component-projection-v1'
+    }, features, options);
     return {
       threshold,
       selectedPixelCount,
       inkPixelCount,
       contours: simplified.contours,
+      features,
       tolerance: simplified.tolerance,
       selectionVertexCount: polygon.length,
       droppedContourCount: simplified.droppedContourCount,
-      vector: buildVector(simplified.contours, width, height, {
-        threshold,
-        selectedPixelCount,
-        inkPixelCount,
-        tolerance: simplified.tolerance,
-        selectionVertexCount: polygon.length,
-        droppedContourCount: simplified.droppedContourCount
-      })
+      vector
     };
   }
 

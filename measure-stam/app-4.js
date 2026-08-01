@@ -1417,7 +1417,13 @@ function exportImage() {
   out.height = state.image.height;
   const context = out.getContext('2d');
   context.drawImage(state.image, 0, 0);
-  for (const object of state.objects) drawObjectToContext(context, object);
+  if (typeof drawSourceEditPatches === 'function') {
+    drawSourceEditPatches(context, { exportQuality: true });
+  }
+  for (const object of state.objects) {
+    if (object.role === 'vector-source-frame') continue;
+    drawObjectToContext(context, object);
+  }
   out.toBlob(blob => downloadBlob(blob, 'מדידאות-מראה-סופר.png'), 'image/png');
 }
 function exportOverlayUnit() {
@@ -1483,6 +1489,15 @@ function drawObjectToContext(context, object) {
     context.ellipse((left + right) / 2, (top + bottom) / 2, (right - left) / 2, (bottom - top) / 2, 0, 0, Math.PI * 2);
     if (object.fillEnabled) context.fill();
     context.stroke();
+  } else if (object.type === 'slantScan' && points.length === 4) {
+    context.save();
+    context.setLineDash([9, 7]);
+    context.beginPath();
+    context.moveTo(points[0].x, points[0].y);
+    points.slice(1).forEach(point => context.lineTo(point.x, point.y));
+    context.closePath();
+    context.stroke();
+    context.restore();
   } else if (object.type === 'rowAlign' && points.length === 4) {
     context.save();
     context.setLineDash([9, 7]);
@@ -1799,7 +1814,7 @@ async function serializeProjectV3() {
       title: captured.projectMeta.title || 'פרויקט מדידאות',
       createdAt: captured.projectMeta.createdAt,
       updatedAt: now,
-      appVersion: '2026.08.01b',
+      appVersion: '2026.08.01c',
       locale: 'he-IL'
     },
     source: {
@@ -1853,19 +1868,20 @@ function serializeMeasurementV3(object, stableIdMap = new Map()) {
   copy.uid = copy.uid || createStableId('measurement');
   copy.legacy = { ...(copy.legacy || {}), runtimeId: object.id };
   copy.id = copy.uid;
-  for (const key of ['kastelId', 'regionId', 'linkedVectorId', 'linkedKastelId']) {
+  for (const key of ['kastelId', 'regionId', 'linkedVectorId', 'linkedKastelId', 'sourceScanId']) {
     if (object[key] == null) continue;
     copy.legacy[`${key}Runtime`] = object[key];
-    copy[key] = stableIdMap.get(object[key]) || object[key];
+    copy[key] = stableIdMap.get(object[key]) || null;
   }
   const sourceFrameId = object.sourceFrameId ?? object.sourceSelection?.frameId;
   if (sourceFrameId != null) {
-    const stableSourceFrameId = stableIdMap.get(sourceFrameId) || sourceFrameId;
+    const stableSourceFrameId = stableIdMap.get(sourceFrameId) || null;
     copy.legacy.sourceFrameIdRuntime = sourceFrameId;
     copy.sourceFrameId = stableSourceFrameId;
     copy.sourceSelection = {
       ...(copy.sourceSelection || {}),
-      frameId: stableSourceFrameId
+      frameId: stableSourceFrameId,
+      frameMissing: stableSourceFrameId == null
     };
   }
   copy.semantic = {
@@ -1924,7 +1940,7 @@ function measurementGeometry(object) {
   if (object.type === 'area') {
     return { ...common, type: 'quadratic-path', closed: object.closed !== false, segments: structuredCloneSafe(object.segments || []) };
   }
-  if (['kastel', 'nibRegion', 'letterTemplate', 'rowAlign', 'ellipse', 'circle'].includes(object.type)) {
+  if (['kastel', 'nibRegion', 'letterTemplate', 'rowAlign', 'slantScan', 'ellipse', 'circle'].includes(object.type)) {
     return { ...common, type: 'polygon', closed: true };
   }
   if (object.type === 'thirds') return { ...common, type: 'point' };
@@ -2001,6 +2017,15 @@ function measurementMetrics(object) {
       candidates,
       needsHumanLetterConfirmation: object.rowAlignment?.needsHumanLetterConfirmation !== false,
       calibrationId: activeNibCalibrationId()
+    };
+  }
+  if (object.type === 'slantScan') {
+    return {
+      metricId: 'slant-scan-roi.v1',
+      status: object.slantAnalysis?.status || 'idle',
+      candidateCount: object.slantAnalysis?.candidateCount || 0,
+      candidateIds: structuredCloneSafe(object.slantAnalysis?.candidateIds || []),
+      diagnostics: structuredCloneSafe(object.slantAnalysis?.diagnostics || null)
     };
   }
   if (['length', 'nib', 'gap'].includes(object.type) && object.points.length >= 2) {
@@ -2332,18 +2357,19 @@ function prepareLoadedObjects(rawObjects) {
     object.id = runtimeId;
   }
   for (const object of objects) {
-    for (const key of ['kastelId', 'regionId', 'linkedVectorId', 'linkedKastelId']) {
+    for (const key of ['kastelId', 'regionId', 'linkedVectorId', 'linkedKastelId', 'sourceScanId']) {
       if (object[key] == null) continue;
       const translated = referenceMap.get(String(object[key]));
-      if (translated) object[key] = translated;
+      object[key] = translated || null;
     }
     const sourceFrameId = object.sourceFrameId ?? object.sourceSelection?.frameId;
     if (sourceFrameId != null) {
-      const translated = referenceMap.get(String(sourceFrameId)) || sourceFrameId;
+      const translated = referenceMap.get(String(sourceFrameId)) || null;
       object.sourceFrameId = translated;
       object.sourceSelection = {
         ...(object.sourceSelection || {}),
-        frameId: translated
+        frameId: translated,
+        frameMissing: translated == null
       };
     }
   }
@@ -2355,7 +2381,7 @@ function normalizeLoadedObject(object) {
   const normalized = structuredCloneSafe(object);
   const allowedTypes = new Set([
     'area', 'length', 'angle', 'kastel', 'thirds', 'nib', 'nibRegion', 'gap',
-    'letterTemplate', 'rowAlign', 'ellipse', 'circle'
+    'letterTemplate', 'rowAlign', 'slantScan', 'ellipse', 'circle'
   ]);
   if (!allowedTypes.has(normalized.type)) throw new Error('Unsupported measurement type');
   if (normalized.geometry?.nodes) throw new Error('Unsupported rich path geometry');
@@ -2373,15 +2399,15 @@ function normalizeLoadedObject(object) {
   if (normalized.points.some(point => !Number.isFinite(point.x) || !Number.isFinite(point.y))) {
     throw new Error('Invalid measurement geometry');
   }
-  if (['kastel', 'nibRegion', 'rowAlign', 'ellipse', 'circle'].includes(normalized.type) && normalized.points.length === 4) {
+  if (['kastel', 'nibRegion', 'rowAlign', 'slantScan', 'ellipse', 'circle'].includes(normalized.type) && normalized.points.length === 4) {
     normalized.points = normalizeQuadPoints(normalized.points);
   }
   const minimumPoints = {
     area: 3, length: 2, angle: 2, kastel: 4, thirds: 1, nib: 2,
-    nibRegion: 4, gap: 2, letterTemplate: 4, rowAlign: 4, ellipse: 4, circle: 4
+    nibRegion: 4, gap: 2, letterTemplate: 4, rowAlign: 4, slantScan: 4, ellipse: 4, circle: 4
   };
   if (normalized.points.length < minimumPoints[normalized.type]) throw new Error('Incomplete measurement geometry');
-  if (['kastel', 'nibRegion', 'letterTemplate', 'rowAlign', 'ellipse', 'circle'].includes(normalized.type) && normalized.points.length !== 4) {
+  if (['kastel', 'nibRegion', 'letterTemplate', 'rowAlign', 'slantScan', 'ellipse', 'circle'].includes(normalized.type) && normalized.points.length !== 4) {
     throw new Error('Rectangular measurements require four corners');
   }
   normalized.uid = normalized.uid || (typeof normalized.id === 'string' ? normalized.id : createStableId('measurement'));

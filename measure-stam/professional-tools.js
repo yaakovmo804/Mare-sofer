@@ -270,7 +270,8 @@ function armProfessionalMeasurement(metric, options = {}) {
     category: metric.category,
     formulaKey: metric.formulaKey || null,
     name: options.name || metric.name,
-    letter: options.letter || null
+    letter: options.letter || null,
+    tool: options.tool || metric.tool || null
   };
   if (state.draft) {
     const draftMetricId = state.draft.semanticMetricId || null;
@@ -286,12 +287,25 @@ function activateProfessionalMetric(metricId, options = {}) {
   if (!metric) return;
   professionalSuite.activeMetricId = metricId;
   switchWorkspaceMode('source');
-  if (metricId === 'balconies' || metricId === 'slants-parallels') {
-    if (metricId === 'slants-parallels' && ui.angleRef) ui.angleRef.value = 'vertical';
+  if (metricId === 'balconies') {
     renderProfessionalReport(metricId);
-    statusText.textContent = metricId === 'balconies'
-      ? 'בחר ו׳ או ת׳ והפעל מדידת מרפסת'
-      : 'בחר ד׳, ה׳ או ת׳ והפעל מדידת נטייה';
+    statusText.textContent = 'בחר ו׳ או ת׳ והפעל מדידת מרפסת';
+    return;
+  }
+  if (metricId === 'slants-parallels') {
+    if (ui.angleRef) ui.angleRef.value = 'vertical';
+    renderProfessionalReport(metricId);
+    if (!state.image) {
+      statusText.textContent = 'יש להעלות צילום לפני סריקת ירכות ונטיות';
+      return;
+    }
+    if (state.formula.analysis.status === 'running') {
+      statusText.textContent = 'ניתוח התמונה עדיין פועל; מיד בסיומו ניתן לסמן אזור ירכות';
+      return;
+    }
+    armProfessionalMeasurement(metric, { name: 'סריקת ירכות ונטיות', tool: 'slantScan' });
+    setTool('slantScan');
+    statusText.textContent = 'גרור מסגרת סביב שורה או אזור הכולל את הירכות לבדיקה';
     return;
   }
   if (metricId === 'optical-center') {
@@ -349,6 +363,7 @@ function createMeasurementButton(label, metricId, letter) {
   button.type = 'button';
   button.className = 'btn compact';
   button.textContent = label;
+  button.disabled = !state.image || state.formula.analysis.status === 'running';
   button.addEventListener('click', () => {
     armProfessionalMeasurement(metric, { name: `${metric.name} — ${letter}׳`, letter });
     if (metric.formulaKey) {
@@ -357,6 +372,7 @@ function createMeasurementButton(label, metricId, letter) {
     }
     if (metricId === 'slants-parallels' && ui.angleRef) ui.angleRef.value = 'vertical';
     setTool(metric.tool);
+    if (metricId === 'slants-parallels') statusText.textContent = `סמן שתי נקודות לאורך ירך ${letter}׳`;
   });
   return button;
 }
@@ -493,19 +509,60 @@ function renderProfessionalReport(metricId) {
     appendMetricInfoButton(actions, metricId);
     box.append(actions);
   } else if (metricId === 'slants-parallels') {
-    const samples = state.objects.filter(object => object.semanticMetricId === metricId && object.type === 'angle');
+    const scans = state.objects.filter(object => object.type === 'slantScan' && MASTER_SYSTEM.metricIdFor(object) === metricId);
+    const samples = state.objects.filter(object => object.type === 'angle' && MASTER_SYSTEM.metricIdFor(object) === metricId);
+    const comparisonSamples = samples.filter(object => {
+      if (object.excludedFromComparison === true) return false;
+      return ['ד', 'ה', 'ת'].includes(object.letterRole);
+    });
     const table = document.createElement('table');
-    table.innerHTML = '<thead><tr><th>אות</th><th>זווית</th></tr></thead>';
+    table.innerHTML = '<thead><tr><th>מועמד</th><th>סיווג אנושי</th><th>זווית</th><th>ביטחון</th></tr></thead>';
     const body = document.createElement('tbody');
-    for (const object of samples) {
+    for (const [index, object] of samples.entries()) {
       const row = document.createElement('tr');
-      row.innerHTML = `<td>${escapeHtml(object.letterRole || 'לא סווג')}</td><td>${formatSignedAngle(signedSlantAngle(object))}</td>`;
+      const source = document.createElement('td');
+      source.textContent = object.sourceScanId != null || object.sourceScanUid
+        ? `אוטומטי ${index + 1}`
+        : `ידני ${index + 1}`;
+      const classification = document.createElement('td');
+      const select = document.createElement('select');
+      select.setAttribute('aria-label', `סיווג ירך מועמדת ${index + 1}`);
+      select.innerHTML = '<option value="">בחר אות</option><option value="ד">ד׳</option><option value="ה">ה׳</option><option value="ת">ת׳</option><option value="exclude">לא לכלול</option>';
+      select.value = object.excludedFromComparison === true
+        ? 'exclude'
+        : ['ד', 'ה', 'ת'].includes(object.letterRole) ? object.letterRole : '';
+      select.addEventListener('change', () => setSlantCandidateClassification(object.id, select.value));
+      classification.append(select);
+      const angle = document.createElement('td');
+      angle.textContent = `${formatSignedAngle(signedSlantAngle(object))}${object.excludedFromComparison === true ? ' · לא נכלל' : ''}`;
+      const confidence = document.createElement('td');
+      confidence.textContent = Number.isFinite(+object.candidateConfidence)
+        ? `${Math.round(+object.candidateConfidence * 100)}%`
+        : '—';
+      row.append(source, classification, angle, confidence);
       body.append(row);
+    }
+    if (!samples.length) {
+      const empty = document.createElement('tr');
+      const completedScan = scans.find(scan => scan.slantAnalysis?.status === 'done');
+      empty.innerHTML = `<td colspan="4">${completedScan
+        ? 'לא זוהו ירכות בתחום שסומן. אפשר לסמן אזור אחר או להשתמש במדידה הידנית.'
+        : 'טרם סומנה שורה או אזור לסריקת ירכות.'}</td>`;
+      body.append(empty);
     }
     table.append(body);
     box.append(table);
-    if (samples.length) {
-      const signedAngles = samples.map(signedSlantAngle).filter(Number.isFinite);
+    const pendingCount = samples.filter(object =>
+      object.excludedFromComparison !== true && !['ד', 'ה', 'ת'].includes(object.letterRole)
+    ).length;
+    if (pendingCount) {
+      const pending = document.createElement('p');
+      pending.className = 'microcopy';
+      pending.textContent = `${pendingCount} מועמדים ממתינים לסיווג ד׳, ה׳, ת׳ או „לא לכלול”. רק מועמדים שסווגו נכנסים להשוואה.`;
+      box.append(pending);
+    }
+    if (comparisonSamples.length) {
+      const signedAngles = comparisonSamples.map(signedSlantAngle).filter(Number.isFinite);
       const median = MASTER_SYSTEM.median(signedAngles);
       const spread = signedAngles.length ? Math.max(...signedAngles) - Math.min(...signedAngles) : null;
       const summary = document.createElement('p');
@@ -515,10 +572,17 @@ function renderProfessionalReport(metricId) {
     }
     const actions = document.createElement('div');
     actions.className = 'professional-actions';
+    const scan = document.createElement('button');
+    scan.type = 'button';
+    scan.className = 'btn compact primary';
+    scan.textContent = scans.length ? 'סרוק שורה או אזור נוסף' : 'סמן שורה או אזור לסריקה';
+    scan.disabled = !state.image || state.formula.analysis.status === 'running';
+    scan.addEventListener('click', () => activateProfessionalMetric(metricId));
+    actions.append(scan);
     for (const letter of ['ד', 'ה', 'ת']) actions.append(createMeasurementButton(`מדוד ירך ${letter}׳`, metricId, letter));
     appendMetricInfoButton(actions, metricId);
     box.append(actions);
-    box.append(buildCorrectionPanel(samples));
+    if (comparisonSamples.length) box.append(buildCorrectionPanel(comparisonSamples));
   } else if (metricId === 'circle-ellipse') {
     const actions = document.createElement('div');
     actions.className = 'professional-actions';
@@ -849,6 +913,219 @@ function drawRowAlignmentObject(context, object, { selected, draft, points }) {
   context.restore();
 }
 
+function slantCandidateIsLinkedToScan(candidate, scan) {
+  if (!candidate || !scan || candidate.type !== 'angle') return false;
+  const scanUid = scan.uid || String(scan.id);
+  return candidate.sourceScanId === scan.id || candidate.sourceScanUid === scanUid;
+}
+
+function setSlantCandidateClassification(objectId, value) {
+  const object = state.objects.find(item => item.id === objectId && item.type === 'angle');
+  if (!object || MASTER_SYSTEM.metricIdFor(object) !== 'slants-parallels') return null;
+  snapshot();
+  if (['ד', 'ה', 'ת'].includes(value)) {
+    object.letterRole = value;
+    object.excludedFromComparison = false;
+    object.slantClassification = { status: 'confirmed', letter: value, source: 'human' };
+    object.display = { ...(object.display || {}), resultLabelVisible: true };
+  } else if (value === 'exclude') {
+    object.letterRole = null;
+    object.excludedFromComparison = true;
+    object.slantClassification = { status: 'excluded', letter: null, source: 'human' };
+    object.display = { ...(object.display || {}), resultLabelVisible: false };
+  } else {
+    object.letterRole = null;
+    object.excludedFromComparison = false;
+    object.slantClassification = { status: 'pending', letter: null, source: 'human' };
+    object.display = { ...(object.display || {}), resultLabelVisible: true };
+  }
+  markObjectModified(object);
+  renderAll();
+  statusText.textContent = object.excludedFromComparison
+    ? 'המועמד נשמר באבחון אך לא ייכלל בהשוואת הנטיות'
+    : object.letterRole
+      ? `המועמד סווג כירך ${object.letterRole}׳ ונכלל בהשוואה`
+      : 'המועמד הוחזר למצב ממתין ואינו נכלל עדיין בהשוואה';
+  return object;
+}
+
+function analyzeSlantScan(object) {
+  if (!state.image || object?.type !== 'slantScan' || object.points?.length !== 4) return null;
+  professionalSuite.activeGroup = 'aman';
+  professionalSuite.activeMetricId = 'slants-parallels';
+  $('professionalSuitePanel').hidden = false;
+  object.semanticMetricId = 'slants-parallels';
+  object.category = 'slant';
+  enforceSemanticStyle(object);
+
+  const xs = object.points.map(point => point.x);
+  const ys = object.points.map(point => point.y);
+  const left = clamp(Math.floor(Math.min(...xs)), 0, state.image.width - 1);
+  const top = clamp(Math.floor(Math.min(...ys)), 0, state.image.height - 1);
+  const right = clamp(Math.ceil(Math.max(...xs)), left + 1, state.image.width);
+  const bottom = clamp(Math.ceil(Math.max(...ys)), top + 1, state.image.height);
+  const sourceWidth = right - left;
+  const sourceHeight = bottom - top;
+  const maximumRasterDimension = 1800;
+  const maximumRasterArea = 2_000_000;
+  const factor = Math.min(
+    1,
+    maximumRasterDimension / Math.max(sourceWidth, sourceHeight),
+    Math.sqrt(maximumRasterArea / Math.max(1, sourceWidth * sourceHeight))
+  );
+  const width = Math.max(2, Math.round(sourceWidth * factor));
+  const height = Math.max(2, Math.round(sourceHeight * factor));
+  const scanUid = object.uid || String(object.id);
+  const previousCandidates = state.objects.filter(candidate => slantCandidateIsLinkedToScan(candidate, object));
+  const previousByCandidateId = new Map(previousCandidates
+    .filter(candidate => candidate.candidateId)
+    .map(candidate => [candidate.candidateId, candidate]));
+  object.slantAnalysis = {
+    status: 'running',
+    roi: { left, top, right, bottom, width: sourceWidth, height: sourceHeight },
+    candidateCount: 0,
+    candidateIds: [],
+    diagnostics: null
+  };
+
+  const analyzer = globalThis.MEDIDAOT_SLANT_ANALYZER;
+  if (!analyzer?.analyze) {
+    object.slantAnalysis = {
+      ...object.slantAnalysis,
+      status: 'failed',
+      diagnostics: { reason: 'analyzer-unavailable' }
+    };
+    markObjectModified(object);
+    renderAll();
+    statusText.textContent = 'מנתח הירכות אינו זמין; אפשר להשתמש במדידת הזווית הידנית';
+    return object.slantAnalysis;
+  }
+
+  try {
+    const raster = document.createElement('canvas');
+    raster.width = width;
+    raster.height = height;
+    const context = raster.getContext('2d', { willReadFrequently: true });
+    if (!context) throw new Error('canvas-context-unavailable');
+    context.fillStyle = '#fff';
+    context.fillRect(0, 0, width, height);
+    context.save();
+    context.scale(factor, factor);
+    context.translate(-left, -top);
+    context.drawImage(state.image, 0, 0);
+    if (typeof drawSourceEditPatches === 'function') drawSourceEditPatches(context, { exportQuality: true });
+    if (typeof drawLetterTemplateForExport === 'function') {
+      for (const sourceEdit of state.objects.filter(candidate =>
+        typeof isSourceRegionEdit === 'function' && isSourceRegionEdit(candidate)
+      )) drawLetterTemplateForExport(context, sourceEdit);
+    }
+    context.restore();
+    const imageData = context.getImageData(0, 0, width, height);
+    const result = analyzer.analyze(imageData, { x: 0, y: 0, width, height });
+    state.objects = state.objects.filter(candidate => !slantCandidateIsLinkedToScan(candidate, object));
+    const candidateObjects = [];
+    const toSourcePoint = point => ({
+      x: left + point.x / factor,
+      y: top + point.y / factor
+    });
+    const toSourceBounds = bounds => bounds ? {
+      x: left + bounds.x / factor,
+      y: top + bounds.y / factor,
+      width: bounds.width / factor,
+      height: bounds.height / factor,
+      left: left + bounds.left / factor,
+      top: top + bounds.top / factor,
+      right: left + bounds.right / factor,
+      bottom: top + bounds.bottom / factor
+    } : null;
+    for (const [index, candidate] of (result.candidates || []).entries()) {
+      const previous = previousByCandidateId.get(candidate.id);
+      const letter = ['ד', 'ה', 'ת'].includes(previous?.letterRole) ? previous.letterRole : null;
+      const excluded = previous?.excludedFromComparison === true;
+      const status = excluded ? 'excluded' : letter ? 'confirmed' : 'pending';
+      const angleObject = makeObject('angle', [
+        toSourcePoint(candidate.roiRoot),
+        toSourcePoint(candidate.roiTip)
+      ], {
+        name: `ירך מזוהה ${index + 1}`,
+        semanticMetricId: 'slants-parallels',
+        category: 'slant',
+        angleRef: 'vertical',
+        auto: true,
+        sourceScanId: object.id,
+        sourceScanUid: scanUid,
+        candidateId: candidate.id,
+        candidateConfidence: candidate.confidence,
+        candidateBounds: toSourceBounds(candidate.bounds?.roi),
+        candidateStrokeWidthPx: Number.isFinite(+candidate.strokeWidthPx) ? +candidate.strokeWidthPx / factor : null,
+        candidateLengthPx: Number.isFinite(+candidate.lengthPx) ? +candidate.lengthPx / factor : null,
+        candidateRoofSupport: candidate.roofSupport?.found ? {
+          ...structuredCloneSafe(candidate.roofSupport),
+          sourceY: top + candidate.roofSupport.roiY / factor,
+          roiY: candidate.roofSupport.roiY / factor,
+          horizontalRunPx: candidate.roofSupport.horizontalRunPx / factor,
+          distanceFromRootPx: candidate.roofSupport.distanceFromRootPx / factor
+        } : structuredCloneSafe(candidate.roofSupport || null),
+        letterRole: letter,
+        excludedFromComparison: excluded,
+        slantClassification: {
+          status,
+          letter,
+          source: previous?.slantClassification?.source || (previous ? 'restored' : 'pending-human')
+        },
+        display: {
+          resultLabelVisible: excluded ? false : previous?.display?.resultLabelVisible !== false
+        }
+      });
+      state.objects.push(angleObject);
+      candidateObjects.push(angleObject);
+    }
+    object.slantAnalysis = {
+      status: 'done',
+      analyzerVersion: result.version || analyzer.version || null,
+      roi: { left, top, right, bottom, width: sourceWidth, height: sourceHeight },
+      raster: { width, height, scale: factor },
+      candidateCount: candidateObjects.length,
+      candidateIds: candidateObjects.map(candidate => candidate.candidateId),
+      measurementUids: candidateObjects.map(candidate => candidate.uid),
+      diagnostics: structuredCloneSafe(result.diagnostics || null),
+      analyzedAt: new Date().toISOString()
+    };
+    markObjectModified(object);
+    renderAll();
+    statusText.textContent = candidateObjects.length
+      ? `זוהו ${candidateObjects.length} מועמדי ירך; יש לסווג כל אחד כד׳, ה׳, ת׳ או „לא לכלול”`
+      : 'לא זוהו ירכות בתחום שסומן; אפשר לסמן אזור אחר או להשתמש במדידה הידנית';
+    return object.slantAnalysis;
+  } catch (error) {
+    object.slantAnalysis = {
+      ...object.slantAnalysis,
+      status: 'failed',
+      diagnostics: { reason: error?.message || 'analysis-failed' },
+      analyzedAt: new Date().toISOString()
+    };
+    markObjectModified(object);
+    renderAll();
+    statusText.textContent = 'סריקת הירכות לא הושלמה; אפשר לסמן אזור אחר או להשתמש במדידה הידנית';
+    return object.slantAnalysis;
+  }
+}
+
+function drawSlantScanObject(context, object, { selected, draft, points }) {
+  if (!Array.isArray(points) || points.length !== 4) return;
+  context.save();
+  context.strokeStyle = semanticColorForObject(object, MASTER_SYSTEM.colorFor({ semanticMetricId: 'slants-parallels' }));
+  context.lineWidth = Math.max(selected ? 3.5 : 2.5, object.lineWidth || 3);
+  context.globalAlpha = draft ? .72 : selected ? .95 : .7;
+  context.setLineDash(selected ? [10, 5] : [7, 6]);
+  context.beginPath();
+  context.moveTo(points[0].x, points[0].y);
+  for (const point of points.slice(1)) context.lineTo(point.x, point.y);
+  context.closePath();
+  context.stroke();
+  context.restore();
+}
+
 function compositionStageTransform() {
   const rect = $('compositionCanvas').getBoundingClientRect();
   const width = professionalSuite.composition.width || 1600;
@@ -1032,6 +1309,11 @@ function addLetterToComposition(source, options = {}) {
     };
   }
   item.letter.sourceFrameId = null;
+  item.letter.editTarget = 'overlay-copy';
+  item.letter.role = 'reference-overlay';
+  for (const key of ['sourceOriginalVector', 'sourceOriginalPoints', 'sourceBackgroundColor', 'sourceInkColor', 'sourceEdgeCoverPx']) {
+    delete item.letter[key];
+  }
   item.letter.letterGridVisible = false;
   item.letter.letterEditAnchors = false;
   item.letter.vectorDetailLevel = 'structural';
@@ -1131,21 +1413,52 @@ function createCorrectionPreview(measurementId, sourceId, targetAngle) {
     alert('נדרשות לפחות שתי נקודות עוגן של האיבר. יש לבחור קבוצת „איברים” או להקיף את האיבר בסימון חופשי.');
     return null;
   }
+  const selectedIdSet = new Set(handleIds);
+  const semanticStem = typeof semanticFeatureHandles === 'function'
+    ? semanticFeatureHandles(source, allLetterVectorHandles(source))
+      .filter(feature => feature.semanticType === 'stem-axis' && feature.rootImage && feature.tipImage)
+      .map(feature => ({
+        feature,
+        overlap: (feature.groupIds || [feature.id]).filter(id => selectedIdSet.has(id)).length
+      }))
+      .filter(entry => entry.overlap > 0)
+      .sort((a, b) => b.overlap - a.overlap)[0]?.feature || null
+    : null;
+  const topHandle = handles.reduce((best, handle) => handle.point.y < best.point.y ? handle : best, handles[0]);
+  const bottomHandle = handles.reduce((best, handle) => handle.point.y > best.point.y ? handle : best, handles[0]);
+  const featureRoot = semanticStem?.rootImage || { ...topHandle.point };
+  const featureTip = semanticStem?.tipImage || { ...bottomHandle.point };
   const measurementSigned = MASTER_SYSTEM.signedVerticalAngle(measurement.points[0], measurement.points[1]);
-  const currentSigned = selectedFeatureAngle(handles);
+  const currentSigned = Number.isFinite(+semanticStem?.axisAngleDeg)
+    ? +semanticStem.axisAngleDeg
+    : semanticStem
+      ? MASTER_SYSTEM.signedVerticalAngle(featureRoot, featureTip)
+      : selectedFeatureAngle(handles);
   if (!Number.isFinite(currentSigned) || Math.abs(currentSigned) > 55) {
     alert('לא ניתן לחשב ירך מוארכת מן העוגנים שנבחרו. יש לבחור קבוצה צרה וארוכה יותר לאורך האיבר.');
     return null;
   }
   const signedTarget = clamp(targetAngle, -35, 35);
-  const pivotY = Math.max(...handles.map(handle => handle.point.y));
-  const moves = handles.map(handle => ({
-    id: handle.id,
-    y: handle.point.y,
-    target: MASTER_SYSTEM.shearPointToAngle(handle.point, pivotY, currentSigned, signedTarget)
-  })).sort((a, b) => a.y - b.y);
-  for (const move of moves) {
-    engine.moveObjectHandle(clone, move.id, move.target, { asset: letterAsset(source), moveAdjacentControls: true });
+  const pivot = { ...featureRoot };
+  let tiltResult = null;
+  if (typeof engine.tiltObjectHandles === 'function') {
+    tiltResult = engine.tiltObjectHandles(clone, handleIds, signedTarget, {
+      asset: letterAsset(source),
+      rootImage: featureRoot,
+      tipImage: featureTip,
+      pivotImage: pivot,
+      currentAngleDeg: currentSigned,
+      moveAdjacentControls: true
+    });
+  } else {
+    const moves = handles.map(handle => ({
+      id: handle.id,
+      y: handle.point.y,
+      target: MASTER_SYSTEM.shearPointToAngle(handle.point, pivot.y, currentSigned, signedTarget)
+    })).sort((a, b) => a.y - b.y);
+    for (const move of moves) {
+      engine.moveObjectHandle(clone, move.id, move.target, { asset: letterAsset(source), moveAdjacentControls: true });
+    }
   }
   const session = {
     id: typeof crypto?.randomUUID === 'function' ? `correction-${crypto.randomUUID()}` : `correction-${Date.now()}`,
@@ -1156,11 +1469,13 @@ function createCorrectionPreview(measurementId, sourceId, targetAngle) {
     semanticMetricId: measurement.semanticMetricId || 'slants-parallels',
     metricColor: semanticColorForObject(measurement, MASTER_SYSTEM.colorFor({ semanticMetricId: 'slants-parallels' })),
     operation: {
-      type: 'vertical-angle-shear-preview',
+      type: tiltResult ? 'vector-axis-tilt-preview' : 'vertical-angle-shear-preview',
       measurementAngleDeg: measurementSigned,
       currentFeatureAngleDeg: currentSigned,
       targetAngleDeg: signedTarget,
-      pivotY
+      pivot,
+      pivotY: pivot.y,
+      engineRevision: tiltResult?.revision ?? null
     },
     mode: 'manual',
     constraints: {
@@ -1465,6 +1780,9 @@ globalThis.MEDIDAOT_PROFESSIONAL_TOOLS = Object.freeze({
   analyzeRowAlignment,
   resolveRowAlignmentCandidates,
   setRowCandidateClassification,
+  analyzeSlantScan,
+  setSlantCandidateClassification,
+  drawSlantScanObject,
   measureRoofSeatFromActiveKastel,
   transferSelectedLetterToComposition,
   createCorrectionPreview,

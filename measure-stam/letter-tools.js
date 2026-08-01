@@ -4,6 +4,7 @@ const LETTER_VECTOR_CACHE = new Map();
 const LETTER_MORPH_CACHE = new Map();
 const LETTER_TOPOLOGY_CACHE = new Map();
 const LETTER_WEIGHT_DIAGNOSTICS = new WeakMap();
+const SOURCE_EDIT_PATCH_CACHE = new Map();
 const LETTER_MORPH_CACHE_MAX_BYTES = 24 * 1024 * 1024;
 const LETTER_MORPH_PIXELS_PER_NIB = 24;
 const LETTER_EDIT_TOPOLOGY_PIXELS_PER_NIB = 8;
@@ -34,6 +35,7 @@ const LETTER_SOURCE_FIRST_UNSAFE_INTENSITY = Object.freeze({
 });
 let activeLetterTradition = 'beitYosef';
 let letterWeightHistoryArmed = false;
+let letterVisualPropertyHistoryArmed = false;
 let letterMorphForceExactId = null;
 let letterWeightRenderFrame = null;
 let letterWeightRenderDirty = false;
@@ -463,6 +465,10 @@ function isPhotographedVector(object) {
   return isLetterTemplate(object) &&
     object?.template?.kind === 'image-region-vector' &&
     Array.isArray(object?.letterVector?.paths);
+}
+
+function isSourceRegionEdit(object) {
+  return isPhotographedVector(object) && object.editTarget === 'source-region';
 }
 
 function letterTraditionLabel(tradition) {
@@ -962,10 +968,13 @@ function normalizeLetterTemplateObject(object) {
     : object.letterEditAnchors === true
       ? 'full'
       : 'structural';
-  object.letterEditAnchors = object.vectorDetailLevel !== 'structural';
+  object.letterEditAnchors = photographed || object.vectorDetailLevel !== 'structural';
   object.letterGridVisible = object.letterGridVisible !== false;
   object.letterLockAspect = object.letterLockAspect !== false;
-  object.role = 'reference-overlay';
+  object.editTarget = photographed && object.editTarget === 'source-region'
+    ? 'source-region'
+    : photographed ? 'overlay-copy' : null;
+  object.role = object.editTarget === 'source-region' ? 'source-vector-edit' : 'reference-overlay';
   object.display = { ...(object.display || {}), resultLabelVisible: false };
   return object;
 }
@@ -1219,6 +1228,135 @@ function organLevelVectorHandles(handles) {
   return groups;
 }
 
+function pointToAxisDistance(point, root, tip) {
+  const dx = tip.x - root.x;
+  const dy = tip.y - root.y;
+  const lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared < 1e-8) return { distance: distance(point, root), t: 0 };
+  const t = ((point.x - root.x) * dx + (point.y - root.y) * dy) / lengthSquared;
+  const projection = { x: root.x + dx * t, y: root.y + dy * t };
+  return { distance: distance(point, projection), t };
+}
+
+function pairedJunctionAnchorHandles(feature, features, localAnchors, baseTolerance) {
+  if (feature?.type !== 'roof-stem-junction' || !feature.stemId) return [];
+  const stem = features.find(item => item.id === feature.stemId && item.root && item.tip);
+  if (!stem) return [];
+  const dx = stem.tip.x - stem.root.x;
+  const dy = stem.tip.y - stem.root.y;
+  const axisLength = Math.hypot(dx, dy);
+  if (axisLength < 1e-6) return [];
+  const axis = { x: dx / axisLength, y: dy / axisLength };
+  const normal = { x: -axis.y, y: axis.x };
+  const width = Math.max(1, +stem.widthPx || +feature.widthPx || baseTolerance);
+  const longitudinalWindow = Math.max(baseTolerance * 1.4, width * 1.2);
+  const lateralLimit = Math.max(baseTolerance * 2.4, width * 1.8);
+  const sideEpsilon = Math.max(.2, width * .06);
+  const entries = localAnchors.map(entry => {
+    const relative = {
+      x: entry.local.x - stem.root.x,
+      y: entry.local.y - stem.root.y
+    };
+    return {
+      ...entry,
+      longitudinal: relative.x * axis.x + relative.y * axis.y,
+      lateral: relative.x * normal.x + relative.y * normal.y
+    };
+  }).filter(entry => (
+    Math.abs(entry.longitudinal) <= longitudinalWindow &&
+    Math.abs(entry.lateral) <= lateralLimit
+  ));
+  const negative = entries.filter(entry => entry.lateral < -sideEpsilon);
+  const positive = entries.filter(entry => entry.lateral > sideEpsilon);
+  let best = null;
+  for (const first of negative) for (const second of positive) {
+    const longitudinalGap = Math.abs(first.longitudinal - second.longitudinal);
+    const span = second.lateral - first.lateral;
+    if (longitudinalGap > longitudinalWindow || span < width * .25 || span > lateralLimit * 2) continue;
+    const meanLongitudinal = (first.longitudinal + second.longitudinal) / 2;
+    const score = longitudinalGap * 2 + Math.abs(meanLongitudinal) +
+      Math.abs(Math.abs(first.lateral) - Math.abs(second.lateral)) * .25;
+    if (!best || score < best.score) best = { first, second, score };
+  }
+  return best ? [best.first.handle, best.second.handle] : [];
+}
+
+function semanticFeatureHandles(object, handles) {
+  const features = object?.letterVector?.features;
+  const engine = letterVectorEngine();
+  if (!Array.isArray(features) || !features.length || !engine?.localToImage) return [];
+  const anchors = handles.filter(handle => handle.kind === 'anchor');
+  if (!anchors.length) return [];
+  const localAnchors = anchors.map(handle => ({
+    handle,
+    local: handle.local || engine.imageToLocal(object, handle.point, { asset: letterAsset(object) })
+  }));
+  const viewBox = object.letterVector.viewBox || [0, 0, 1, 1];
+  const baseTolerance = Math.max(1.8, Math.min(viewBox[2], viewBox[3]) * .055);
+  const result = [];
+
+  for (const feature of features) {
+    const point = feature.point || feature.root || feature.tip;
+    if (!point || !Number.isFinite(+point.x) || !Number.isFinite(+point.y)) continue;
+    let group = [];
+    let editable = true;
+    if (feature.type === 'stem-axis' && feature.root && feature.tip) {
+      const tolerance = Math.max(baseTolerance, (+feature.widthPx || 0) * 1.25);
+      group = localAnchors
+        .filter(entry => {
+          const relation = pointToAxisDistance(entry.local, feature.root, feature.tip);
+          return relation.t >= -.18 && relation.t <= 1.18 && relation.distance <= tolerance;
+        })
+        .map(entry => entry.handle);
+      if (group.length < 2) {
+        const rootNearest = [...localAnchors].sort((a, b) => distance(a.local, feature.root) - distance(b.local, feature.root))[0];
+        const tipNearest = [...localAnchors].sort((a, b) => distance(a.local, feature.tip) - distance(b.local, feature.tip))[0];
+        group = [rootNearest?.handle, tipNearest?.handle].filter(Boolean);
+      }
+    } else if (feature.type === 'roof-stem-junction') {
+      group = pairedJunctionAnchorHandles(feature, features, localAnchors, baseTolerance);
+      editable = group.length === 2;
+    }
+    if (!group.length) {
+      const nearest = localAnchors.reduce((best, entry) => (
+        distance(entry.local, point) < distance(best.local, point) ? entry : best
+      ), localAnchors[0]);
+      group = nearest ? [nearest.handle] : [];
+    }
+    if (!group.length) continue;
+    const rootImage = feature.root
+      ? engine.localToImage(object, feature.root, { asset: letterAsset(object) })
+      : engine.localToImage(object, point, { asset: letterAsset(object) });
+    const tipImage = feature.tip
+      ? engine.localToImage(object, feature.tip, { asset: letterAsset(object) })
+      : null;
+    const displayPoint = feature.type === 'stem-axis' && feature.root && feature.tip
+      ? midpoint(feature.root, feature.tip)
+      : point;
+    result.push({
+      ...group[0],
+      id: group[0].id,
+      point: engine.localToImage(object, displayPoint, { asset: letterAsset(object) }),
+      groupIds: [...new Set(group.map(handle => handle.id))],
+      groupCount: group.length,
+      groupLabel: `semantic:${feature.id}`,
+      featureId: feature.id,
+      semanticType: feature.type,
+      semanticLabel: feature.label || feature.type,
+      editable,
+      geometryStatus: feature.geometryStatus || 'current',
+      semanticStale: feature.geometryStatus === 'stale' || feature.stale === true,
+      rootImage,
+      tipImage,
+      axisAngleDeg: feature.type === 'stem-axis' && tipImage
+        ? MASTER_SYSTEM.signedVerticalAngle(rootImage, tipImage)
+        : Number.isFinite(+feature.angleDeg) ? +feature.angleDeg : null,
+      confidence: Number.isFinite(+feature.confidence) ? +feature.confidence : null
+    });
+  }
+  return result;
+}
+
 function anchorIdsInsideLasso(handles, points) {
   return [...new Set(handles
     .filter(handle => handle.kind === 'anchor' && pointInPolygon(handle.point, points))
@@ -1228,19 +1366,26 @@ function anchorIdsInsideLasso(handles, points) {
 function letterVectorHandles(object) {
   if (!isLetterTemplate(object) || !object.letterEditAnchors) return [];
   const handles = allLetterVectorHandles(object);
+  const semanticHandles = semanticFeatureHandles(object, handles);
+  if (object.vectorDetailLevel === 'structural') return semanticHandles;
   if (object.vectorDetailLevel === 'organs') {
     const automaticGroups = organLevelVectorHandles(handles);
     const selectedIds = state.letterVectorSelection?.id === object.id
       ? [...new Set(state.letterVectorSelection.handleIds || [])]
       : [];
-    if (!selectedIds.length) return automaticGroups;
+    const claimedIds = new Set(semanticHandles.flatMap(handle => handle.groupIds || [handle.id]));
+    const remainingGroups = automaticGroups.filter(group =>
+      !(group.groupIds || [group.id]).some(id => claimedIds.has(id))
+    );
+    if (!selectedIds.length) return [...semanticHandles, ...remainingGroups];
     const selectedSet = new Set(selectedIds);
     const selectedAnchors = handles.filter(handle => handle.kind === 'anchor' && selectedSet.has(handle.id));
     const preciseGroup = representativeOrganHandle(selectedAnchors, `custom:${selectedIds.join('|')}`);
-    if (!preciseGroup) return automaticGroups;
+    if (!preciseGroup) return [...semanticHandles, ...remainingGroups];
     return [
+      ...semanticHandles,
       preciseGroup,
-      ...automaticGroups.filter(group => !group.groupIds.some(id => selectedSet.has(id)))
+      ...remainingGroups.filter(group => !group.groupIds.some(id => selectedSet.has(id)))
     ];
   }
   if (object.vectorDetailLevel === 'curves') {
@@ -1319,12 +1464,36 @@ function drawLetterVectorHandles(object) {
     ctx.stroke();
   }
 
+  for (const handle of handles.filter(item => item.semanticType === 'stem-axis' && item.tipImage)) {
+    const root = imageToScreen(handle.rootImage || handle.point);
+    const tip = imageToScreen(handle.tipImage);
+    ctx.save();
+    ctx.strokeStyle = 'rgba(217,119,6,.75)';
+    ctx.lineWidth = 1.6;
+    ctx.setLineDash([5, 4]);
+    ctx.beginPath();
+    ctx.moveTo(root.x, root.y);
+    ctx.lineTo(tip.x, tip.y);
+    ctx.stroke();
+    ctx.restore();
+  }
+
   for (const handle of handles) {
     const point = imageToScreen(handle.point);
     const selected = selectedHandleIds.has(handle.id)
       || handle.groupIds?.some(id => selectedHandleIds.has(id));
     ctx.beginPath();
-    if (handle.kind === 'anchor') {
+    if (handle.semanticType) {
+      const radius = selected ? 7 : 5.5;
+      ctx.fillStyle = selected ? '#f59e0b' : '#fffbeb';
+      ctx.strokeStyle = selected ? '#78350f' : '#d97706';
+      ctx.lineWidth = selected ? 2.5 : 1.7;
+      ctx.moveTo(point.x, point.y - radius);
+      ctx.lineTo(point.x + radius, point.y);
+      ctx.lineTo(point.x, point.y + radius);
+      ctx.lineTo(point.x - radius, point.y);
+      ctx.closePath();
+    } else if (handle.kind === 'anchor') {
       ctx.fillStyle = selected ? '#f59e0b' : '#ffffff';
       ctx.strokeStyle = selected ? '#92400e' : '#0369a1';
       ctx.lineWidth = selected ? 2.4 : 1.45;
@@ -1339,11 +1508,21 @@ function drawLetterVectorHandles(object) {
     }
     ctx.fill();
     ctx.stroke();
+    if (handle.semanticType && (selected || object.vectorDetailLevel === 'structural')) {
+      ctx.fillStyle = '#78350f';
+      ctx.font = '700 9px system-ui, sans-serif';
+      ctx.textAlign = 'right';
+      ctx.fillText(handle.semanticLabel || 'נקודה מבנית', point.x - 8, point.y - 8);
+    }
   }
   ctx.restore();
 }
 
 function drawLetterTemplateSelection(object) {
+  if (isSourceRegionEdit(object)) {
+    drawLetterVectorHandles(object);
+    return;
+  }
   const rect = letterObjectRect(object);
   const topLeft = imageToScreen({ x: rect.left, y: rect.top });
   const bottomRight = imageToScreen({ x: rect.right, y: rect.bottom });
@@ -1395,8 +1574,177 @@ function drawLetterTemplateForExport(context, object) {
   drawLetterTemplateShape(context, object, letterObjectRect(object), 1, { exportQuality: true });
 }
 
+function rasterizedSelectionMask(width, height, polygon) {
+  const mask = new Uint8Array(width * height);
+  if (!Array.isArray(polygon) || polygon.length < 3) return mask;
+  for (let y = 0; y < height; y++) {
+    const scanY = y + .5;
+    const intersections = [];
+    for (let index = 0; index < polygon.length; index++) {
+      const first = polygon[index];
+      const second = polygon[(index + 1) % polygon.length];
+      if ((first.y > scanY) === (second.y > scanY)) continue;
+      intersections.push(first.x + (scanY - first.y) * (second.x - first.x) / (second.y - first.y));
+    }
+    intersections.sort((a, b) => a - b);
+    for (let index = 0; index + 1 < intersections.length; index += 2) {
+      const start = clamp(Math.ceil(intersections[index] - .5), 0, width);
+      const end = clamp(Math.floor(intersections[index + 1] - .5), -1, width - 1);
+      for (let x = start; x <= end; x++) mask[y * width + x] = 1;
+    }
+  }
+  return mask;
+}
+
+function sourcePatchFallbackRgb(color) {
+  const match = /^#([0-9a-f]{6})$/i.exec(color || '');
+  return match
+    ? [parseInt(match[1].slice(0, 2), 16), parseInt(match[1].slice(2, 4), 16), parseInt(match[1].slice(4, 6), 16)]
+    : [241, 228, 200];
+}
+
+function buildSourceEditPatch(object) {
+  if (!state.image || !Array.isArray(object.sourceOriginalPoints) || !Array.isArray(object.sourceSelection?.polygon)) return null;
+  const bounds = letterObjectRect({ points: object.sourceOriginalPoints });
+  const maximumDimension = 1800;
+  const maximumPixels = 3_000_000;
+  const scale = Math.min(
+    1,
+    maximumDimension / Math.max(1, bounds.width, bounds.height),
+    Math.sqrt(maximumPixels / Math.max(1, bounds.width * bounds.height))
+  );
+  const width = Math.max(2, Math.round(bounds.width * scale));
+  const height = Math.max(2, Math.round(bounds.height * scale));
+  const crop = createLetterMaskCanvas(width, height);
+  const cropContext = crop.getContext('2d', { willReadFrequently: true });
+  if (!cropContext) return null;
+  cropContext.imageSmoothingEnabled = true;
+  cropContext.imageSmoothingQuality = 'high';
+  cropContext.drawImage(state.image, bounds.left, bounds.top, bounds.width, bounds.height, 0, 0, width, height);
+  const original = cropContext.getImageData(0, 0, width, height);
+  const polygon = object.sourceSelection.polygon.map(point => ({
+    x: (point.x - bounds.left) * scale,
+    y: (point.y - bounds.top) * scale
+  }));
+  const selection = rasterizedSelectionMask(width, height, polygon);
+  const rawInk = new Uint8Array(width * height);
+  const threshold = clamp((+object.sourceSelection.threshold || 150) + 30, 35, 235);
+  const luminanceAt = index => {
+    const offset = index * 4;
+    return original.data[offset] * .2126 + original.data[offset + 1] * .7152 + original.data[offset + 2] * .0722;
+  };
+  for (let index = 0; index < rawInk.length; index++) {
+    if (selection[index] && original.data[index * 4 + 3] >= 24 && luminanceAt(index) <= threshold) rawInk[index] = 1;
+  }
+  const target = rawInk.slice();
+  const radius = Math.max(1, Math.round(2.2 * scale));
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const index = y * width + x;
+    if (!rawInk[index]) continue;
+    for (let dy = -radius; dy <= radius; dy++) for (let dx = -radius; dx <= radius; dx++) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx < 0 || nx >= width || ny < 0 || ny >= height || dx * dx + dy * dy > radius * radius) continue;
+      const neighbour = ny * width + nx;
+      if (selection[neighbour]) target[neighbour] = 1;
+    }
+  }
+
+  const patch = createLetterMaskCanvas(width, height);
+  const patchContext = patch.getContext('2d');
+  if (!patchContext) return null;
+  const output = patchContext.createImageData(width, height);
+  const assigned = new Uint8Array(width * height);
+  const queue = new Int32Array(width * height);
+  let queueStart = 0;
+  let queueEnd = 0;
+  const neighbours = [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]];
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const index = y * width + x;
+    if (!target[index]) continue;
+    let red = 0;
+    let green = 0;
+    let blue = 0;
+    let count = 0;
+    for (const [dx, dy] of neighbours) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+      const neighbour = ny * width + nx;
+      if (target[neighbour] || luminanceAt(neighbour) <= threshold) continue;
+      const offset = neighbour * 4;
+      red += original.data[offset];
+      green += original.data[offset + 1];
+      blue += original.data[offset + 2];
+      count++;
+    }
+    if (!count) continue;
+    const offset = index * 4;
+    output.data[offset] = Math.round(red / count);
+    output.data[offset + 1] = Math.round(green / count);
+    output.data[offset + 2] = Math.round(blue / count);
+    output.data[offset + 3] = 255;
+    assigned[index] = 1;
+    queue[queueEnd++] = index;
+  }
+  while (queueStart < queueEnd) {
+    const index = queue[queueStart++];
+    const x = index % width;
+    const y = Math.floor(index / width);
+    for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+      const neighbour = ny * width + nx;
+      if (!target[neighbour] || assigned[neighbour]) continue;
+      const sourceOffset = index * 4;
+      const targetOffset = neighbour * 4;
+      output.data[targetOffset] = output.data[sourceOffset];
+      output.data[targetOffset + 1] = output.data[sourceOffset + 1];
+      output.data[targetOffset + 2] = output.data[sourceOffset + 2];
+      output.data[targetOffset + 3] = 255;
+      assigned[neighbour] = 1;
+      queue[queueEnd++] = neighbour;
+    }
+  }
+  const fallback = sourcePatchFallbackRgb(object.sourceBackgroundColor);
+  for (let index = 0; index < target.length; index++) {
+    if (!target[index] || assigned[index]) continue;
+    const offset = index * 4;
+    output.data[offset] = fallback[0];
+    output.data[offset + 1] = fallback[1];
+    output.data[offset + 2] = fallback[2];
+    output.data[offset + 3] = 255;
+  }
+  patchContext.putImageData(output, 0, 0);
+  return { canvas: patch, bounds, width, height };
+}
+
+function sourceEditPatchAsset(object) {
+  const key = `${state.loadGeneration}:${object.uid || object.id}:${object.sourceSelection?.threshold || ''}:${object.sourceSelection?.polygon?.length || 0}`;
+  if (!SOURCE_EDIT_PATCH_CACHE.has(key)) {
+    while (SOURCE_EDIT_PATCH_CACHE.size >= 6) SOURCE_EDIT_PATCH_CACHE.delete(SOURCE_EDIT_PATCH_CACHE.keys().next().value);
+    SOURCE_EDIT_PATCH_CACHE.set(key, buildSourceEditPatch(object));
+  }
+  return SOURCE_EDIT_PATCH_CACHE.get(key);
+}
+
+function drawSourceEditPatches(context, options = {}) {
+  for (const object of state.objects || []) {
+    if (!isSourceRegionEdit(object)) continue;
+    const asset = sourceEditPatchAsset(object);
+    if (!asset?.canvas) continue;
+    context.save();
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = 'high';
+    context.drawImage(asset.canvas, 0, 0, asset.width, asset.height,
+      asset.bounds.left, asset.bounds.top, asset.bounds.width, asset.bounds.height);
+    context.restore();
+  }
+}
+
 function nearestLetterHandle(object, imagePoint, thresholdScreen = 20) {
-  if (!isLetterTemplate(object)) return null;
+  if (!isLetterTemplate(object) || isSourceRegionEdit(object)) return null;
   const target = imageToScreen(imagePoint);
   let best = null;
   let bestDistance = Infinity;
@@ -1578,6 +1926,280 @@ function selectedLetterTemplate() {
   return state.objects.find(object => object.id === state.selectedId && isLetterTemplate(object)) || null;
 }
 
+function selectedSemanticVectorFeature(object = selectedLetterTemplate()) {
+  const selection = state.letterVectorSelection;
+  if (!object || selection?.id !== object.id || !selection.featureId) return null;
+  return letterVectorHandles(object).find(handle => handle.featureId === selection.featureId) || null;
+}
+
+function updateSemanticFeatureAfterHandleMove(object, selection, change = {}) {
+  const features = object?.letterVector?.features;
+  const engine = letterVectorEngine();
+  if (!Array.isArray(features) || !selection?.featureId || !engine?.imageToLocal || !engine?.localToImage) return;
+  const feature = features.find(item => item.id === selection.featureId);
+  if (!feature) return;
+  const moveLocalPoint = local => {
+    if (!local) return local;
+    const image = engine.localToImage(object, local, { asset: letterAsset(object) });
+    const target = change.deltaImage
+      ? { x: image.x + change.deltaImage.x, y: image.y + change.deltaImage.y }
+      : change.targetImage || image;
+    return engine.imageToLocal(object, target, { asset: letterAsset(object) });
+  };
+  if (change.deltaImage) {
+    if (feature.type === 'roof-stem-junction' && feature.stemId) {
+      if (feature.point) feature.point = moveLocalPoint(feature.point);
+      if (feature.root) feature.root = moveLocalPoint(feature.root);
+      const stem = features.find(item => item.id === feature.stemId);
+      if (stem?.root) {
+        stem.root = moveLocalPoint(stem.root);
+        stem.point = { ...stem.root };
+        if (stem.tip) {
+          stem.angleDeg = Math.atan2(stem.tip.x - stem.root.x, stem.tip.y - stem.root.y) * 180 / Math.PI;
+          feature.tip = { ...stem.tip };
+        }
+        stem.geometryStatus = 'current';
+        delete stem.stale;
+        delete stem.staleReason;
+        delete stem.staleRevision;
+      }
+    } else {
+      if (feature.point) feature.point = moveLocalPoint(feature.point);
+      if (feature.root) feature.root = moveLocalPoint(feature.root);
+      if (feature.tip) feature.tip = moveLocalPoint(feature.tip);
+      for (const linked of features) {
+        if (linked.stemId !== feature.id) continue;
+        if (linked.point) linked.point = moveLocalPoint(linked.point);
+        if (linked.root) linked.root = moveLocalPoint(linked.root);
+        if (linked.tip) linked.tip = moveLocalPoint(linked.tip);
+      }
+    }
+  } else if (change.targetImage) {
+    const targetLocal = engine.imageToLocal(object, change.targetImage, { asset: letterAsset(object) });
+    feature.point = { ...targetLocal };
+    if (feature.root) feature.root = { ...targetLocal };
+    if (feature.type === 'roof-stem-junction' && feature.stemId) {
+      const stem = features.find(item => item.id === feature.stemId);
+      if (stem) {
+        stem.root = { ...targetLocal };
+        stem.point = { ...targetLocal };
+        if (stem.tip) stem.angleDeg = Math.atan2(stem.tip.x - stem.root.x, stem.tip.y - stem.root.y) * 180 / Math.PI;
+      }
+    }
+  }
+  feature.geometryStatus = 'current';
+  delete feature.stale;
+  delete feature.staleReason;
+  delete feature.staleRevision;
+}
+
+function reconcileSemanticVectorFeatures(object) {
+  const features = object?.letterVector?.features;
+  const engine = letterVectorEngine();
+  if (!Array.isArray(features) || !features.length || !engine?.enumerateHandles) return;
+  const anchors = engine.enumerateHandles(object, {
+    asset: letterAsset(object),
+    coordinateSpace: 'local'
+  }).filter(handle => handle.kind === 'anchor');
+  if (!anchors.length) return;
+  const viewBox = object.letterVector.viewBox || [0, 0, 1, 1];
+  const baseTolerance = Math.max(2, Math.min(viewBox[2], viewBox[3]) * .07);
+  const markStale = (feature, reason = 'unpaired-outline-after-edit') => {
+    feature.geometryStatus = 'stale';
+    feature.stale = true;
+    feature.staleReason = reason;
+    feature.staleRevision = Number.isFinite(+object.letterVector.revision)
+      ? +object.letterVector.revision
+      : null;
+  };
+  for (const feature of features.filter(item => item.type === 'stem-axis' && item.root && item.tip)) {
+    const originalRoot = { ...feature.root };
+    const originalTip = { ...feature.tip };
+    const axisDx = originalTip.x - originalRoot.x;
+    const axisDy = originalTip.y - originalRoot.y;
+    const axisLength = Math.hypot(axisDx, axisDy);
+    if (axisLength < 1e-6) {
+      markStale(feature);
+      continue;
+    }
+    const axisUnit = { x: axisDx / axisLength, y: axisDy / axisLength };
+    const normalUnit = { x: -axisUnit.y, y: axisUnit.x };
+    const tolerance = Math.max(baseTolerance, (+feature.widthPx || 0) * 1.45);
+    const sideEpsilon = Math.max(.2, (+feature.widthPx || baseTolerance) * .05);
+    const related = anchors.map((handle, index) => {
+      const relative = {
+        x: handle.point.x - originalRoot.x,
+        y: handle.point.y - originalRoot.y
+      };
+      return {
+        handle,
+        index,
+        longitudinal: relative.x * axisUnit.x + relative.y * axisUnit.y,
+        lateral: relative.x * normalUnit.x + relative.y * normalUnit.y
+      };
+    }).filter(entry => (
+      entry.longitudinal >= -axisLength * .2 &&
+      entry.longitudinal <= axisLength * 1.2 &&
+      Math.abs(entry.lateral) <= tolerance
+    ));
+    const negative = related.filter(entry => entry.lateral < -sideEpsilon);
+    const positive = related.filter(entry => entry.lateral > sideEpsilon);
+    const pairWindow = Math.max(2, (+feature.widthPx || baseTolerance) * 1.4, axisLength * .08);
+    const minimumSpan = Math.max(1, (+feature.widthPx || baseTolerance) * .25);
+    const candidates = [];
+    for (const first of negative) for (const second of positive) {
+      const longitudinalGap = Math.abs(first.longitudinal - second.longitudinal);
+      const span = second.lateral - first.lateral;
+      if (longitudinalGap > pairWindow || span < minimumSpan || span > tolerance * 2.1) continue;
+      candidates.push({
+        first,
+        second,
+        score: longitudinalGap + Math.abs(Math.abs(first.lateral) - Math.abs(second.lateral)) * .12,
+        longitudinal: (first.longitudinal + second.longitudinal) / 2,
+        lateral: (first.lateral + second.lateral) / 2
+      });
+    }
+    candidates.sort((a, b) => a.score - b.score || a.longitudinal - b.longitudinal);
+    const used = new Set();
+    const pairs = [];
+    for (const candidate of candidates) {
+      if (used.has(candidate.first.index) || used.has(candidate.second.index)) continue;
+      used.add(candidate.first.index);
+      used.add(candidate.second.index);
+      pairs.push(candidate);
+    }
+    pairs.sort((a, b) => a.longitudinal - b.longitudinal);
+    const pairSpan = pairs.length > 1
+      ? pairs[pairs.length - 1].longitudinal - pairs[0].longitudinal
+      : 0;
+    if (pairs.length < 2 || pairSpan < Math.max(4, axisLength * .2)) {
+      markStale(feature);
+      continue;
+    }
+    const meanLongitudinal = pairs.reduce((sum, pair) => sum + pair.longitudinal, 0) / pairs.length;
+    const meanLateral = pairs.reduce((sum, pair) => sum + pair.lateral, 0) / pairs.length;
+    let covariance = 0;
+    let variance = 0;
+    for (const pair of pairs) {
+      const delta = pair.longitudinal - meanLongitudinal;
+      covariance += delta * (pair.lateral - meanLateral);
+      variance += delta * delta;
+    }
+    if (variance < 1e-6) {
+      markStale(feature);
+      continue;
+    }
+    const slope = covariance / variance;
+    const intercept = meanLateral - slope * meanLongitudinal;
+    const maximumResidual = Math.max(2, (+feature.widthPx || baseTolerance) * .4);
+    const residual = Math.max(...pairs.map(pair => Math.abs(pair.lateral - (intercept + slope * pair.longitudinal))));
+    if (!Number.isFinite(slope) || Math.abs(slope) > Math.tan(55 * Math.PI / 180) || residual > maximumResidual) {
+      markStale(feature);
+      continue;
+    }
+    const endpointSnap = Math.max(1, (+feature.widthPx || baseTolerance) * .08);
+    const rootPair = pairs.reduce((best, pair) =>
+      Math.abs(pair.longitudinal) < Math.abs(best.longitudinal) ? pair : best, pairs[0]);
+    const tipPair = pairs.reduce((best, pair) =>
+      Math.abs(pair.longitudinal - axisLength) < Math.abs(best.longitudinal - axisLength) ? pair : best, pairs[0]);
+    const rootLongitudinal = Math.abs(rootPair.longitudinal) <= endpointSnap ? 0 : rootPair.longitudinal;
+    const tipDelta = tipPair.longitudinal - axisLength;
+    const tipLongitudinal = axisLength + (Math.abs(tipDelta) <= endpointSnap ? 0 : tipDelta);
+    const pointOnFittedAxis = longitudinal => {
+      const lateral = intercept + slope * longitudinal;
+      return {
+        x: originalRoot.x + axisUnit.x * longitudinal + normalUnit.x * lateral,
+        y: originalRoot.y + axisUnit.y * longitudinal + normalUnit.y * lateral
+      };
+    };
+    feature.root = pointOnFittedAxis(rootLongitudinal);
+    feature.tip = pointOnFittedAxis(tipLongitudinal);
+    feature.point = { ...feature.root };
+    feature.angleDeg = Math.atan2(feature.tip.x - feature.root.x, feature.tip.y - feature.root.y) * 180 / Math.PI;
+    feature.geometryStatus = 'current';
+    delete feature.stale;
+    delete feature.staleReason;
+    delete feature.staleRevision;
+    for (const junction of features.filter(item => item.stemId === feature.id)) {
+      junction.point = { ...feature.root };
+      junction.root = { ...feature.root };
+      junction.tip = { ...feature.tip };
+      junction.geometryStatus = 'current';
+    }
+  }
+  const roofEndpoints = features.filter(item => item.type === 'roof-endpoint' && item.point);
+  for (const feature of roofEndpoints) {
+    const originalPoint = { ...feature.point };
+    const sibling = roofEndpoints
+      .filter(item => item.id !== feature.id && (
+        feature.componentIndex == null || item.componentIndex == null || item.componentIndex === feature.componentIndex
+      ))
+      .reduce((best, item) => {
+        if (!best) return item;
+        return distance(item.point, originalPoint) < distance(best.point, originalPoint) ? item : best;
+      }, null);
+    const roofDx = (sibling?.point?.x ?? originalPoint.x) - originalPoint.x;
+    const roofDy = (sibling?.point?.y ?? originalPoint.y) - originalPoint.y;
+    const roofLength = Math.hypot(roofDx, roofDy);
+    if (!sibling || roofLength < 1e-6) {
+      markStale(feature, 'unpaired-roof-outline-after-edit');
+      continue;
+    }
+    const tangent = { x: roofDx / roofLength, y: roofDy / roofLength };
+    const normal = { x: -tangent.y, y: tangent.x };
+    const alongTolerance = Math.max(2.5, baseTolerance * 1.5);
+    const crossTolerance = Math.max(4, baseTolerance * 2.75);
+    const sideEpsilon = Math.max(.2, baseTolerance * .04);
+    const nearby = anchors.map((handle, index) => {
+      const relative = {
+        x: handle.point.x - originalPoint.x,
+        y: handle.point.y - originalPoint.y
+      };
+      return {
+        handle,
+        index,
+        along: relative.x * tangent.x + relative.y * tangent.y,
+        across: relative.x * normal.x + relative.y * normal.y
+      };
+    }).filter(entry => (
+      Math.abs(entry.along) <= alongTolerance &&
+      Math.abs(entry.across) <= crossTolerance
+    ));
+    const negative = nearby.filter(entry => entry.across < -sideEpsilon);
+    const positive = nearby.filter(entry => entry.across > sideEpsilon);
+    const pairWindow = Math.max(1.5, baseTolerance * .45);
+    const minimumSpan = Math.max(1, baseTolerance * .2);
+    const maximumSpan = crossTolerance * 1.6;
+    const maximumMidpointShift = Math.max(3, baseTolerance * 1.25);
+    const candidates = [];
+    for (const first of negative) for (const second of positive) {
+      const alongGap = Math.abs(first.along - second.along);
+      const span = second.across - first.across;
+      if (alongGap > pairWindow || span < minimumSpan || span > maximumSpan) continue;
+      const midpoint = {
+        x: (first.handle.point.x + second.handle.point.x) / 2,
+        y: (first.handle.point.y + second.handle.point.y) / 2
+      };
+      const midpointShift = distance(midpoint, originalPoint);
+      if (midpointShift > maximumMidpointShift) continue;
+      candidates.push({
+        midpoint,
+        score: midpointShift + alongGap * 1.5 + Math.abs(Math.abs(first.across) - Math.abs(second.across)) * .08
+      });
+    }
+    candidates.sort((a, b) => a.score - b.score);
+    if (!candidates.length) {
+      markStale(feature, 'unpaired-roof-outline-after-edit');
+      continue;
+    }
+    feature.point = { ...candidates[0].midpoint };
+    feature.geometryStatus = 'current';
+    delete feature.stale;
+    delete feature.staleReason;
+    delete feature.staleRevision;
+  }
+}
+
 function syncLetterControls(object = selectedLetterTemplate()) {
   const panel = $('letterControlsPanel');
   if (!panel) return;
@@ -1588,8 +2210,17 @@ function syncLetterControls(object = selectedLetterTemplate()) {
   const mode = object.letterMode === 'outline' ? 'outline' : 'solid';
   const photographed = isPhotographedVector(object);
   $('letterSelectedLabel').textContent = photographed
-    ? 'אות מצולמת · וקטור'
+    ? isSourceRegionEdit(object) ? 'אות מצולמת · מקור פעיל' : 'אות מצולמת · עותק'
     : `${object.template.letter} · ${letterTraditionLabel(object.template.tradition)}`;
+  const targetSection = $('letterEditTargetSection');
+  if (targetSection) targetSection.hidden = !photographed;
+  $('letterTargetCopyBtn')?.classList.toggle('active', photographed && !isSourceRegionEdit(object));
+  $('letterTargetSourceBtn')?.classList.toggle('active', photographed && isSourceRegionEdit(object));
+  if ($('letterEditTargetHint')) {
+    $('letterEditTargetHint').textContent = isSourceRegionEdit(object)
+      ? 'הדיו המקורי באזור מוסתר והווקטור הערוך מחליף אותו; התמונה המקורית נשמרת לצורך Undo, איפוס ומחיקה.'
+      : 'זהו עותק נפרד מעל הצילום; אפשר להזיז, לשנות גודל ולהעביר אותו לקנבה.';
+  }
   $('letterModeSolidBtn').classList.toggle('active', mode === 'solid');
   $('letterModeOutlineBtn').classList.toggle('active', mode === 'outline');
   $('letterColorInput').value = object.color || '#2563eb';
@@ -1617,7 +2248,9 @@ function syncLetterControls(object = selectedLetterTemplate()) {
     ? new Set(state.letterVectorSelection.handleIds || []).size
     : 0;
   const vectorLevelLabels = {
-    structural: 'מבנה: הזזה ושינוי מסגרת בלבד',
+    structural: photographed
+      ? `מבנה: ${letterVectorHandles(object).length} נקודות בעלות משמעות — קצות גג, יציאת ירך וציר ירך`
+      : 'מבנה: הזזה ושינוי מסגרת בלבד',
     organs: `איברים: ${letterVectorHandles(object).length} קבוצות מקומיות רציפות; סימון חופשי מגדיר איבר מדויק`,
     curves: 'עקומות: נקודות העוגן ללא ידיות הבקרה',
     full: 'מלא: כל נקודות העוגן וידיות ה־Bézier'
@@ -1632,6 +2265,20 @@ function syncLetterControls(object = selectedLetterTemplate()) {
     : '';
   $('letterSizeReadout').textContent =
     `צורת האות: ${fmt(visual.width, 1)} × ${fmt(visual.height, 1)} פיקסלים${nibText} · מסגרת יחסית: ${fmt(rect.width, 1)} × ${fmt(rect.height, 1)}`;
+  const selectedFeature = selectedSemanticVectorFeature(object);
+  const tiltSection = $('letterAxisTiltSection');
+  const activeStemAxis = selectedFeature?.semanticType === 'stem-axis' && !selectedFeature.semanticStale;
+  if (tiltSection) tiltSection.hidden = !activeStemAxis;
+  if (activeStemAxis) {
+    const angle = Number.isFinite(+selectedFeature.axisAngleDeg)
+      ? +selectedFeature.axisAngleDeg
+      : MASTER_SYSTEM.signedVerticalAngle(selectedFeature.rootImage, selectedFeature.tipImage);
+    if ($('letterAxisTiltInput')) $('letterAxisTiltInput').value = clamp(angle, -35, 35);
+    if ($('letterAxisTiltValue')) $('letterAxisTiltValue').textContent = `${angle > 0 ? '+' : ''}${fmt(angle, 1)}°`;
+  }
+  if ($('resetLetterRatioBtn')) {
+    $('resetLetterRatioBtn').textContent = photographed ? 'איפוס למקור' : 'מקור הלוח';
+  }
 }
 
 function updateSelectedLetterProperty(property, value) {
@@ -1655,6 +2302,12 @@ function duplicateSelectedLetter() {
     ? globalThis.crypto.randomUUID()
     : `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
   copy.points = copy.points.map(point => ({ x: point.x + offset, y: point.y + offset }));
+  if (isSourceRegionEdit(source)) {
+    copy.editTarget = 'overlay-copy';
+    copy.role = 'reference-overlay';
+    copy.color = source.sourceOverlayColor || '#2563eb';
+    copy.letterOpacity = .72;
+  }
   copy.name = `${source.name} — עותק`;
   copy.provenance = {
     origin: 'human',
@@ -1670,7 +2323,20 @@ function resetSelectedLetterRatio() {
   const object = selectedLetterTemplate();
   if (!object) return;
   if (isPhotographedVector(object)) {
-    statusText.textContent = 'המסגרת של אות מצולמת נשארת ביחס של אזור המקור';
+    if (!object.sourceOriginalVector || !Array.isArray(object.sourceOriginalPoints)) {
+      statusText.textContent = 'נתוני המקור של האזור אינם זמינים לאיפוס';
+      return;
+    }
+    snapshot();
+    object.letterVector = structuredCloneSafe(object.sourceOriginalVector);
+    object.points = structuredCloneSafe(object.sourceOriginalPoints);
+    object.letterWeight = 1;
+    state.letterVectorSelection = null;
+    markObjectModified(object);
+    renderAll();
+    statusText.textContent = isSourceRegionEdit(object)
+      ? 'העיוות בוטל והאות הפעילה חזרה לצורתה המצולמת'
+      : 'העותק הווקטורי חזר לצורה ולמיקום של אזור המקור';
     return;
   }
   const rect = letterObjectRect(object);
@@ -1686,6 +2352,106 @@ function resetSelectedLetterRatio() {
   markObjectModified(object);
   renderAll();
   statusText.textContent = 'האות הוחזרה לתא וליחסים המקוריים של לוח האותיות';
+}
+
+function setSelectedLetterEditTarget(target) {
+  const object = selectedLetterTemplate();
+  if (!isPhotographedVector(object)) return;
+  const next = target === 'source-region' ? 'source-region' : 'overlay-copy';
+  if (object.editTarget === next) return;
+  if (next === 'source-region') {
+    const frameId = object.sourceSelection?.frameId ?? object.sourceFrameId ?? null;
+    const conflicting = state.objects.find(candidate =>
+      candidate.id !== object.id &&
+      isSourceRegionEdit(candidate) &&
+      (candidate.sourceSelection?.frameId ?? candidate.sourceFrameId ?? null) === frameId
+    );
+    if (conflicting) {
+      statusText.textContent = 'כבר קיימת עריכת מקור פעילה לאזור הזה; אפשר לערוך אותה או להשאיר את האובייקט הנוכחי כעותק';
+      return;
+    }
+  }
+  snapshot();
+  object.editTarget = next;
+  object.role = next === 'source-region' ? 'source-vector-edit' : 'reference-overlay';
+  if (next === 'source-region') {
+    if (Array.isArray(object.sourceOriginalPoints)) object.points = structuredCloneSafe(object.sourceOriginalPoints);
+    object.color = object.sourceInkColor || '#1f2937';
+    object.letterOpacity = 1;
+    object.letterGridVisible = false;
+  } else {
+    object.color = object.sourceOverlayColor || '#2563eb';
+    object.letterOpacity = .72;
+  }
+  markObjectModified(object);
+  renderAll();
+  statusText.textContent = next === 'source-region'
+    ? 'עבודה על המקור פעילה: גוף האות נעול למקומו; ערוך נקודות או הטה את ציר הירך'
+    : 'עבודה על עותק פעילה: אפשר להזיז, לשנות גודל ולהעביר לקנבה';
+}
+
+function applySelectedLetterAxisTilt(targetAngle) {
+  const object = selectedLetterTemplate();
+  const selectedFeature = selectedSemanticVectorFeature(object);
+  const engine = letterVectorEngine();
+  if (!object || selectedFeature?.semanticType !== 'stem-axis' || selectedFeature.semanticStale || !engine?.tiltObjectHandles) {
+    statusText.textContent = selectedFeature?.semanticStale
+      ? 'ציר הירך דורש זיהוי מחדש לאחר עריכת העוגנים; אין להחיל הטיה על ציר לא־מאומת'
+      : 'יש לבחור תחילה את נקודת „ציר ירך” בדרגת מבנה או איברים';
+    return null;
+  }
+  const ids = [...new Set(selectedFeature.groupIds || [selectedFeature.id])];
+  if (ids.length < 2 || !selectedFeature.rootImage || !selectedFeature.tipImage) {
+    statusText.textContent = 'לא נמצאו די עוגנים לאורך הירך שנבחרה';
+    return null;
+  }
+  const current = MASTER_SYSTEM.signedVerticalAngle(selectedFeature.rootImage, selectedFeature.tipImage);
+  const target = clamp(+targetAngle || 0, -35, 35);
+  snapshot();
+  const result = engine.tiltObjectHandles(object, ids, target, {
+    asset: letterAsset(object),
+    rootImage: selectedFeature.rootImage,
+    tipImage: selectedFeature.tipImage,
+    pivotImage: selectedFeature.rootImage,
+    currentAngleDeg: current,
+    moveAdjacentControls: true
+  });
+  const tangentDelta = Math.tan(target * Math.PI / 180) - Math.tan(current * Math.PI / 180);
+  const nextTipImage = {
+    x: selectedFeature.tipImage.x + (selectedFeature.rootImage.y - selectedFeature.tipImage.y) * tangentDelta,
+    y: selectedFeature.tipImage.y
+  };
+  const feature = object.letterVector.features?.find(item => item.id === selectedFeature.featureId);
+  if (feature) {
+    feature.root = engine.imageToLocal(object, selectedFeature.rootImage, { asset: letterAsset(object) });
+    feature.point = { ...feature.root };
+    feature.tip = engine.imageToLocal(object, nextTipImage, { asset: letterAsset(object) });
+    feature.angleDeg = target;
+    feature.geometryStatus = 'current';
+    delete feature.stale;
+    delete feature.staleReason;
+    delete feature.staleRevision;
+  }
+  for (const linked of object.letterVector.features || []) {
+    if (linked.stemId !== selectedFeature.featureId) continue;
+    linked.root = feature ? { ...feature.root } : linked.root;
+    linked.point = feature ? { ...feature.root } : linked.point;
+    linked.tip = feature ? { ...feature.tip } : linked.tip;
+  }
+  object.correctionHandleIds = ids;
+  object.auto = false;
+  markObjectModified(object);
+  state.letterVectorSelection = {
+    id: object.id,
+    handleIds: ids,
+    primaryHandleId: selectedFeature.id,
+    handleId: selectedFeature.id,
+    featureId: selectedFeature.featureId,
+    semanticType: selectedFeature.semanticType
+  };
+  renderAll();
+  statusText.textContent = `ציר הירך הוטה ל־${target > 0 ? '+' : ''}${fmt(target, 1)}° סביב נקודת היציאה מן הגג`;
+  return result;
 }
 
 function drawFreeformSelection(points, color) {
@@ -1732,12 +2498,43 @@ function appendLassoPoint(lasso, imagePoint, minimumScreenDistance = 3) {
 function beginVectorizeLasso(imagePoint, pointerId) {
   state.vectorizeLasso = {
     pointerId,
+    workflow: state.vectorWorkflow === 'source-region' ? 'source-region' : 'copy',
     points: [{ x: imagePoint.x, y: imagePoint.y }]
   };
   state.letterVectorLasso = null;
   state.dragging = { type: 'vectorizeLasso', pointerId, moved: false };
   statusText.textContent = 'הקף את האות המצולמת וסגור את המסלול';
   draw();
+}
+
+function sampledRegionColors(imageData, polygon, threshold) {
+  const width = imageData.width;
+  const height = imageData.height;
+  const data = imageData.data;
+  const step = Math.max(1, Math.floor(Math.sqrt(width * height / 30000)));
+  const ink = [0, 0, 0, 0];
+  const background = [0, 0, 0, 0];
+  for (let y = 0; y < height; y += step) {
+    for (let x = 0; x < width; x += step) {
+      if (!pointInPolygon({ x: x + .5, y: y + .5 }, polygon)) continue;
+      const offset = (y * width + x) * 4;
+      if (data[offset + 3] < 24) continue;
+      const luminance = data[offset] * .2126 + data[offset + 1] * .7152 + data[offset + 2] * .0722;
+      const bucket = luminance <= threshold ? ink : background;
+      bucket[0] += data[offset];
+      bucket[1] += data[offset + 1];
+      bucket[2] += data[offset + 2];
+      bucket[3]++;
+    }
+  }
+  const hex = (bucket, fallback) => {
+    if (!bucket[3]) return fallback;
+    return `#${bucket.slice(0, 3).map(value => Math.round(value / bucket[3]).toString(16).padStart(2, '0')).join('')}`;
+  };
+  return {
+    background: hex(background, '#f1e4c8'),
+    ink: hex(ink, '#1f2937')
+  };
 }
 
 function photographedSelectionBounds(points) {
@@ -1750,7 +2547,7 @@ function photographedSelectionBounds(points) {
   return { left, top, right, bottom, width: right - left, height: bottom - top };
 }
 
-function createPhotographedVector(points) {
+function createPhotographedVector(points, workflow = 'copy') {
   if (!state.image || !globalThis.MEDIDAOT_REGION_VECTOR) {
     throw new Error('מנוע הווקטוריזציה אינו זמין');
   }
@@ -1758,8 +2555,8 @@ function createPhotographedVector(points) {
   if (bounds.width * state.view.scale < 12 || bounds.height * state.view.scale < 12) {
     throw new Error('הסימון קטן מדי');
   }
-  const maximumDimension = 1200;
-  const maximumPixels = 1_600_000;
+  const maximumDimension = 2000;
+  const maximumPixels = 4_000_000;
   const sampleScale = Math.min(
     1,
     maximumDimension / Math.max(bounds.width, bounds.height),
@@ -1770,6 +2567,8 @@ function createPhotographedVector(points) {
   const crop = createLetterMaskCanvas(sampleWidth, sampleHeight);
   const context = crop.getContext('2d', { willReadFrequently: true });
   if (!context) throw new Error('לא ניתן לקרוא את אזור התמונה');
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
   context.drawImage(
     state.image,
     bounds.left,
@@ -1785,11 +2584,14 @@ function createPhotographedVector(points) {
     x: (point.x - bounds.left) * sampleScale,
     y: (point.y - bounds.top) * sampleScale
   }));
+  const cropImageData = context.getImageData(0, 0, sampleWidth, sampleHeight);
   const trace = globalThis.MEDIDAOT_REGION_VECTOR.vectorizeImageData(
-    context.getImageData(0, 0, sampleWidth, sampleHeight),
+    cropImageData,
     relativePolygon,
     { maximumAnchors: 260 }
   );
+  const colors = sampledRegionColors(cropImageData, relativePolygon, trace.threshold);
+  const sourceMode = workflow === 'source-region';
 
   snapshot();
   const frame = makeObject('area', points, {
@@ -1816,12 +2618,13 @@ function createPhotographedVector(points) {
     bounds.width,
     bounds.height
   ), {
-    name: 'אות מצולמת — וקטור עריך',
-    color: $('vectorOverlayColorInput')?.value || '#2563eb',
+    name: sourceMode ? 'אות מצולמת — עריכת מקור פעילה' : 'אות מצולמת — וקטור עריך',
+    color: sourceMode ? colors.ink : $('vectorOverlayColorInput')?.value || '#2563eb',
     lineWidth: 2.5,
     fillEnabled: false,
     fillAlpha: 0,
-    role: 'reference-overlay',
+    role: sourceMode ? 'source-vector-edit' : 'reference-overlay',
+    editTarget: sourceMode ? 'source-region' : 'overlay-copy',
     category: 'reference-template',
     template: {
       kind: 'image-region-vector',
@@ -1833,12 +2636,12 @@ function createPhotographedVector(points) {
     },
     letterVector: trace.vector,
     letterMode: 'solid',
-    letterOpacity: .58,
+    letterOpacity: sourceMode ? 1 : .72,
     letterOutlineWidth: 2.5,
     letterWeight: 1,
     letterEditAnchors: true,
-    vectorDetailLevel: 'organs',
-    letterGridVisible: true,
+    vectorDetailLevel: 'structural',
+    letterGridVisible: false,
     letterLockAspect: true,
     display: { resultLabelVisible: false },
     sourceSelection: {
@@ -1846,7 +2649,13 @@ function createPhotographedVector(points) {
       sampleScale,
       threshold: trace.threshold,
       polygon: structuredCloneSafe(points)
-    }
+    },
+    sourceOriginalPoints: letterRectPoints(bounds.left, bounds.top, bounds.width, bounds.height),
+    sourceOriginalVector: structuredCloneSafe(trace.vector),
+    sourceBackgroundColor: colors.background,
+    sourceInkColor: colors.ink,
+    sourceOverlayColor: $('vectorOverlayColorInput')?.value || '#2563eb',
+    sourceEdgeCoverPx: Math.max(2.2, 1.7 / Math.max(.2, sampleScale))
   });
   frame.linkedVectorId = vector.id;
   normalizeLetterTemplateObject(vector);
@@ -1854,12 +2663,17 @@ function createPhotographedVector(points) {
   state.vectorizeLasso = null;
   setTool('pan');
   selectObject(vector.id);
-  statusText.textContent = `נוצר וקטור מלא עם ${trace.vector.handleCounts.anchors} נקודות עוגן; דרגת האיברים מציגה קבוצות מסלול בטוחות, וסימון חופשי מגדיר איבר מדויק. מסגרת המקור נשארה במקומה`;
+  const semanticCount = trace.vector.features?.length || 0;
+  statusText.textContent = sourceMode
+    ? `עריכת המקור פעילה: האות נוקתה מן הצילום ונבנתה מחדש בווקטור חלק עם ${semanticCount} נקודות מבניות. מחיקה או איפוס מחזירים את המקור`
+    : `נוצר עותק וקטורי חלק עם ${trace.vector.handleCounts.anchors} עוגנים ו־${semanticCount} נקודות מבניות; מסגרת המקור נשארה במקומה`;
   return { frame, vector, trace };
 }
 
 function finishVectorizeLasso() {
-  const points = state.vectorizeLasso?.points || [];
+  const lasso = state.vectorizeLasso;
+  const points = lasso?.points || [];
+  const workflow = lasso?.workflow || 'copy';
   state.vectorizeLasso = null;
   if (points.length < 6 || polygonArea(points) < 16) {
     statusText.textContent = 'הסימון החופשי קצר מדי ובוטל';
@@ -1867,7 +2681,7 @@ function finishVectorizeLasso() {
     return null;
   }
   try {
-    return createPhotographedVector(points);
+    return createPhotographedVector(points, workflow);
   } catch (error) {
     statusText.textContent = `לא נוצר וקטור: ${error.message}`;
     draw();
@@ -1973,7 +2787,35 @@ $('letterBoardBtn')?.addEventListener('click', () => {
   if (!drawer.hidden) renderLetterKeyboard();
 });
 $('startVectorizeBtn')?.addEventListener('click', () => setTool('vectorize'));
+document.querySelectorAll('[data-vector-workflow]').forEach(button => {
+  button.addEventListener('click', () => {
+    state.vectorWorkflow = button.dataset.vectorWorkflow === 'source-region' ? 'source-region' : 'copy';
+    document.querySelectorAll('[data-vector-workflow]').forEach(option => {
+      const active = option.dataset.vectorWorkflow === state.vectorWorkflow;
+      option.classList.toggle('active', active);
+      option.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+    if ($('vectorWorkflowHint')) {
+      $('vectorWorkflowHint').textContent = state.vectorWorkflow === 'source-region'
+        ? 'האזור המצולם יישאר במקומו, הדיו המקורי יוסתר באופן לא־הרסני, והווקטור הערוך יחליף אותו.'
+        : 'הצילום נשמר ללא שינוי; הווקטור החדש יהיה עותק שאפשר להזיז ולהעביר לקנבה.';
+    }
+    statusText.textContent = state.vectorWorkflow === 'source-region'
+      ? 'נבחר עיוות מקומי במקור; לחץ „סימון חופשי” והקף את האות'
+      : 'נבחר עותק וקטורי; לחץ „סימון חופשי” והקף את האות';
+  });
+});
 $('letterAnchorLassoBtn')?.addEventListener('click', armLetterAnchorLasso);
+$('letterTargetCopyBtn')?.addEventListener('click', () => setSelectedLetterEditTarget('overlay-copy'));
+$('letterTargetSourceBtn')?.addEventListener('click', () => setSelectedLetterEditTarget('source-region'));
+$('letterAxisTiltInput')?.addEventListener('input', event => {
+  const value = +event.target.value || 0;
+  if ($('letterAxisTiltValue')) $('letterAxisTiltValue').textContent = `${value > 0 ? '+' : ''}${fmt(value, 1)}°`;
+});
+$('applyLetterAxisTiltBtn')?.addEventListener('click', () => {
+  applySelectedLetterAxisTilt(+$('letterAxisTiltInput')?.value || 0);
+});
+$('resetLetterAxisTiltBtn')?.addEventListener('click', () => applySelectedLetterAxisTilt(0));
 $('closeLetterDrawerBtn')?.addEventListener('click', () => {
   $('letterDrawer').hidden = true;
   $('letterBoardBtn').classList.remove('active');
@@ -1993,9 +2835,23 @@ $('letterModeOutlineBtn')?.addEventListener('click', () => {
   snapshot();
   updateSelectedLetterProperty('letterMode', 'outline');
 });
-$('letterColorInput')?.addEventListener('input', event => updateSelectedLetterProperty('color', event.target.value));
-$('letterOpacityInput')?.addEventListener('input', event => updateSelectedLetterProperty('letterOpacity', +event.target.value / 100));
-$('letterOutlineWidthInput')?.addEventListener('input', event => updateSelectedLetterProperty('letterOutlineWidth', +event.target.value));
+function updateLetterVisualPropertyFromInput(property, value) {
+  if (!selectedLetterTemplate()) return;
+  if (!letterVisualPropertyHistoryArmed) {
+    snapshot();
+    letterVisualPropertyHistoryArmed = true;
+  }
+  updateSelectedLetterProperty(property, value);
+}
+for (const input of [$('letterColorInput'), $('letterOpacityInput'), $('letterOutlineWidthInput')].filter(Boolean)) {
+  const finish = () => { letterVisualPropertyHistoryArmed = false; };
+  input.addEventListener('change', finish);
+  input.addEventListener('blur', finish);
+  input.addEventListener('pointercancel', finish);
+}
+$('letterColorInput')?.addEventListener('input', event => updateLetterVisualPropertyFromInput('color', event.target.value));
+$('letterOpacityInput')?.addEventListener('input', event => updateLetterVisualPropertyFromInput('letterOpacity', +event.target.value / 100));
+$('letterOutlineWidthInput')?.addEventListener('input', event => updateLetterVisualPropertyFromInput('letterOutlineWidth', +event.target.value));
 $('letterWeightInput')?.addEventListener('pointerdown', () => {
   if (!selectedLetterTemplate()) return;
   snapshot();

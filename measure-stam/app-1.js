@@ -35,6 +35,7 @@ const TOOL_COLORS = {
   angle: MASTER_SYSTEM.colorFor({ semanticMetricId: 'slants-parallels' }),
   kastel: MASTER_SYSTEM.colorFor({ semanticMetricId: 'reference-template' }), thirds: MASTER_SYSTEM.colorFor({ semanticMetricId: 'thirds' }),
   rowAlign: MASTER_SYSTEM.colorFor({ semanticMetricId: 'straightness' }),
+  slantScan: MASTER_SYSTEM.colorFor({ semanticMetricId: 'slants-parallels' }),
   ellipse: MASTER_SYSTEM.colorFor({ semanticMetricId: 'circle-ellipse' }),
   circle: MASTER_SYSTEM.colorFor({ semanticMetricId: 'circle-ellipse' })
 };
@@ -82,6 +83,7 @@ const state = {
   letterVectorSelection: null,
   letterVectorLasso: null,
   vectorizeLasso: null,
+  vectorWorkflow: 'copy',
   draftHistory: [],
   view: { x: 0, y: 0, scale: 1 },
   dragging: null,
@@ -169,6 +171,76 @@ function structuredCloneSafe(value) {
 function isEditableTarget(target) {
   return target instanceof Element && !!target.closest('input, textarea, select, [contenteditable="true"]');
 }
+
+/* Apple Pencil is reserved for precision surfaces. iPadOS may follow a pen
+ * pointerdown with a compatibility click or Scribble focus, so suppress the
+ * complete activation sequence while leaving touch, mouse and keyboard alone. */
+const penInterfaceBlock = { until: 0, focusUntil: 0, nodes: new Set() };
+
+function eventPath(event) {
+  return typeof event.composedPath === 'function'
+    ? event.composedPath().filter(node => node instanceof Element)
+    : event.target instanceof Element ? [event.target] : [];
+}
+
+function precisionSurfaceInPath(event) {
+  return eventPath(event).some(node => node.matches?.('[data-precision-surface]'));
+}
+
+function rememberBlockedPenActivation(event) {
+  const nodes = new Set(eventPath(event));
+  for (const node of [...nodes]) {
+    const label = node.closest?.('label');
+    if (label) nodes.add(label);
+    if (label?.control) nodes.add(label.control);
+    if (node.control) nodes.add(node.control);
+  }
+  penInterfaceBlock.nodes = nodes;
+  penInterfaceBlock.until = performance.now() + 900;
+  penInterfaceBlock.focusUntil = performance.now() + 300;
+}
+
+function matchesBlockedPenActivation(event) {
+  if (performance.now() > penInterfaceBlock.until) return false;
+  return eventPath(event).some(node => penInterfaceBlock.nodes.has(node));
+}
+
+function clearBlockedPenActivation() {
+  penInterfaceBlock.until = 0;
+  penInterfaceBlock.focusUntil = 0;
+  penInterfaceBlock.nodes.clear();
+}
+
+document.addEventListener('pointerdown', event => {
+  if (event.pointerType === 'touch' || event.pointerType === 'mouse') {
+    clearBlockedPenActivation();
+    return;
+  }
+  if (event.pointerType !== 'pen' || precisionSurfaceInPath(event)) return;
+  rememberBlockedPenActivation(event);
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  const focused = document.activeElement;
+  if (focused instanceof HTMLElement && isEditableTarget(focused)) focused.blur();
+  statusText.textContent = 'Apple Pencil מיועד למשטח העבודה; הפעלת התפריטים והשדות נעשית באצבע';
+}, { capture: true, passive: false });
+
+for (const eventName of ['pointerup', 'focusin']) {
+  document.addEventListener(eventName, event => {
+    if (event.pointerType !== 'pen' && !matchesBlockedPenActivation(event)) return;
+    if (eventName === 'focusin' && performance.now() > penInterfaceBlock.focusUntil) return;
+    if (precisionSurfaceInPath(event)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (eventName === 'focusin' && event.target instanceof HTMLElement) event.target.blur();
+  }, { capture: true, passive: false });
+}
+
+document.addEventListener('click', event => {
+  if (event.detail === 0 || !matchesBlockedPenActivation(event)) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}, { capture: true, passive: false });
 
 for (const eventName of ['contextmenu', 'selectstart', 'dragstart']) {
   document.addEventListener(eventName, event => {
@@ -339,7 +411,7 @@ function normalizeQuadPoints(points) {
   return [top[0], top[1], bottom[1], bottom[0]];
 }
 function normalizeQuadObject(object) {
-  if (object && ['kastel', 'nibRegion', 'rowAlign', 'ellipse', 'circle'].includes(object.type) && object.points?.length === 4) {
+  if (object && ['kastel', 'nibRegion', 'rowAlign', 'slantScan', 'ellipse', 'circle'].includes(object.type) && object.points?.length === 4) {
     object.points = normalizeQuadPoints(object.points);
   }
   return object;
@@ -541,6 +613,7 @@ function defaultName(type) {
     area: 'שטח ואיזון לובן', length: 'אורך', angle: 'זווית', kastel: 'קעסטעל',
     thirds: 'חוק השלישים — בדיקת מיקום', nib: 'עובי קולמוס', nibRegion: 'אזור כיול קולמוס',
     gap: selectedVariableName(), letterTemplate: 'תבנית אות', rowAlign: 'יישור השורה',
+    slantScan: 'סריקת ירכות ונטיות',
     ellipse: 'אליפסה', circle: 'עיגול'
   };
   return names[type] || 'מדידה';
@@ -549,7 +622,7 @@ function typeLabel(type) {
   const names = {
     area: 'שטח', length: 'אורך', angle: 'זווית', kastel: 'קעסטעל', thirds: 'חוק השלישים',
     nib: 'קולמוס', nibRegion: 'אזור כיול', gap: 'מרווח', letterTemplate: 'תבנית אות',
-    rowAlign: 'יישור שורה', ellipse: 'אליפסה', circle: 'עיגול'
+    rowAlign: 'יישור שורה', slantScan: 'סריקת ירכות', ellipse: 'אליפסה', circle: 'עיגול'
   };
   return names[type] || 'מדידה';
 }
@@ -618,6 +691,7 @@ function defaultCategory(type, formulaKey = state.formula.selectedVariable) {
   if (type === 'area') return 'white-space';
   if (type === 'letterTemplate') return 'reference-template';
   if (type === 'rowAlign') return 'straightness';
+  if (type === 'slantScan') return 'slant';
   if (type === 'ellipse' || type === 'circle') return 'geometry';
   if (type === 'kastel' || type === 'thirds') return 'thirds';
   if (type === 'angle') return 'angle';
@@ -647,6 +721,7 @@ function semanticColorForObject(object, fallback = '#64748b') {
 
 function enforceSemanticStyle(object) {
   if (!object) return object;
+  if (object.type === 'letterTemplate' || object.role === 'vector-source-frame') return object;
   const semanticMetricId = MASTER_SYSTEM.metricIdFor({
     semanticMetricId: object.semanticMetricId,
     formulaKey: object.formulaKey,
@@ -807,6 +882,7 @@ function draw() {
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(state.image, 0, 0);
+    if (typeof drawSourceEditPatches === 'function') drawSourceEditPatches(ctx);
   }
 
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -907,6 +983,20 @@ function drawObject(object, selected, draft) {
       ctx.setLineDash([7, 5]);
       ctx.strokeRect(points[0].x, points[0].y, points[2].x - points[0].x, points[2].y - points[0].y);
     }
+  } else if (object.type === 'slantScan') {
+    if (typeof drawSlantScanObject === 'function') {
+      drawSlantScanObject(ctx, object, { selected, draft, points });
+    } else {
+      ctx.setLineDash([7, 5]);
+      ctx.beginPath();
+      ctx.moveTo(points[0].x, points[0].y);
+      for (const point of points.slice(1)) ctx.lineTo(point.x, point.y);
+      ctx.closePath();
+      ctx.stroke();
+    }
+    if (!draft && resultLabelVisible) {
+      label(midpoint(points[0], points[1]), measurementResultModel(object).canvasText, object.color, 'above');
+    }
   } else if (object.type === 'ellipse' || object.type === 'circle') {
     const left = Math.min(points[0].x, points[2].x);
     const right = Math.max(points[0].x, points[2].x);
@@ -931,7 +1021,7 @@ function drawObject(object, selected, draft) {
     if (points.length > 1) {
       drawLine(points[0], points[1]);
       drawEndCaps(points[0], points[1], object.color);
-      if (resultLabelVisible) label(midpoint(points[0], points[1]), `${fmt(objectAngle(object), 1)}°`, object.color);
+      if (resultLabelVisible) label(midpoint(points[0], points[1]), measurementResultModel(object).canvasText, object.color);
     }
     if (points.length > 2) drawLine(points[1], points[2]);
   } else if (object.type === 'thirds') {

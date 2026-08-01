@@ -6,8 +6,8 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
-const TEST_VERSION = '20260801b';
-const TEST_CACHE_DATE = '2026-08-01b';
+const TEST_VERSION = '20260801c';
+const TEST_CACHE_DATE = '2026-08-01c';
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const appDirectory = path.resolve(testDirectory, '..');
 
@@ -565,6 +565,67 @@ test('a selected anchor group translates atomically without double-moving shared
     if (anchorIds.includes(handle.id)) assert.ok(movedOnce, `${handle.id} must move with the group`);
   }
   assert.ok(movedControlCount > 0, 'adjacent Bézier controls must follow selected anchors');
+});
+
+test('semantic vector metadata clones independently and a stem tilts around its roof junction', () => {
+  const object = {
+    id: 'photographed-stem',
+    type: 'letterTemplate',
+    template: { kind: 'image-region-vector', tradition: 'custom', layoutMode: 'tight-v1' },
+    points: [
+      { x: 100, y: 100 }, { x: 300, y: 100 },
+      { x: 300, y: 500 }, { x: 100, y: 500 }
+    ],
+    letterVector: {
+      schemaVersion: 2,
+      sourceKey: 'photographed-selection',
+      letter: '', tradition: 'custom', style: 'photographed-letter', slug: 'photographed-selection',
+      viewBox: [0, 0, 100, 100], weight: 1, revision: 1,
+      paths: [{
+        rule: 'evenodd',
+        commands: [
+          { type: 'M', x: 42, y: 8 },
+          { type: 'C', x1: 43, y1: 32, x2: 53, y2: 70, x: 55, y: 92 },
+          { type: 'Z' }
+        ]
+      }],
+      handleCounts: { anchors: 2, controls: 2, total: 4 },
+      featureCoordinateSpace: 'vector-local',
+      featureAngleConvention: 'signed-clockwise-from-vertical',
+      features: [{
+        id: 'stem-1', type: 'stem-axis', label: 'ציר ירך',
+        point: { x: 42, y: 8 }, root: { x: 42, y: 8 }, tip: { x: 55, y: 92 }, angleDeg: -8.8
+      }],
+      trace: { semanticMethod: 'component-projection-v1' }
+    }
+  };
+  const clone = vector.cloneVectorData(object);
+  assert.equal(clone.schemaVersion, 2);
+  assert.equal(clone.featureCoordinateSpace, 'vector-local');
+  assert.equal(clone.featureAngleConvention, 'signed-clockwise-from-vertical');
+  assert.equal(clone.features[0].type, 'stem-axis');
+  assert.equal(clone.trace.semanticMethod, 'component-projection-v1');
+  clone.features[0].root.x = -999;
+  assert.equal(object.letterVector.features[0].root.x, 42, 'feature metadata must not alias the source');
+
+  const before = vector.enumerateHandles(object, { coordinateSpace: 'image' });
+  const root = before.find(handle => handle.id === 'p0:c0:anchor');
+  const tip = before.find(handle => handle.id === 'p0:c1:anchor');
+  assert.ok(root && tip);
+  const result = vector.tiltObjectHandles(object, [root.id, tip.id], 0, {
+    rootImage: root.point,
+    tipImage: tip.point,
+    pivotImage: root.point,
+    moveAdjacentControls: true
+  });
+  const after = vector.enumerateHandles(object, { coordinateSpace: 'image' });
+  const nextRoot = after.find(handle => handle.id === root.id);
+  const nextTip = after.find(handle => handle.id === tip.id);
+  closeTo(nextRoot.point.x, root.point.x, 1e-7, 'roof junction x must remain fixed');
+  closeTo(nextRoot.point.y, root.point.y, 1e-7, 'roof junction y must remain fixed');
+  closeTo(nextTip.point.x, nextRoot.point.x, 1e-7, 'zero-degree stem must end on the root axis');
+  assert.equal(result.targetAngleDeg, 0);
+  assert.ok(result.movedCoordinateCount >= 4, 'the stem and adjacent Bézier controls must tilt together');
 });
 
 test('weight changes ink while preserving the glyph outer size at .55, 1, and 1.45', () => {
@@ -1340,6 +1401,7 @@ test('HTML, manifests, and service worker reference one complete release asset s
     'app-2.js',
     'app-3.js',
     'app-4.js',
+    'slant-analyzer.js',
     'professional-tools.js',
     'auto-measure.js',
     'stability-patch.js'
@@ -1374,7 +1436,7 @@ test('HTML, manifests, and service worker reference one complete release asset s
     assert.match(manifest.start_url, new RegExp(`(?:\\?|&)v=${TEST_VERSION}(?:&|$)`));
   }
 
-  assert.match(readAppFile('app-4.js'), /appVersion:\s*'2026\.08\.01b'/);
+  assert.match(readAppFile('app-4.js'), /appVersion:\s*'2026\.08\.01c'/);
 
   const serviceWorker = readAppFile('sw.js');
   const cacheNameMatch = serviceWorker.match(/const CACHE_NAME = '([^']+)'/);

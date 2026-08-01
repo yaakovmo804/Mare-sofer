@@ -40,8 +40,25 @@ function loadLetterOrganHelpers() {
       return inside;
     }
   });
-  vm.runInContext(`${source.slice(start, end)}\nthis.organLevelVectorHandles = organLevelVectorHandles; this.anchorIdsInsideLasso = anchorIdsInsideLasso;`, context);
+  vm.runInContext(`${source.slice(start, end)}\nthis.organLevelVectorHandles = organLevelVectorHandles; this.anchorIdsInsideLasso = anchorIdsInsideLasso; this.pairedJunctionAnchorHandles = pairedJunctionAnchorHandles;`, context);
   return context;
+}
+
+function loadSemanticReconcileHelper(handles) {
+  const source = read('letter-tools.js');
+  const start = source.indexOf('function reconcileSemanticVectorFeatures');
+  const end = source.indexOf('function syncLetterControls', start);
+  assert.ok(start >= 0 && end > start, 'semantic reconcile helper must remain available');
+  const engine = { enumerateHandles: () => handles };
+  const context = vm.createContext({
+    Math,
+    Number,
+    letterAsset: () => null,
+    letterVectorEngine: () => engine,
+    distance: (a, b) => Math.hypot(a.x - b.x, a.y - b.y)
+  });
+  vm.runInContext(`${source.slice(start, end)}\nthis.reconcileSemanticVectorFeatures = reconcileSemanticVectorFeatures;`, context);
+  return context.reconcileSemanticVectorFeatures;
 }
 
 function loadCorrectionGeometryHelpers() {
@@ -165,17 +182,49 @@ test('the integrated shell exposes composition, vector levels, info and active g
     for (const required of [
       'professionalSuitePanel', 'compositionWorkspace', 'compositionInspector', 'compositionBackgroundSelect',
       'metricInfoDialog', 'metricMeasurementText', 'professionalReferenceInfo',
-      'semanticColorHint', 'letterVectorLevelSelect', 'transferLetterBtn'
+      'semanticColorHint', 'letterVectorLevelSelect', 'transferLetterBtn',
+      'letterEditTargetSection', 'letterAxisTiltSection', 'letterAxisTiltInput'
     ]) assert.match(html, new RegExp(`id="${required}"`));
     for (const tool of ['rowAlign', 'circle', 'ellipse']) {
       assert.match(html, new RegExp(`data-tool="${tool}"`));
     }
-    assert.match(html, /master-system\.js\?v=20260801b/);
-    assert.match(html, /professional-tools\.js\?v=20260801b/);
+    assert.match(html, /master-system\.js\?v=20260801c/);
+    assert.match(html, /professional-tools\.js\?v=20260801c/);
+    assert.match(html, /slant-analyzer\.js\?v=20260801c/);
+    assert.ok(
+      html.indexOf('slant-analyzer.js?v=20260801c') < html.indexOf('professional-tools.js?v=20260801c'),
+      'the analyzer must load before the professional integration'
+    );
     assert.match(html, /id="compositionCanvas"[^>]*tabindex="0"/);
+    assert.match(html, /id="canvas"[^>]*data-precision-surface/);
+    assert.match(html, /id="compositionCanvas"[^>]*data-precision-surface/);
+    assert.match(html, /data-vector-workflow="copy"/);
+    assert.match(html, /data-vector-workflow="source-region"/);
     assert.match(html, /id="statusText"[^>]*aria-live="polite"/);
     assert.match(html, /id="metricInfoDialog"[^>]*aria-labelledby="metricInfoTitle"/);
   }
+});
+
+test('Pencil gating and source-region vector editing remain non-destructive and explicit', () => {
+  const app1 = read('app-1.js');
+  const app2 = read('app-2.js');
+  const app3 = read('app-3.js');
+  const app4 = read('app-4.js');
+  const letters = read('letter-tools.js');
+  const engine = read('letter-vector-engine.js');
+  assert.match(app1, /event\.pointerType !== 'pen' \|\| precisionSurfaceInPath\(event\)/);
+  assert.match(app1, /stopImmediatePropagation\(\)/);
+  assert.match(app1, /event\.detail === 0/);
+  assert.match(app3, /\[data-precision-surface\]/);
+  assert.match(app2, /isSourceRegionEdit\(hit\.object\)/);
+  assert.match(letters, /editTarget:\s*sourceMode \? 'source-region' : 'overlay-copy'/);
+  assert.match(letters, /function drawSourceEditPatches/);
+  assert.match(letters, /sourceOriginalVector/);
+  assert.match(letters, /function applySelectedLetterAxisTilt/);
+  assert.match(letters, /roof-stem-junction/);
+  assert.match(engine, /function tiltObjectHandles/);
+  assert.match(engine, /Array\.isArray\(vector\.features\)/);
+  assert.match(app4, /drawSourceEditPatches\(context, \{ exportQuality: true \}\)/);
 });
 
 test('project data persists the professional suite and accepts legacy schema 3', () => {
@@ -185,6 +234,8 @@ test('project data persists the professional suite and accepts legacy schema 3',
   assert.match(source, /measurementDescription:\s*captured\.professionalSuite\.measurementNotes/);
   assert.match(source, /\^\[34\]/);
   assert.match(source, /linkedKastelId/);
+  assert.match(source, /sourceScanId/);
+  assert.match(source, /slant-scan-roi\.v1/);
 });
 
 test('professional information and deferred letter families are data, not hidden algorithms', () => {
@@ -211,12 +262,37 @@ test('local information persistence gives saved text priority and correction kee
   assert.match(source, /currentFeatureAngleDeg/);
   assert.match(source, /measurementAngleDeg/);
   assert.match(source, /signedTarget = clamp\(targetAngle, -35, 35\)/);
+  assert.match(source, /engine\.tiltObjectHandles\(clone/);
+  assert.match(source, /pivotImage:\s*pivot/);
+  assert.match(source, /const topHandle = handles\.reduce/);
   assert.match(source, /function armProfessionalMeasurement/);
   assert.match(source, /draftLetter !== next\.letter\) cancelDraft\(\)/);
   assert.match(source, /function refreshCompositionSourceAvailability/);
   assert.match(source, /source-missing-copy-preserved/);
   assert.match(source, /duplicatedFromSessionId/);
   assert.match(source, /previewCompositionUid = copy\.uid/);
+});
+
+test('automatic slant scans stay linked to human-classified signed angle measurements', () => {
+  const professional = read('professional-tools.js');
+  const app1 = read('app-1.js');
+  const app2 = read('app-2.js');
+  const app3 = read('app-3.js');
+  const app4 = read('app-4.js');
+  const serviceWorker = read('sw.js');
+  assert.match(professional, /function analyzeSlantScan/);
+  assert.match(professional, /MEDIDAOT_SLANT_ANALYZER/);
+  assert.match(professional, /sourceScanId:\s*object\.id/);
+  assert.match(professional, /candidateId:\s*candidate\.id/);
+  assert.match(professional, /angleRef:\s*'vertical'/);
+  assert.match(professional, /function setSlantCandidateClassification/);
+  assert.match(professional, /לא לכלול/);
+  assert.match(app1, /slantScan/);
+  assert.match(app2, /measurementResultModel\(object\)/);
+  assert.match(app3, /analyzeSlantScan\(object\)/);
+  assert.match(app3, /item\.sourceScanId === deleted\.id/);
+  assert.match(app4, /'sourceScanId'/);
+  assert.match(serviceWorker, /\.\/slant-analyzer\.js/);
 });
 
 test('transient measurement arming is not restored or persisted as project data', () => {
@@ -276,7 +352,7 @@ test('four vector control levels keep a full editable source under the coarse vi
   }
   assert.match(source, /function organLevelVectorHandles/);
   assert.match(source, /groupIds:\s*group\.map/);
-  assert.match(source, /vectorDetailLevel:\s*'organs'/);
+  assert.match(source, /vectorDetailLevel:\s*'structural'/);
   assert.match(source, /maximumAnchors:\s*260/);
 });
 
@@ -339,4 +415,123 @@ test('organ-level freeform lasso selects exact full anchors instead of coarse re
   );
   const source = read('letter-tools.js');
   assert.match(source, /anchorIdsInsideLasso\(allLetterVectorHandles\(object\), points\)/);
+});
+
+test('roof-stem junction editing uses an opposing outline pair instead of jumping one edge to the center', () => {
+  const { pairedJunctionAnchorHandles } = loadLetterOrganHelpers();
+  const features = [
+    {
+      id: 'stem-0', type: 'stem-axis', widthPx: 14,
+      root: { x: 75, y: 32 }, tip: { x: 75, y: 105 }
+    },
+    {
+      id: 'junction-0', type: 'roof-stem-junction', stemId: 'stem-0',
+      point: { x: 75, y: 32 }
+    }
+  ];
+  const localAnchors = [
+    { handle: { id: 'left-root' }, local: { x: 68, y: 32 } },
+    { handle: { id: 'right-root' }, local: { x: 82, y: 32 } },
+    { handle: { id: 'left-tip' }, local: { x: 68, y: 105 } },
+    { handle: { id: 'right-tip' }, local: { x: 82, y: 105 } }
+  ];
+  assert.deepEqual(
+    Array.from(pairedJunctionAnchorHandles(features[1], features, localAnchors, 5), handle => handle.id).sort(),
+    ['left-root', 'right-root']
+  );
+  assert.deepEqual(
+    Array.from(pairedJunctionAnchorHandles(features[1], features, localAnchors.filter(entry => entry.local.x >= 75), 5)),
+    []
+  );
+  const pointerSource = read('app-2.js');
+  assert.match(pointerSource, /letterVectorHandle\.editable === false/);
+  assert.match(pointerSource, /נקודת ייחוס/);
+});
+
+test('semantic stem reconciliation keeps a vertical centerline and fails stale instead of inventing an axis', () => {
+  const verticalOutline = [
+    { x: 18, y: 18 }, { x: 104, y: 18 }, { x: 104, y: 32 },
+    { x: 82, y: 32 }, { x: 82, y: 105 }, { x: 68, y: 105 },
+    { x: 68, y: 32 }, { x: 18, y: 32 }
+  ].map((point, index) => ({ id: `p0:c${index}:anchor`, kind: 'anchor', point }));
+  const makeObject = () => ({
+    letterVector: {
+      revision: 2,
+      viewBox: [0, 0, 120, 120],
+      features: [
+        {
+          id: 'stem-0', type: 'stem-axis', widthPx: 14,
+          point: { x: 75, y: 32 }, root: { x: 75, y: 32 },
+          tip: { x: 75, y: 104.5 }, angleDeg: 0
+        },
+        {
+          id: 'junction-0', type: 'roof-stem-junction', stemId: 'stem-0',
+          point: { x: 75, y: 32 }, root: { x: 75, y: 32 }, tip: { x: 75, y: 104.5 }
+        }
+      ]
+    }
+  });
+
+  const object = makeObject();
+  loadSemanticReconcileHelper(verticalOutline)(object);
+  const stem = object.letterVector.features[0];
+  assert.ok(Math.abs(stem.root.x - 75) < 1e-9);
+  assert.ok(Math.abs(stem.tip.x - 75) < 1e-9);
+  assert.ok(Math.abs(stem.root.y - 32) < 1e-9);
+  assert.ok(Math.abs(stem.tip.y - 104.5) < 1e-9);
+  assert.ok(Math.abs(stem.angleDeg) < 1e-9);
+  assert.equal(stem.geometryStatus, 'current');
+
+  const unpaired = verticalOutline.filter(handle => handle.point.x >= 75);
+  const staleObject = makeObject();
+  loadSemanticReconcileHelper(unpaired)(staleObject);
+  const staleStem = staleObject.letterVector.features[0];
+  assert.deepEqual(staleStem.root, { x: 75, y: 32 });
+  assert.deepEqual(staleStem.tip, { x: 75, y: 104.5 });
+  assert.equal(staleStem.geometryStatus, 'stale');
+  assert.equal(staleStem.staleReason, 'unpaired-outline-after-edit');
+});
+
+test('semantic roof reconciliation keeps endpoint centerlines and fails stale without an opposing edge pair', () => {
+  const verticalOutline = [
+    { x: 18, y: 18 }, { x: 104, y: 18 }, { x: 104, y: 32 },
+    { x: 82, y: 32 }, { x: 82, y: 105 }, { x: 68, y: 105 },
+    { x: 68, y: 32 }, { x: 18, y: 32 }
+  ].map((point, index) => ({ id: `p0:c${index}:anchor`, kind: 'anchor', point }));
+  const makeObject = () => ({
+    letterVector: {
+      revision: 2,
+      viewBox: [0, 0, 120, 120],
+      features: [
+        {
+          id: 'roof-left', type: 'roof-endpoint', componentIndex: 0,
+          point: { x: 18, y: 25 }
+        },
+        {
+          id: 'roof-right', type: 'roof-endpoint', componentIndex: 0,
+          point: { x: 104, y: 25 }
+        }
+      ]
+    }
+  });
+
+  const object = makeObject();
+  loadSemanticReconcileHelper(verticalOutline)(object);
+  const [left, right] = object.letterVector.features;
+  assert.equal(left.point.x, 18);
+  assert.equal(left.point.y, 25);
+  assert.equal(right.point.x, 104);
+  assert.equal(right.point.y, 25);
+  assert.equal(left.geometryStatus, 'current');
+  assert.equal(right.geometryStatus, 'current');
+
+  const missingLeftLowerEdge = verticalOutline.filter(handle => !(
+    handle.point.x === 18 && handle.point.y === 32
+  ));
+  const staleObject = makeObject();
+  loadSemanticReconcileHelper(missingLeftLowerEdge)(staleObject);
+  const staleLeft = staleObject.letterVector.features[0];
+  assert.deepEqual(staleLeft.point, { x: 18, y: 25 });
+  assert.equal(staleLeft.geometryStatus, 'stale');
+  assert.equal(staleLeft.staleReason, 'unpaired-roof-outline-after-edit');
 });

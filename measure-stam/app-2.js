@@ -88,6 +88,30 @@ function measurementResultModel(object) {
     };
   }
 
+  if (object.type === 'slantScan') {
+    const analysis = object.slantAnalysis || {};
+    const linked = state.objects.filter(candidate =>
+      candidate.type === 'angle' &&
+      (candidate.sourceScanId === object.id || candidate.sourceScanUid === object.uid)
+    );
+    const pending = linked.filter(candidate => candidate.slantClassification?.status === 'pending').length;
+    const included = linked.filter(candidate =>
+      candidate.excludedFromComparison !== true && ['ד', 'ה', 'ת'].includes(candidate.letterRole)
+    ).length;
+    const primaryText = analysis.status === 'failed'
+      ? 'הסריקה לא הושלמה'
+      : linked.length
+        ? `${linked.length} מועמדי ירך`
+        : 'לא זוהו ירכות';
+    return {
+      canvasText: primaryText,
+      primaryText,
+      secondaryText: linked.length
+        ? `${included} מסווגים${pending ? ` · ${pending} ממתינים` : ''}`
+        : analysis.status === 'done' ? 'אפשר לסמן אזור אחר או למדוד ידנית' : 'אזור אבחוני'
+    };
+  }
+
   if (['length', 'nib', 'gap'].includes(object.type) && object.points.length >= 2) {
     const px = object.type === 'gap' ? measurementLengthPx(object) : distance(object.points[0], object.points[1]);
     const ratio = object.type === 'gap'
@@ -303,6 +327,11 @@ function renderResults() {
       }).join('<br>')}</p>`;
     }
     html += '<p class="result-note">הזיהוי מאתר תחתיות אופקיות וארוכות, אך הקו נוצר רק לאחר אישור ב׳, כ׳ או נ׳ רגילה. ן׳ סופית וי׳ אינן קובעות את הקו.</p>';
+  } else if (object.type === 'slantScan') {
+    const model = measurementResultModel(object);
+    html += `<p class="result-emphasis">${escapeHtml(model.primaryText)}</p>`;
+    if (model.secondaryText) html += `<p>${escapeHtml(model.secondaryText)}</p>`;
+    html += '<p class="result-note">המסגרת נשמרת כאזור אבחוני. כל מועמד נוצר כמדידת זווית מקושרת, ורק סיווג אנושי כד׳, ה׳ או ת׳ מכניס אותו להשוואה.</p>';
   } else if (object.type === 'length') {
     const px = distance(object.points[0], object.points[1]);
     html += state.formula.nibPx
@@ -786,7 +815,7 @@ function hitTest(imagePoint) {
     }
   }
   const selectedQuad = state.objects.find(item =>
-    item.id === state.selectedId && ['kastel', 'nibRegion'].includes(item.type)
+    item.id === state.selectedId && ['kastel', 'nibRegion', 'slantScan'].includes(item.type)
   );
   if (selectedQuad) {
     const selectedQuadHandle = nearestPointIndex(selectedQuad.points, imagePoint, 24);
@@ -809,7 +838,7 @@ function hitTest(imagePoint) {
     const handle = nearestPointIndex(object.points, imagePoint, 22);
     if (handle >= 0) return { object, handle, segment: null };
     const contour = object.type === 'area' ? flattenedAreaPoints(object) : object.points;
-    if (['area', 'kastel', 'nibRegion', 'rowAlign', 'ellipse', 'circle'].includes(object.type) && object.points.length >= 3 && pointInPolygon(imagePoint, contour)) {
+    if (['area', 'kastel', 'nibRegion', 'rowAlign', 'slantScan', 'ellipse', 'circle'].includes(object.type) && object.points.length >= 3 && pointInPolygon(imagePoint, contour)) {
       return { object, handle: null, segment: null };
     }
     if (['length', 'nib', 'gap'].includes(object.type) && object.points.length >= 2 && pointLineDistance(imagePoint, object.points[0], object.points[1]) < threshold) {
@@ -933,6 +962,12 @@ function handleTouchPointerDown(event) {
     if (hit && isLetterTemplate(hit.object)) {
       state.interactionBefore = captureInteractionState();
       selectObject(hit.object.id);
+      if (typeof isSourceRegionEdit === 'function' && isSourceRegionEdit(hit.object)) {
+        state.touchEditPointerId = null;
+        state.dragging = null;
+        statusText.textContent = 'האות במקור נעולה למקומה; בחר נקודה מבנית ב־Apple Pencil לעריכה';
+        return;
+      }
       state.touchEditPointerId = event.pointerId;
       state.dragging = {
         type: 'touchLetter',
@@ -1002,6 +1037,24 @@ function pointerDown(event) {
     if (hit.letterVectorHandle) {
       state.selectedPoint = null;
       state.selectedSegment = null;
+      if (hit.letterVectorHandle.editable === false) {
+        const reference = hit.letterVectorHandle;
+        state.letterVectorSelection = {
+          id: hit.object.id,
+          handleIds: [],
+          primaryHandleId: reference.id,
+          handleId: reference.id,
+          featureId: reference.featureId || null,
+          semanticType: reference.semanticType || null,
+          rootImage: reference.rootImage || null,
+          tipImage: reference.tipImage || null
+        };
+        state.dragging = null;
+        syncLetterControls(hit.object);
+        draw();
+        statusText.textContent = `${reference.semanticLabel || 'נקודת מבנה'}: x ${fmt(reference.point.x, 1)}, y ${fmt(reference.point.y, 1)} — נקודת ייחוס; לעריכת הירך בחר „ציר ירך”`;
+        return;
+      }
       const automaticGroupIds = [...new Set(hit.letterVectorHandle.groupIds || [])];
       const existingGroupIds = state.letterVectorSelection?.id === hit.object.id
         ? [...new Set(state.letterVectorSelection.handleIds || [])]
@@ -1024,7 +1077,11 @@ function pointerDown(event) {
           id: hit.object.id,
           handleIds: groupedIds,
           primaryHandleId: hit.letterVectorHandle.id,
-          handleId: hit.letterVectorHandle.id
+          handleId: hit.letterVectorHandle.id,
+          featureId: hit.letterVectorHandle.featureId || null,
+          semanticType: hit.letterVectorHandle.semanticType || null,
+          rootImage: hit.letterVectorHandle.rootImage || null,
+          tipImage: hit.letterVectorHandle.tipImage || null
         };
         statusText.textContent = `גרור להזזת ${groupedIds.length} נקודות העוגן יחד`;
       } else {
@@ -1035,7 +1092,11 @@ function pointerDown(event) {
           id: hit.object.id,
           handleIds: [hit.letterVectorHandle.id],
           primaryHandleId: hit.letterVectorHandle.id,
-          handleId: hit.letterVectorHandle.id
+          handleId: hit.letterVectorHandle.id,
+          featureId: hit.letterVectorHandle.featureId || null,
+          semanticType: hit.letterVectorHandle.semanticType || null,
+          rootImage: hit.letterVectorHandle.rootImage || null,
+          tipImage: hit.letterVectorHandle.tipImage || null
         };
         state.dragging = {
           ...dragBase,
@@ -1068,7 +1129,7 @@ function pointerDown(event) {
         ...dragBase,
         type: 'handle',
         handle: hit.handle,
-        original: ['ellipse', 'circle'].includes(hit.object.type)
+        original: ['ellipse', 'circle', 'slantScan'].includes(hit.object.type)
           ? structuredCloneSafe(hit.object.points)
           : null
       };
@@ -1079,6 +1140,10 @@ function pointerDown(event) {
       state.selectedSegment = { target: 'object', id: hit.object.id, index: hit.segment };
       state.dragging = { ...dragBase, type: 'curveHandle', segment: hit.segment };
       statusText.textContent = 'גרור את היהלום כדי לעגל את המקטע';
+    } else if (typeof isSourceRegionEdit === 'function' && isSourceRegionEdit(hit.object)) {
+      state.letterVectorSelection = null;
+      state.dragging = null;
+      statusText.textContent = 'האות במקור נעולה למקומה; ערוך נקודות מבניות או השתמש בהטיית ציר הירך';
     } else {
       state.letterVectorSelection = null;
       state.dragging = {
@@ -1111,6 +1176,7 @@ function pointerDown(event) {
   else if (state.tool === 'angle') handleFixedPointTool('angle', imagePoint, 2);
   else if (state.tool === 'kastel') handleRectPointer('kastel', imagePoint);
   else if (state.tool === 'rowAlign') handleRectPointer('rowAlign', imagePoint);
+  else if (state.tool === 'slantScan') handleRectPointer('slantScan', imagePoint);
   else if (state.tool === 'ellipse') handleRectPointer('ellipse', imagePoint);
   else if (state.tool === 'circle') handleRectPointer('circle', imagePoint);
   else if (state.tool === 'thirds') handleThirdsPointer(imagePoint);
