@@ -1435,13 +1435,14 @@ function drawExportLine(context, a, b) {
   context.lineTo(b.x, b.y);
   context.stroke();
 }
-function drawExportScaleNote(context, point, text, color, unit) {
+function drawExportScaleNote(context, point, text, color, unit, placement = 'above') {
   context.save();
   context.font = `700 ${11 * unit}px -apple-system, BlinkMacSystemFont, "Segoe UI", Arial`;
   const width = context.measureText(text).width + 12 * unit;
   const height = 20 * unit;
   const x = clamp(point.x - width / 2, 2 * unit, Math.max(2 * unit, state.image.width - width - 2 * unit));
-  const y = clamp(point.y - 28 * unit, 2 * unit, Math.max(2 * unit, state.image.height - height - 2 * unit));
+  const preferredY = placement === 'below' ? point.y + 8 * unit : point.y - 28 * unit;
+  const y = clamp(preferredY, 2 * unit, Math.max(2 * unit, state.image.height - height - 2 * unit));
   context.fillStyle = 'rgba(255,255,255,.94)';
   context.fillRect(x, y, width, height);
   context.strokeStyle = color;
@@ -1453,6 +1454,32 @@ function drawExportScaleNote(context, point, text, color, unit) {
   context.textBaseline = 'middle';
   context.fillText(text, x + width / 2, y + height / 2);
   context.restore();
+}
+function exportResultLabelPoint(object) {
+  const points = object?.points || [];
+  if (!points.length) return null;
+  if (object.type === 'area' && points.length >= 3) {
+    return { point: polygonCentroid(flattenedAreaPoints(object)), placement: 'above' };
+  }
+  if (['ellipse', 'circle'].includes(object.type) && points.length === 4) {
+    return { point: {
+      x: (Math.min(...points.map(point => point.x)) + Math.max(...points.map(point => point.x))) / 2,
+      y: Math.max(...points.map(point => point.y))
+    }, placement: 'below' };
+  }
+  if (['kastel', 'nibRegion'].includes(object.type) && points.length === 4) {
+    return {
+      point: object.type === 'kastel' ? midpoint(points[3], points[2]) : midpoint(points[0], points[1]),
+      placement: object.type === 'kastel' ? 'below' : 'above'
+    };
+  }
+  if (['length', 'nib', 'gap', 'angle', 'slantScan'].includes(object.type) && points.length >= 2) {
+    return { point: midpoint(points[0], points[1]), placement: 'above' };
+  }
+  if (object.type === 'thirds' && state.objects.some(item => item.id === object.kastelId)) {
+    return { point: points[0], placement: 'above' };
+  }
+  return null;
 }
 function drawObjectToContext(context, object) {
   enforceSemanticStyle(object);
@@ -1507,14 +1534,38 @@ function drawObjectToContext(context, object) {
     context.closePath();
     context.stroke();
     context.setLineDash([]);
-    if (Number.isFinite(object.rowAlignment?.baselineY)) {
-      const left = Math.min(...points.map(point => point.x));
-      const right = Math.max(...points.map(point => point.x));
+    const hasBaseline = Number.isFinite(object.rowAlignment?.baselineY);
+    const left = Math.min(...points.map(point => point.x));
+    const right = Math.max(...points.map(point => point.x));
+    if (hasBaseline) {
       context.lineWidth = Math.max(2, object.lineWidth || 3);
       drawExportLine(context, { x: left, y: object.rowAlignment.baselineY }, { x: right, y: object.rowAlignment.baselineY });
-      context.lineWidth = Math.max(3, (object.lineWidth || 3) * 1.4);
-      for (const candidate of (object.rowAlignment.candidates || []).filter(item => item.eligible === true)) {
-        drawExportLine(context, { x: candidate.x1, y: candidate.y }, { x: candidate.x2, y: candidate.y });
+    }
+    for (const [index, candidate] of (object.rowAlignment?.candidates || []).entries()) {
+      const first = { x: candidate.x1, y: candidate.y };
+      const second = { x: candidate.x2, y: candidate.y };
+      const center = midpoint(first, second);
+      context.lineWidth = candidate.eligible
+        ? Math.max(3, (object.lineWidth || 3) * 1.4)
+        : Math.max(2, object.lineWidth || 3);
+      context.globalAlpha = candidate.eligible ? .9 : .5;
+      context.setLineDash(candidate.confirmed ? [] : [4, 4]);
+      drawExportLine(context, first, second);
+      if (candidate.eligible && hasBaseline && candidate.deviationPx > .25) {
+        context.lineWidth = Math.max(1, (object.lineWidth || 3) * .5);
+        context.setLineDash([3, 3]);
+        drawExportLine(context, center, { x: center.x, y: object.rowAlignment.baselineY });
+      }
+      context.globalAlpha = 1;
+      context.setLineDash([]);
+      if (isResultLabelVisible(object)) {
+        const currentDeviation = currentRowDeviation(candidate);
+        const candidateLabel = candidate.eligible && hasBaseline
+          ? candidate.letter + '׳ · ' + fmt(currentDeviation.value, 2) + ' ' + currentDeviation.unitLabel
+          : candidate.confirmed
+            ? 'מועמד ' + (index + 1) + ' · לא לייחוס'
+            : 'מועמד ' + (index + 1) + ' · דורש אישור';
+        drawExportScaleNote(context, center, candidateLabel, object.color, exportOverlayUnit());
       }
     }
     context.restore();
@@ -1640,15 +1691,39 @@ function drawObjectToContext(context, object) {
     if (object.type === 'angle' && points.length >= 3) {
       context.beginPath(); context.moveTo(points[1].x, points[1].y); context.lineTo(points[2].x, points[2].y); context.stroke();
     }
-  } else if (object.type === 'thirds' && object.id === state.selectedId) {
+  } else if (object.type === 'thirds') {
     const point = points[0];
-    const size = 10;
-    context.beginPath();
-    context.moveTo(point.x - size, point.y); context.lineTo(point.x + size, point.y);
-    context.moveTo(point.x, point.y - size); context.lineTo(point.x, point.y + size);
-    context.stroke();
+    const unit = exportOverlayUnit();
+    if (object.id === state.selectedId) {
+      const size = 10 * unit;
+      context.beginPath();
+      context.moveTo(point.x - size, point.y); context.lineTo(point.x + size, point.y);
+      context.moveTo(point.x, point.y - size); context.lineTo(point.x, point.y + size);
+      context.stroke();
+    } else {
+      context.save();
+      context.fillStyle = object.color;
+      context.globalAlpha = .72;
+      context.beginPath();
+      context.arc(point.x, point.y, 3.5 * unit, 0, Math.PI * 2);
+      context.fill();
+      context.restore();
+    }
   }
   context.restore();
+  if (isResultLabelVisible(object) && typeof measurementResultModel === 'function') {
+    const labelPlacement = exportResultLabelPoint(object);
+    if (labelPlacement) {
+      drawExportScaleNote(
+        context,
+        labelPlacement.point,
+        measurementResultModel(object).canvasText,
+        object.color,
+        exportOverlayUnit(),
+        labelPlacement.placement
+      );
+    }
+  }
 }
 function downloadBlob(blob, name) {
   if (!blob) return;
@@ -1814,7 +1889,7 @@ async function serializeProjectV3() {
       title: captured.projectMeta.title || 'פרויקט מדידאות',
       createdAt: captured.projectMeta.createdAt,
       updatedAt: now,
-      appVersion: '2026.08.01c',
+      appVersion: '2026.08.01d',
       locale: 'he-IL'
     },
     source: {

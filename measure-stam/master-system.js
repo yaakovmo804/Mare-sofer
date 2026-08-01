@@ -37,109 +37,109 @@ globalThis.MEDIDAOT_MASTER_SYSTEM = (() => {
       id: 'widths', name: 'רוחבים', group: 'regaim', color: '#2563eb',
       description: 'בדיקת רוחב האות והלובן הפנימי ביחס למשפחת האותיות. כללי הרוחב היחיד והחריגה יוגדרו בהמשך.',
       measurementDescription: 'מסמנים שתי נקודות לרוחב הנבדק. האפליקציה שומרת את ערך הפיקסלים ומציגה אותו ביחידות עובי קולמוס כאשר קיים כיול.',
-      tool: 'length', category: 'width'
+      tool: 'length', category: 'width', operationMode: 'manual', operationLabel: 'קו ידני · ללא השוואת משפחה'
     }),
     Object.freeze({
       id: 'heights', name: 'גבהים', group: 'regaim', color: '#059669',
       description: 'בדיקת גובה האות או האיבר ביחס לשורה ולמשפחת האותיות.',
       measurementDescription: 'מסמנים שתי נקודות לאורך הגובה הנבדק. ההשוואה למשפחת אותיות תופעל רק לאחר שיוגדרו כללי המשפחה.',
-      tool: 'length', category: 'height'
+      tool: 'length', category: 'height', operationMode: 'manual', operationLabel: 'קו ידני · ללא השוואת משפחה'
     }),
     Object.freeze({
       id: 'nib', name: 'עובי קולמוס', group: 'regaim', color: '#7c3aed',
       description: 'יחידת היסוד הנמדדת מעובי קו מייצג. יתר האורכים והמרווחים מוצגים ביחידות עובי קולמוס.',
       measurementDescription: 'המערכת מאתרת גגות ישרים בתמונה או מקבלת קו ידני מאומת. כיול ידני נשאר נעול עד שהמשתמש משנה אותו.',
-      tool: 'nib', category: 'nib'
+      tool: 'nib', category: 'nib', operationMode: 'assisted', operationLabel: 'זיהוי אוטומטי + אימות ידני'
     }),
     Object.freeze({
       id: 'straightness', name: 'ישרות', group: 'regaim', color: '#0f766e',
       description: 'קו ייחוס לתחתית מושבים יציבים. ב׳, כ׳ ונ׳ רגילה משמשות מועמדות; ן׳ סופית וי׳ אינן משמשות לקביעת הקו.',
       measurementDescription: 'מסמנים שורה, מאשרים אילו מושבים שייכים לב׳, כ׳ או נ׳ רגילה, ורק אז נקבע קו לפי המושב הנמוך ביותר. יתר המושבים נמדדים ביחס אליו.',
-      tool: 'rowAlign', category: 'straightness'
+      tool: 'rowAlign', category: 'straightness', operationMode: 'assisted', operationLabel: 'סריקה + סיווג אנושי'
     }),
     Object.freeze({
       id: 'weights', name: 'משקלים', group: 'regaim', color: '#dc2626',
       description: 'בדיקת עובי מקומי ושינויי משקל באיברי האות. אין לאזן מבנה שגוי באמצעות השמנה בלבד.',
       measurementDescription: 'מסמנים את העובי המקומי בשתי נקודות. המשקל נשמר כנתון נפרד ואינו משמש לפיצוי אוטומטי על מבנה או עיקום.',
-      tool: 'gap', category: 'weight', formulaKey: 'root-weight'
+      tool: 'gap', category: 'weight', formulaKey: 'root-weight', operationMode: 'manual', operationLabel: 'עובי מקומי ידני · לא מפת משקל'
     }),
     Object.freeze({
       id: 'gaps', name: 'מרווחים', group: 'regaim', color: '#0891b2',
       description: 'בדיקת המרווחים בתוך האות, בין אותיות, בין מילים ובין השיטין ביחידות עובי קולמוס.',
       measurementDescription: 'בוחרים את סוג המרווח ומסמנים את גבולותיו. בין השיטין ניתן לזיהוי אוטומטי מתחתית הדיו של השורה העליונה עד ראש השורה הבאה.',
-      tool: 'gap', category: 'letter-gap', formulaKey: 'common-gap'
+      tool: 'gap', category: 'letter-gap', formulaKey: 'common-gap', operationMode: 'mixed', operationLabel: 'ידני · בין השיטין גם אוטומטי'
     }),
     Object.freeze({
       id: 'white-balance', name: 'איזון לובן', group: 'aman', color: '#e11d48',
       description: 'השוואת שטחי הלובן והיחסים ביניהם בתוך האות ובין האותיות.',
       measurementDescription: 'מקיפים כל תחום לובן במסלול סגור. האפליקציה מחשבת שטח ושומרת אותו להשוואה לתחומים אחרים.',
-      tool: 'area', category: 'white-space'
+      tool: 'area', category: 'white-space', operationMode: 'manual', operationLabel: 'שטח פוליגון · ללא כלל איזון'
     }),
     Object.freeze({
       id: 'optical-center', name: 'מרכז אופטי', group: 'aman', color: '#9333ea',
       description: 'נקודת האיזון החזותית של האות בתוך הקעסטעל. דרך המדידה המדויקת תוגדר בהמשך.',
       measurementDescription: 'בשלב זה זהו ערך מידע בלבד. לא נקבע אלגוריתם מספרי ולכן האפליקציה אינה מציגה כלי מדידה פעיל.',
-      tool: null, category: 'optical-center'
+      tool: null, category: 'optical-center', operationMode: 'information', operationLabel: 'מידע בלבד · אין אלגוריתם'
     }),
     Object.freeze({
       id: 'balconies', name: 'מרפסות', group: 'aman', color: '#ea580c',
       description: 'מדידת הבליטה של המרפסת. בשלב זה משווים ערך מספרי בין ו׳ לת׳ בלי לקבוע עדיין מהי חריגה.',
       measurementDescription: 'מסמנים את רוחב הבליטה בשתי נקודות ומסווגים את המדידה כו׳ או ת׳. כל מופע וערכו נשמרים בנפרד, ולצדם מוצגים חציון והפרש ללא סיווג תקין או חריג.',
-      tool: 'gap', category: 'balcony', formulaKey: 'balcony-width'
+      tool: 'gap', category: 'balcony', formulaKey: 'balcony-width', operationMode: 'manual', operationLabel: 'שתי נקודות + השוואת חציונים'
     }),
     Object.freeze({
       id: 'slants-parallels', name: 'נטיות ומקבילות', group: 'aman', color: '#d97706',
       description: 'מדידת זווית לכל ירך מסומנת והשוואת הנטיות והמקבילות בין מופעי ד׳, ה׳ ות׳.',
-      measurementDescription: 'מסמנים שתי נקודות לאורך כל ירך. המדידה מוצגת כסטייה מן האנך, וכל מופע בד׳, ה׳ או ת׳ נשמר בנפרד.',
-      tool: 'angle', category: 'slant'
+      measurementDescription: 'מסמנים תחום סריקה; האפליקציה מציעה ירכות וזווית חתומה, והמשתמש מסווג כל מועמד כד׳, ה׳ או ת׳. אם הזיהוי אינו מתאים, אפשר למדוד ירך ידנית בשתי נקודות.',
+      tool: 'angle', category: 'slant', operationMode: 'assisted', operationLabel: 'סריקת תחום + סיווג אנושי'
     }),
     Object.freeze({
       id: 'thirds', name: 'חוק השלישים', group: 'reference', color: '#16a34a',
       description: 'חלוקת רוחב הקעסטעל לשלושה טורים לצורך בדיקת מיקום האיברים בתוך מסגרת האות.',
       measurementDescription: 'יוצרים או בוחרים קעסטעל ומפעילים את רשת השלישים. נקודה מסומנת מקבלת מיקום יחסי בתוך המסגרת.',
-      tool: 'thirds', category: 'thirds'
+      tool: 'thirds', category: 'thirds', operationMode: 'guided', operationLabel: 'כלי ייחוס פעיל'
     }),
     Object.freeze({
       id: 'roof-seat', name: 'מרווח גג–מושב', group: 'reference', color: '#0d9488',
       description: 'המרחק מן הגבול התחתון של הגג עד הגבול העליון של המושב, ביחידות עובי קולמוס.',
       measurementDescription: 'כאשר גבולות הגג והמושב מזוהים בקעסטעל, האפליקציה מפיקה את המרווח ישירות. אחרת ניתן לסמן את שני הגבולות ידנית.',
-      tool: 'gap', category: 'letter-gap', formulaKey: 'roof-seat'
+      tool: 'gap', category: 'letter-gap', formulaKey: 'roof-seat', operationMode: 'mixed', operationLabel: 'זיהוי בקעסטעל או סימון ידני'
     }),
     Object.freeze({
       id: 'circle-ellipse', name: 'עיגול ואליפסה', group: 'reference', color: '#4f46e5',
       description: 'מסגרת גאומטרית פעילה למדידת רוחב, גובה ושטח של עיגול או אליפסה.',
       measurementDescription: 'גוררים מסגרת סביב הצורה. עיגול נשמר ביחס שווה, ואליפסה שומרת רוחב וגובה נפרדים.',
-      tool: 'ellipse', category: 'geometry'
+      tool: 'ellipse', category: 'geometry', operationMode: 'manual', operationLabel: 'מסגרת גאומטרית פעילה'
     }),
     Object.freeze({
       id: 'roofs', name: 'גגות', group: 'reference', color: '#be185d',
       description: 'סימון הגג או גבולותיו כמרכיב מבני נפרד של האות.',
-      measurementDescription: 'מסמנים את גבולות הגג או משתמשים בגבולות שזוהו בתוך הקעסטעל. הנתון נשמר בצבע הגגות הקבוע.',
-      tool: null, category: 'roof'
+      measurementDescription: 'זהו תיוג בלבד: בוחרים סימון קיים ומשייכים לו קטגוריית גג במאפייני הסימון. הכרטיס אינו מפעיל כלי זיהוי או מדידה.',
+      tool: null, category: 'roof', operationMode: 'label-only', operationLabel: 'תיוג בלבד · לא כלי זיהוי'
     }),
     Object.freeze({
       id: 'seats', name: 'מושבים', group: 'reference', color: '#0369a1',
       description: 'סימון המושב או גבולותיו כמרכיב מבני נפרד של האות.',
-      measurementDescription: 'מסמנים את גבולות המושב או משתמשים בגבולות שזוהו בתוך הקעסטעל. הנתון נשמר בצבע המושבים הקבוע.',
-      tool: null, category: 'seat'
+      measurementDescription: 'זהו תיוג בלבד: בוחרים סימון קיים ומשייכים לו קטגוריית מושב במאפייני הסימון. הכרטיס אינו מפעיל כלי זיהוי או מדידה.',
+      tool: null, category: 'seat', operationMode: 'label-only', operationLabel: 'תיוג בלבד · לא כלי זיהוי'
     }),
     Object.freeze({
       id: 'stems', name: 'ירכות ודפנות', group: 'reference', color: '#65a30d',
       description: 'סימון ירך או דופן לצורך בדיקת מבנה, נטייה ומקבילות.',
-      measurementDescription: 'מסמנים את האיבר עצמו. כאשר נדרשת זווית, משתמשים בכלי נטיות ומקבילות ושומרים גם את כיוון הסטייה מן האנך.',
-      tool: null, category: 'stem'
+      measurementDescription: 'זהו תיוג בלבד: בוחרים סימון קיים ומשייכים לו קטגוריית ירך/דופן. למדידת זווית משתמשים בכלי נטיות ומקבילות; הכרטיס אינו מפעיל כלי.',
+      tool: null, category: 'stem', operationMode: 'label-only', operationLabel: 'תיוג בלבד · למדידה השתמש בנטיות'
     }),
     Object.freeze({
       id: 'reference-template', name: 'תבנית אות', group: 'reference', color: '#a16207',
       description: 'מסגרת או אות וקטורית המשמשת תבנית ייחוס ואינה משנה את צילום המקור.',
       measurementDescription: 'התבנית נשמרת כווקטור נפרד עם קישור יציב למסגרת המקור שלה.',
-      tool: null, category: 'reference-template'
+      tool: null, category: 'reference-template', operationMode: 'information', operationLabel: 'אובייקט ייחוס · לא מדידה'
     }),
     Object.freeze({
       id: 'other', name: 'אחר', group: 'reference', color: '#475569',
       description: 'סימון שטרם שויך להגדרה מקצועית מדויקת.',
       measurementDescription: 'הסימון נשמר בצבע ניטרלי קבוע עד שיוחלף בהגדרה מקצועית מפורשת.',
-      tool: null, category: 'other'
+      tool: null, category: 'other', operationMode: 'label-only', operationLabel: 'תיוג ניטרלי בלבד'
     })
   ]);
 

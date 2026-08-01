@@ -124,6 +124,26 @@ function sampleVectorContours(vector, stepsPerSegment = 16) {
   return contours;
 }
 
+function storedAnchorPoints(vector) {
+  const anchors = new Map();
+  const append = (paths, prefix) => {
+    for (const [pathIndex, entry] of (paths || []).entries()) {
+      for (const [commandIndex, command] of (entry.commands || []).entries()) {
+        if (!['M', 'L', 'C'].includes(command.type)) continue;
+        anchors.set(`${prefix}p${pathIndex}:c${commandIndex}:anchor`, {
+          x: command.x,
+          y: command.y
+        });
+      }
+    }
+  };
+  append(vector?.paths, '');
+  for (const organ of vector?.organs || []) {
+    append(organ.paths, `o:${organ.id}:`);
+  }
+  return anchors;
+}
+
 function percentile(values, ratio) {
   const ordered = values.slice().sort((first, second) => first - second);
   return ordered[Math.min(ordered.length - 1, Math.floor(ordered.length * ratio))];
@@ -306,7 +326,14 @@ test('a supersampled diagonal stroke is simplified without Manhattan zigzags', (
 test('roof and stem semantics persist exact roof endpoints, axis and junction in vector-local coordinates', () => {
   const sourceImage = image(120, 120);
   fill(sourceImage, 18, 18, 104, 32);
-  fill(sourceImage, 68, 18, 82, 105);
+  for (let y = 32; y < 103; y++) {
+    let halfWidth;
+    if (y < 45) halfWidth = 8;
+    else if (y < 62) halfWidth = 8 - (y - 45) * 3 / 17;
+    else if (y < 86) halfWidth = 5;
+    else halfWidth = Math.max(.8, 5 * Math.sqrt(Math.max(0, 1 - ((y - 86) / 17) ** 2)));
+    fill(sourceImage, Math.floor(75 - halfWidth), y, Math.ceil(75 + halfWidth), y + 1);
+  }
 
   const result = vectorizer.vectorizeImageData(
     sourceImage,
@@ -316,6 +343,8 @@ test('roof and stem semantics persist exact roof endpoints, axis and junction in
   const endpoints = result.vector.features.filter(feature => feature.type === 'roof-endpoint');
   const stems = result.vector.features.filter(feature => feature.type === 'stem-axis');
   const junctions = result.vector.features.filter(feature => feature.type === 'roof-stem-junction');
+  const landmarks = result.vector.features.filter(feature => feature.type === 'stem-landmark');
+  const organs = result.vector.features.filter(feature => feature.type === 'stem-organ');
   assert.equal(endpoints.length, 2);
   assert.equal(stems.length, 1);
   assert.equal(junctions.length, 1);
@@ -328,10 +357,37 @@ test('roof and stem semantics persist exact roof endpoints, axis and junction in
   assert.ok(stems[0].confidence > .8);
   assert.equal(junctions[0].point.x, stems[0].root.x);
   assert.equal(junctions[0].point.y, stems[0].root.y);
+  assert.equal(landmarks.length, 8);
+  assert.deepEqual(
+    new Set(landmarks.map(feature => feature.role)),
+    new Set([
+      'root-left', 'root-right', 'neck-left', 'neck-right',
+      'rounding-left', 'rounding-right', 'terminal-left', 'terminal-right'
+    ])
+  );
+  const commandAnchors = storedAnchorPoints(result.vector);
+  for (const landmark of landmarks) {
+    assert.equal(landmark.anchorIds.length, 1, `${landmark.role} must bind to exactly one organ anchor`);
+    assert.equal(landmark.topologyStatus, 'bound-organ-subpath');
+    const anchor = commandAnchors.get(landmark.anchorIds[0]);
+    assert.ok(anchor, `${landmark.role} points to a missing vector anchor`);
+    assert.ok(Math.hypot(anchor.x - landmark.point.x, anchor.y - landmark.point.y) <= .75,
+      `${landmark.role} metadata is not located on its bound contour anchor`);
+  }
+  assert.equal(organs.length, 1);
+  assert.equal(result.vector.organs.length, 1);
+  assert.equal(organs[0].organId, result.vector.organs[0].id);
+  const organAnchorIds = new Set(result.vector.organs[0].anchorIds);
+  for (const landmark of landmarks) assert.ok(organAnchorIds.has(landmark.anchorIds[0]));
+  assert.equal(result.vector.organs[0].transformMode, 'rigid-subpath');
   assert.equal(result.vector.featureCoordinateSpace, 'vector-local');
   assert.equal(result.vector.featureAngleConvention, 'signed-clockwise-from-vertical');
-  assert.equal(result.vector.trace.featureCount, 4);
+  assert.equal(result.vector.schemaVersion, 3);
+  assert.equal(result.vector.trace.featureCount, 13);
   assert.equal(result.vector.trace.stemCount, 1);
+  assert.equal(result.vector.trace.boundLandmarkCount, 8);
+  assert.equal(result.vector.trace.organCount, 1);
+  assert.equal(result.vector.trace.semanticMethod, 'contour-topology-v3');
   assert.equal(JSON.stringify(result.vector.features), JSON.stringify(result.features));
 });
 
@@ -351,6 +407,85 @@ test('each distinct stem below one roof receives its own axis and junction', () 
   assert.equal(junctions.length, 2);
   assert.deepEqual(Array.from(stems, feature => feature.root.x), [30, 92]);
   assert.deepEqual(Array.from(junctions, feature => feature.point.x), [30, 92]);
+});
+
+test('nearby stems own disjoint independent organ anchors', () => {
+  const sourceImage = image(120, 120);
+  fill(sourceImage, 18, 18, 104, 32);
+  fill(sourceImage, 50, 32, 60, 106);
+  fill(sourceImage, 64, 32, 74, 106);
+  const result = vectorizer.vectorizeImageData(
+    sourceImage,
+    fullSelection(sourceImage.width, sourceImage.height),
+    { maximumAnchors: 120 }
+  );
+  const organs = result.vector.organs || [];
+  assert.equal(organs.length, 2, 'the two close but disconnected thighs must remain distinct organs');
+  assert.ok(organs.every(organ => organ.anchorIds.length >= 4), 'each organ needs an editable outline');
+
+  const ownersByAnchor = new Map();
+  for (const organ of organs) {
+    for (const anchorId of organ.anchorIds) {
+      if (!ownersByAnchor.has(anchorId)) ownersByAnchor.set(anchorId, []);
+      ownersByAnchor.get(anchorId).push(organ.id);
+    }
+  }
+  const sharedOwnership = [...ownersByAnchor]
+    .filter(([, owners]) => new Set(owners).size > 1)
+    .map(([anchorId, owners]) => ({ anchorId, owners }));
+  assert.deepEqual(
+    sharedOwnership,
+    [],
+    `nearby organs must not share movable anchors: ${JSON.stringify(sharedOwnership)}`
+  );
+
+  for (const organ of organs) {
+    assert.ok(Array.isArray(organ.paths) && organ.paths.length > 0,
+      `${organ.id} must persist its own vector subpaths`);
+    assert.ok(Array.isArray(organ.boundaryPorts) && organ.boundaryPorts.length >= 2,
+      `${organ.id} must expose explicit boundary ports`);
+    assert.ok(organ.junction && typeof organ.junction === 'object',
+      `${organ.id} must expose an explicit roof junction`);
+    for (const anchorId of organ.anchorIds) {
+      assert.match(
+        anchorId,
+        new RegExp(`^o:${organ.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:p\\d+:c\\d+:anchor$`),
+        `${anchorId} must live in the owning organ namespace`
+      );
+      assert.ok(storedAnchorPoints(result.vector).has(anchorId), `${anchorId} must resolve to stored organ geometry`);
+    }
+  }
+  assert.ok(Array.isArray(result.vector.composition?.basePaths),
+    'schema v3 must persist the source remainder used to compose independent organs');
+});
+
+test('a disconnected T inside a larger counter owns its own contour and organ', () => {
+  const sourceImage = image(180, 180);
+  fill(sourceImage, 10, 10, 170, 25);
+  fill(sourceImage, 10, 155, 170, 170);
+  fill(sourceImage, 10, 25, 25, 155);
+  fill(sourceImage, 155, 25, 170, 155);
+  fill(sourceImage, 65, 50, 115, 64);
+  fill(sourceImage, 87, 62, 96, 138);
+
+  const result = vectorizer.vectorizeImageData(
+    sourceImage,
+    fullSelection(sourceImage.width, sourceImage.height),
+    { maximumAnchors: 260 }
+  );
+  const nestedAxis = result.vector.features.find(feature => (
+    feature.type === 'stem-axis' && feature.componentIndex === 1
+  ));
+  const nestedOrgan = result.vector.organs.find(organ => (
+    organ.ownership?.componentIndex === 1
+  ));
+
+  assert.ok(nestedAxis, 'the disconnected T must retain its independently detected stem axis');
+  assert.equal(nestedAxis.topologyStatus, 'bound-organ-subpath');
+  assert.ok(nestedOrgan, 'the nested component must create an independent movable organ');
+  assert.ok(nestedOrgan.anchorIds.length >= 4, 'the nested organ needs editable contour anchors');
+  assert.equal(nestedOrgan.boundaryPorts.length, 2, 'the nested organ needs a paired roof connector');
+  assert.ok(nestedOrgan.anchorIds.every(anchorId => anchorId.startsWith(`o:${nestedOrgan.id}:`)));
 });
 
 test('many disconnected grains obey the hard anchor budget without collapsing to one component', () => {

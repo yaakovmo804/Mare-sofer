@@ -10,7 +10,7 @@
  */
 globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
   const API_VERSION = 1;
-  const VECTOR_SCHEMA_VERSION = 1;
+  const VECTOR_SCHEMA_VERSION = 3;
   const VECTOR_PROPERTY = 'letterVector';
   const LAYOUT_TIGHT = 'tight-v1';
   const LAYOUT_SOURCE_CELL = 'source-cell-v2';
@@ -191,6 +191,102 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
       rule: entry?.rule === 'evenodd' ? 'evenodd' : 'nonzero',
       commands: (entry?.commands || []).map(cloneCommand)
     }));
+  }
+
+  function topologyBasePaths(vector) {
+    return vector?.composition?.mode === 'organ-subpaths-v1'
+      && Array.isArray(vector.composition.basePaths)
+      ? vector.composition.basePaths
+      : vector?.paths || [];
+  }
+
+  function topologyOrgans(vector) {
+    return Array.isArray(vector?.organs)
+      ? vector.organs.filter(organ => Array.isArray(organ?.paths) && organ.paths.length)
+      : [];
+  }
+
+  function formatHandleId(pathIndex, commandIndex, role, organId = null) {
+    const base = `p${pathIndex}:c${commandIndex}:${role}`;
+    return organId ? `o:${organId}:${base}` : base;
+  }
+
+  function parseHandleId(handleId) {
+    const value = String(handleId);
+    const organMatch = /^o:([^:]+):p(\d+):c(\d+):(anchor|control-in|control-out)$/.exec(value);
+    const flatMatch = /^p(\d+):c(\d+):(anchor|control-in|control-out)$/.exec(value);
+    const match = organMatch || flatMatch;
+    if (!match) throw new TypeError(`Invalid vector handle id: ${value}`);
+    return organMatch ? {
+      organId: organMatch[1],
+      pathIndex: Number(organMatch[2]),
+      commandIndex: Number(organMatch[3]),
+      role: organMatch[4]
+    } : {
+      organId: null,
+      pathIndex: Number(flatMatch[1]),
+      commandIndex: Number(flatMatch[2]),
+      role: flatMatch[3]
+    };
+  }
+
+  function handlePathContext(vector, handle) {
+    if (handle.organId) {
+      const organ = topologyOrgans(vector).find(item => item.id === handle.organId);
+      return organ ? { organ, paths: organ.paths, namespace: organ.id } : null;
+    }
+    return { organ: null, paths: topologyBasePaths(vector), namespace: null };
+  }
+
+  function commandForHandle(vector, handleId) {
+    const parsed = typeof handleId === 'string' ? parseHandleId(handleId) : handleId;
+    const context = handlePathContext(vector, parsed);
+    const command = context?.paths?.[parsed.pathIndex]?.commands?.[parsed.commandIndex];
+    return command ? { parsed, context, command } : null;
+  }
+
+  function anchorPointForId(vector, handleId) {
+    const resolved = commandForHandle(vector, handleId);
+    if (!resolved || resolved.parsed.role !== 'anchor' || !['M', 'L', 'C'].includes(resolved.command.type)) return null;
+    return { x: resolved.command.x, y: resolved.command.y };
+  }
+
+  function topologyConnectorPaths(vector) {
+    const connectors = [];
+    for (const organ of topologyOrgans(vector)) {
+      const ports = (organ.boundaryPorts || []).filter(port => port?.sourceAnchorId && port?.organAnchorId);
+      if (ports.length !== 2) continue;
+      const source = ports.map(port => anchorPointForId(vector, port.sourceAnchorId) || port.sourcePoint).filter(Boolean);
+      const target = ports.map(port => anchorPointForId(vector, port.organAnchorId)).filter(Boolean);
+      if (source.length !== 2 || target.length !== 2) continue;
+      connectors.push({
+        rule: 'nonzero',
+        commands: [
+          { type: 'M', x: source[0].x, y: source[0].y },
+          { type: 'L', x: source[1].x, y: source[1].y },
+          { type: 'L', x: target[1].x, y: target[1].y },
+          { type: 'L', x: target[0].x, y: target[0].y },
+          { type: 'Z' }
+        ]
+      });
+    }
+    return connectors;
+  }
+
+  function topologyRenderPaths(vector) {
+    if (vector?.composition?.mode !== 'organ-subpaths-v1') return vector?.paths || [];
+    return [
+      ...topologyBasePaths(vector),
+      ...topologyOrgans(vector).flatMap(organ => organ.paths),
+      ...topologyConnectorPaths(vector)
+    ];
+  }
+
+  function topologyEditablePaths(vector) {
+    return [
+      ...topologyBasePaths(vector),
+      ...topologyOrgans(vector).flatMap(organ => organ.paths)
+    ];
   }
 
   function deepFreezePaths(paths) {
@@ -492,7 +588,13 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
       throw new TypeError('A letter template object is required.');
     }
     const existing = getObjectVector(object);
-    if (existing) return existing;
+    if (existing) {
+      if (Math.trunc(finiteNumber(existing.schemaVersion, 1)) >= VECTOR_SCHEMA_VERSION) return existing;
+      const migrated = cloneVectorData(existing, { ...options, migrationSource: existing.schemaVersion || 1 });
+      object[VECTOR_PROPERTY] = migrated;
+      object.letterWeight = migrated.weight;
+      return migrated;
+    }
 
     const asset = options.asset || resolveLegacyAsset(object, options.tradition);
     if (!asset) throw new Error('The legacy vector asset for this letter is unavailable.');
@@ -512,6 +614,14 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
       weight,
       revision: 1,
       paths,
+      composition: {
+        schemaVersion: VECTOR_SCHEMA_VERSION,
+        mode: 'flat-source-v3',
+        basePaths: clonePaths(paths),
+        connectorMode: 'none'
+      },
+      features: [],
+      organs: [],
       handleCounts: counts
     };
     object[VECTOR_PROPERTY] = vector;
@@ -523,7 +633,7 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
     const vector = getVectorSource(source, options);
     if (!vector) return null;
     const cloned = {
-      schemaVersion: Math.max(VECTOR_SCHEMA_VERSION, Math.trunc(finiteNumber(vector.schemaVersion, VECTOR_SCHEMA_VERSION))),
+      schemaVersion: VECTOR_SCHEMA_VERSION,
       sourceKey: vector.sourceKey || '',
       letter: vector.letter || '',
       tradition: normalizeTradition(vector.tradition),
@@ -532,15 +642,56 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
       viewBox: vector.viewBox.slice(0, 4).map(value => finiteNumber(value)),
       weight: normalizedWeight(vector.weight),
       revision: Math.max(0, Math.trunc(finiteNumber(vector.revision))),
-      paths: clonePaths(vector.paths),
-      handleCounts: calculateHandleCountsFromPaths(vector.paths)
+      paths: clonePaths(vector.paths)
     };
-    if (Array.isArray(vector.features)) cloned.features = clonePlainMetadata(vector.features);
+    if (vector.composition?.mode === 'organ-subpaths-v1' && Array.isArray(vector.composition.basePaths)) {
+      cloned.composition = {
+        ...clonePlainMetadata(vector.composition),
+        schemaVersion: VECTOR_SCHEMA_VERSION,
+        basePaths: clonePaths(vector.composition.basePaths)
+      };
+    } else {
+      cloned.composition = {
+        schemaVersion: VECTOR_SCHEMA_VERSION,
+        mode: 'flat-source-v3',
+        basePaths: clonePaths(vector.paths),
+        connectorMode: 'none'
+      };
+    }
+    if (Array.isArray(vector.features)) {
+      cloned.features = clonePlainMetadata(vector.features).map(feature => {
+        if (Array.isArray(feature.anchorIds) && !feature.anchorIds.length) {
+          delete feature.anchorIds;
+          feature.topologyStatus = 'unbound-reference';
+        }
+        return feature;
+      });
+    } else cloned.features = [];
+    if (Array.isArray(vector.organs)) {
+      cloned.organs = vector.organs.map(organ => ({
+        ...clonePlainMetadata(organ),
+        paths: Array.isArray(organ.paths) ? clonePaths(organ.paths) : undefined
+      }));
+    } else cloned.organs = [];
     if (vector.trace && typeof vector.trace === 'object') cloned.trace = clonePlainMetadata(vector.trace);
     for (const key of ['featureCoordinateSpace', 'featureAngleConvention']) {
       if (typeof vector[key] === 'string' && vector[key]) cloned[key] = vector[key];
     }
+    const sourceSchema = Math.max(1, Math.trunc(finiteNumber(options.migrationSource ?? vector.schemaVersion, 1)));
+    if (sourceSchema < VECTOR_SCHEMA_VERSION) {
+      cloned.migration = {
+        fromSchemaVersion: sourceSchema,
+        toSchemaVersion: VECTOR_SCHEMA_VERSION,
+        mode: 'legacy-flat-vectors'
+      };
+    }
+    cloned.handleCounts = calculateHandleCountsFromPaths(topologyEditablePaths(cloned));
     return cloned;
+  }
+
+  function migrateVectorData(source) {
+    if (!isVectorData(source)) throw new TypeError('Editable vector data is required.');
+    return cloneVectorData(source, { migrationSource: source.schemaVersion || 1 });
   }
 
   function commandSignature(paths) {
@@ -562,13 +713,13 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
   }
 
   function vectorSignature(vector) {
-    return `${normalizedWeight(vector?.weight)}#${Math.trunc(finiteNumber(vector?.revision))}#${commandSignature(vector?.paths)}`;
+    return `${normalizedWeight(vector?.weight)}#${Math.trunc(finiteNumber(vector?.revision))}#${commandSignature(topologyRenderPaths(vector))}`;
   }
 
   function touchVector(vector) {
     if (!isVectorData(vector)) throw new TypeError('Editable vector data is required.');
     vector.revision = Math.max(0, Math.trunc(finiteNumber(vector.revision))) + 1;
-    vector.handleCounts = calculateHandleCountsFromPaths(vector.paths);
+    vector.handleCounts = calculateHandleCountsFromPaths(topologyEditablePaths(vector));
     effectivePathCache.delete(vector);
     path2DCache.delete(vector);
     return vector.revision;
@@ -1079,7 +1230,7 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
     const vector = getVectorSource(source, options);
     if (!vector) throw new Error('No vector data is available for weight adjustment.');
     const weight = normalizedWeight(requestedWeight ?? vector.weight);
-    const originalPaths = vector.paths;
+    const originalPaths = options.renderPaths || topologyRenderPaths(vector);
     const originalBounds = computePathBounds(originalPaths);
     if (Math.abs(weight - 1) < 1e-9 || originalBounds.width < EPSILON || originalBounds.height < EPSILON) {
       return {
@@ -1153,7 +1304,8 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
 
   function getEffectivePathsInternal(vector, options = {}) {
     const weight = normalizedWeight(options.weight ?? vector.weight);
-    if (Math.abs(weight - 1) < 1e-9) return vector.paths;
+    const renderPaths = topologyRenderPaths(vector);
+    if (Math.abs(weight - 1) < 1e-9) return renderPaths;
     const optionSignature = [
       finiteNumber(options.flattenTolerance, -1),
       finiteNumber(options.nominalStrokeRatio, -1),
@@ -1164,7 +1316,7 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
     const signature = `${vectorSignature(vector)}@${weight}@${optionSignature}`;
     const cached = effectivePathCache.get(vector);
     if (cached?.signature === signature) return cached.paths;
-    const result = adjustWeight(vector, weight, options);
+    const result = adjustWeight(vector, weight, { ...options, renderPaths });
     const frozen = deepFreezePaths(clonePaths(result.paths));
     effectivePathCache.set(vector, { signature, paths: frozen, warnings: result.warnings.slice() });
     return frozen;
@@ -1387,11 +1539,12 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
     const transform = options.coordinateSpace === 'image' && source?.points
       ? getLayoutTransform(source, { ...options, vector })
       : null;
-    const emit = (pathIndex, commandIndex, role, kind, point) => {
+    const emit = (pathIndex, commandIndex, role, kind, point, organId = null) => {
       const local = clonePoint(point);
       const mapped = transform ? transform.localToImage(local) : local;
       handles.push({
-        id: `p${pathIndex}:c${commandIndex}:${role}`,
+        id: formatHandleId(pathIndex, commandIndex, role, organId),
+        organId,
         pathIndex,
         commandIndex,
         role,
@@ -1402,25 +1555,27 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
       });
     };
 
-    vector.paths.forEach((entry, pathIndex) => {
+    const enumeratePaths = (paths, organId = null) => paths.forEach((entry, pathIndex) => {
       entry.commands.forEach((command, commandIndex) => {
         if (command.type === 'M' || command.type === 'L') {
-          emit(pathIndex, commandIndex, 'anchor', 'anchor', command);
+          emit(pathIndex, commandIndex, 'anchor', 'anchor', command, organId);
         } else if (command.type === 'C') {
           /* C1 leaves the preceding anchor; C2 enters this command's anchor. */
-          emit(pathIndex, commandIndex, 'control-out', 'control', { x: command.x1, y: command.y1 });
-          emit(pathIndex, commandIndex, 'control-in', 'control', { x: command.x2, y: command.y2 });
-          emit(pathIndex, commandIndex, 'anchor', 'anchor', command);
+          emit(pathIndex, commandIndex, 'control-out', 'control', { x: command.x1, y: command.y1 }, organId);
+          emit(pathIndex, commandIndex, 'control-in', 'control', { x: command.x2, y: command.y2 }, organId);
+          emit(pathIndex, commandIndex, 'anchor', 'anchor', command, organId);
         }
       });
     });
+    enumeratePaths(topologyBasePaths(vector));
+    for (const organ of topologyOrgans(vector)) enumeratePaths(organ.paths, organ.id);
     return handles;
   }
 
   function getHandleCounts(source, options = {}) {
     const vector = getVectorSource(source, options);
     if (!vector) return { anchors: 0, controls: 0, total: 0 };
-    return calculateHandleCountsFromPaths(vector.paths);
+    return calculateHandleCountsFromPaths(topologyEditablePaths(vector));
   }
 
   function contourRangeForCommand(commands, commandIndex) {
@@ -1442,9 +1597,9 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
       controls.push({ commandIndex, coordinate: 'control-in' });
     }
     let nextIndex = commandIndex + 1;
-    if (nextIndex > range.end || commands[nextIndex]?.type === 'Z') {
-      nextIndex = range.start + 1;
-    }
+    /* Raster vectors close with a linear Z edge; it has no outgoing cubic
+       control. Do not borrow the first segment's control for the last anchor. */
+    if (nextIndex > range.end || commands[nextIndex]?.type === 'Z') return controls;
     if (commands[nextIndex]?.type === 'C') {
       controls.push({ commandIndex: nextIndex, coordinate: 'control-out' });
     }
@@ -1455,20 +1610,11 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
     return [...unique.values()];
   }
 
-  function parseHandleId(handleId) {
-    const match = /^p(\d+):c(\d+):(anchor|control-in|control-out)$/.exec(String(handleId));
-    if (!match) throw new TypeError(`Invalid vector handle id: ${String(handleId)}`);
-    return {
-      pathIndex: Number(match[1]),
-      commandIndex: Number(match[2]),
-      role: match[3]
-    };
-  }
-
   function moveVectorHandle(vector, handleId, targetLocal, options = {}) {
     if (!isVectorData(vector)) throw new TypeError('Editable vector data is required.');
     const handle = parseHandleId(handleId);
-    const entry = vector.paths[handle.pathIndex];
+    const context = handlePathContext(vector, handle);
+    const entry = context?.paths?.[handle.pathIndex];
     const command = entry?.commands?.[handle.commandIndex];
     if (!command) throw new RangeError(`Vector handle ${handleId} no longer exists.`);
     const target = clonePoint(targetLocal);
@@ -1547,8 +1693,9 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
       y: localTarget.y - localOrigin.y
     };
     const coordinates = new Map();
-    const addCoordinate = (pathIndex, commandIndex, role) => {
-      const entry = vector.paths[pathIndex];
+    const addCoordinate = (handle, commandIndex = handle.commandIndex, role = handle.role) => {
+      const context = handlePathContext(vector, handle);
+      const entry = context?.paths?.[handle.pathIndex];
       const command = entry?.commands?.[commandIndex];
       if (!command) return;
       let xKey;
@@ -1565,16 +1712,33 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
       } else {
         return;
       }
-      coordinates.set(`${pathIndex}:${commandIndex}:${xKey}`, { command, xKey, yKey });
+      coordinates.set(`${handle.organId || 'base'}:${handle.pathIndex}:${commandIndex}:${xKey}`, { command, xKey, yKey });
     };
 
+    const selectedAnchorIds = new Set(ids.filter(id => id.endsWith(':anchor')));
+    const internalControl = (handle, control) => {
+      if (!options.moveInternalControlsOnly) return true;
+      if (control.coordinate === 'control-in') {
+        const previousIndex = control.commandIndex - 1;
+        return previousIndex >= 0 && selectedAnchorIds.has(formatHandleId(
+          handle.pathIndex, previousIndex, 'anchor', handle.organId
+        ));
+      }
+      if (control.coordinate === 'control-out') {
+        return selectedAnchorIds.has(formatHandleId(
+          handle.pathIndex, control.commandIndex, 'anchor', handle.organId
+        ));
+      }
+      return false;
+    };
     for (const id of ids) {
       const handle = parseHandleId(id);
-      addCoordinate(handle.pathIndex, handle.commandIndex, handle.role);
+      addCoordinate(handle);
       if (handle.role === 'anchor' && options.moveAdjacentControls !== false) {
-        const commands = vector.paths[handle.pathIndex]?.commands || [];
+        const commands = handlePathContext(vector, handle)?.paths?.[handle.pathIndex]?.commands || [];
         for (const control of adjacentControls(commands, handle.commandIndex)) {
-          addCoordinate(handle.pathIndex, control.commandIndex, control.coordinate);
+          if (!internalControl(handle, control)) continue;
+          addCoordinate(handle, control.commandIndex, control.coordinate);
         }
       }
     }
@@ -1636,13 +1800,20 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
     const target = clamp(finiteNumber(targetAngleDeg), -89, 89);
     const currentTangent = Math.tan(currentAngleDeg * Math.PI / 180);
     const targetTangent = Math.tan(target * Math.PI / 180);
+    const transformMode = options.transformMode === 'rotate' || options.rigid === true
+      ? 'rotate'
+      : 'shear';
+    const rotation = (target - currentAngleDeg) * Math.PI / 180;
+    const cosine = Math.cos(rotation);
+    const sine = Math.sin(rotation);
     const pivot = options.pivotImage && Number.isFinite(+options.pivotImage.x) && Number.isFinite(+options.pivotImage.y)
       ? { x: +options.pivotImage.x, y: +options.pivotImage.y }
       : root;
 
     const coordinates = new Map();
-    const addCoordinate = (pathIndex, commandIndex, role) => {
-      const command = vector.paths[pathIndex]?.commands?.[commandIndex];
+    const addCoordinate = (handle, commandIndex = handle.commandIndex, role = handle.role) => {
+      const context = handlePathContext(vector, handle);
+      const command = context?.paths?.[handle.pathIndex]?.commands?.[commandIndex];
       if (!command) return;
       let xKey;
       let yKey;
@@ -1653,16 +1824,32 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
       } else if (role === 'control-in' && command.type === 'C') {
         xKey = 'x2'; yKey = 'y2';
       } else return;
-      coordinates.set(`${pathIndex}:${commandIndex}:${xKey}`, { command, xKey, yKey });
+      coordinates.set(`${handle.organId || 'base'}:${handle.pathIndex}:${commandIndex}:${xKey}`, { command, xKey, yKey });
+    };
+    const selectedAnchorIds = new Set(ids.filter(id => id.endsWith(':anchor')));
+    const internalControl = (handle, control) => {
+      if (!options.moveInternalControlsOnly) return true;
+      if (control.coordinate === 'control-in') {
+        return selectedAnchorIds.has(formatHandleId(
+          handle.pathIndex, control.commandIndex - 1, 'anchor', handle.organId
+        ));
+      }
+      if (control.coordinate === 'control-out') {
+        return selectedAnchorIds.has(formatHandleId(
+          handle.pathIndex, control.commandIndex, 'anchor', handle.organId
+        ));
+      }
+      return false;
     };
     for (const id of ids) {
       const handle = parseHandleId(id);
       if (handle.role !== 'anchor') continue;
-      addCoordinate(handle.pathIndex, handle.commandIndex, handle.role);
+      addCoordinate(handle);
       if (options.moveAdjacentControls !== false) {
-        const commands = vector.paths[handle.pathIndex]?.commands || [];
+        const commands = handlePathContext(vector, handle)?.paths?.[handle.pathIndex]?.commands || [];
         for (const control of adjacentControls(commands, handle.commandIndex)) {
-          addCoordinate(handle.pathIndex, control.commandIndex, control.coordinate);
+          if (!internalControl(handle, control)) continue;
+          addCoordinate(handle, control.commandIndex, control.coordinate);
         }
       }
     }
@@ -1671,15 +1858,31 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
         x: coordinate.command[coordinate.xKey],
         y: coordinate.command[coordinate.yKey]
       });
-      const tiltedImage = {
-        x: image.x + (pivot.y - image.y) * (targetTangent - currentTangent),
-        y: image.y
-      };
+      const relative = { x: image.x - pivot.x, y: image.y - pivot.y };
+      const tiltedImage = transformMode === 'rotate'
+        ? {
+            x: pivot.x + relative.x * cosine - relative.y * sine,
+            y: pivot.y + relative.x * sine + relative.y * cosine
+          }
+        : {
+            x: image.x + (pivot.y - image.y) * (targetTangent - currentTangent),
+            y: image.y
+          };
       const local = transform.imageToLocal(tiltedImage);
       coordinate.command[coordinate.xKey] = local.x;
       coordinate.command[coordinate.yKey] = local.y;
     }
     touchVector(vector);
+    const tipRelative = { x: tip.x - pivot.x, y: tip.y - pivot.y };
+    const transformedTip = transformMode === 'rotate'
+      ? {
+          x: pivot.x + tipRelative.x * cosine - tipRelative.y * sine,
+          y: pivot.y + tipRelative.x * sine + tipRelative.y * cosine
+        }
+      : {
+          x: tip.x + (pivot.y - tip.y) * (targetTangent - currentTangent),
+          y: tip.y
+        };
     return {
       ids,
       movedCoordinateCount: coordinates.size,
@@ -1688,6 +1891,8 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
       pivot,
       currentAngleDeg,
       targetAngleDeg: target,
+      transformMode,
+      transformedTip,
       revision: vector.revision,
       counts: { ...vector.handleCounts },
       vector
@@ -1949,6 +2154,7 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
     getVectorSource,
     materializeObjectVector,
     cloneVectorData,
+    migrateVectorData,
     invalidate,
     computePathBounds,
     adjustWeight,

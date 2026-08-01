@@ -96,6 +96,18 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
     return { labels, components };
   }
 
+  function meaningfulComponents(components) {
+    if (!components.length) return { largestArea: 0, components: [] };
+    const largestArea = Math.max(...components.map(component => component.area));
+    return {
+      largestArea,
+      components: components
+        .filter(component => component.area >= Math.max(24, largestArea * .012))
+        .sort((first, second) => second.area - first.area || first.label - second.label)
+        .slice(0, 12)
+    };
+  }
+
   function cleanInk(binary, width, height, selectedPixelCount, options = {}) {
     const { labels, components } = connectedComponents(binary, width, height);
     if (!components.length) return binary;
@@ -255,6 +267,38 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
     return contours;
   }
 
+  function contourComponentLabel(contour, labels, width, height) {
+    const counts = new Map();
+    for (let index = 0; index < contour.length; index++) {
+      const first = contour[index];
+      const second = contour[(index + 1) % contour.length];
+      const dx = second.x - first.x;
+      const dy = second.y - first.y;
+      const length = Math.hypot(dx, dy);
+      if (length < 1e-9) continue;
+      /* Boundary tracing keeps ink on the right side of every directed edge.
+         Sampling that side reads the connected-component label of the ink
+         that actually owns the contour, including counters and nested ink. */
+      const sampleX = (first.x + second.x) / 2 - dy / length * .25;
+      const sampleY = (first.y + second.y) / 2 + dx / length * .25;
+      const pixelX = Math.floor(sampleX);
+      const pixelY = Math.floor(sampleY);
+      if (pixelX < 0 || pixelX >= width || pixelY < 0 || pixelY >= height) continue;
+      const label = labels[pixelY * width + pixelX];
+      if (!label) continue;
+      counts.set(label, (counts.get(label) || 0) + 1);
+    }
+    let bestLabel = 0;
+    let bestCount = 0;
+    for (const [label, count] of counts) {
+      if (count > bestCount || (count === bestCount && label < bestLabel)) {
+        bestLabel = label;
+        bestCount = count;
+      }
+    }
+    return bestLabel;
+  }
+
   function polygonArea(points) {
     let area = 0;
     for (let index = 0; index < points.length; index++) {
@@ -274,7 +318,9 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
       const next = points[(index + 1) % points.length];
       const cross = (current.x - previous.x) * (next.y - current.y) -
         (current.y - previous.y) * (next.x - current.x);
-      if (Math.abs(cross) > 1e-9) result.push(current);
+      /* A structural landmark is an intentional editable station even when it
+         lies on a perfectly straight edge. Never simplify it away. */
+      if (Math.abs(cross) > 1e-9 || current.semanticLandmarkIds?.length) result.push(current);
     }
     return result.length >= 3 ? result : points.slice();
   }
@@ -344,13 +390,14 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
     return { left, top, right, bottom };
   }
 
-  function selectContoursWithinBudget(contours, maximumAnchors) {
+  function selectContoursWithinBudget(contours, maximumAnchors, componentIndices = []) {
     const entries = contours
       .map((source, index) => {
         const points = removeCollinear(source);
         const signedArea = polygonArea(points);
         return {
           index,
+          componentIndex: Number.isInteger(componentIndices[index]) ? componentIndices[index] : null,
           points,
           signedArea,
           area: Math.abs(signedArea),
@@ -391,9 +438,14 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
 
   function simplifyContours(contours, width, height, options = {}) {
     const maximumAnchors = Math.max(3, Math.round(+options.maximumAnchors || 420));
-    const selected = selectContoursWithinBudget(contours, maximumAnchors);
+    const selected = selectContoursWithinBudget(
+      contours,
+      maximumAnchors,
+      options.contourComponentIndices
+    );
     if (!selected.entries.length) return {
       contours: [],
+      componentIndices: [],
       tolerance: 0,
       droppedContourCount: selected.droppedContourCount
     };
@@ -437,6 +489,7 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
     }
     return {
       contours: simplified || [],
+      componentIndices: selected.entries.map(entry => entry.componentIndex),
       tolerance,
       anchorCount: total,
       droppedContourCount: selected.droppedContourCount
@@ -654,7 +707,13 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
         continue;
       }
       missingRows = 0;
-      samples.push({ x: candidate.center, y: y + .5, width: candidate.width });
+      samples.push({
+        x: candidate.center,
+        y: y + .5,
+        width: candidate.width,
+        left: candidate.left,
+        right: candidate.right
+      });
       previous = candidate;
     }
     if (samples.length < 4) return null;
@@ -669,9 +728,60 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
     return {
       ...axis,
       width: medianWidth,
+      samples,
       sampleCount: samples.length,
       confidence: clamp(.30 + continuity * .25 + straightness * .2 + elongation * .25, .35, .98)
     };
+  }
+
+  function stemStructuralLandmarks(stem, stemId) {
+    const samples = Array.isArray(stem?.samples) ? stem.samples : [];
+    if (samples.length < 4) return [];
+    const rootSample = samples[0];
+    const upperEnd = Math.max(1, Math.floor((samples.length - 1) * .46));
+    const neckSample = samples.slice(1, upperEnd + 1).reduce((best, sample) => (
+      sample.width < best.width ? sample : best
+    ), samples[Math.min(1, samples.length - 1)]);
+    const lowerStart = Math.min(samples.length - 2, Math.max(upperEnd + 1, Math.floor(samples.length * .58)));
+    const lowerEnd = Math.max(lowerStart, samples.length - 2);
+    let rounding = null;
+    for (let index = lowerStart; index <= lowerEnd; index++) {
+      const previous = samples[Math.max(0, index - 2)];
+      const current = samples[index];
+      const next = samples[Math.min(samples.length - 1, index + 2)];
+      const firstDy = Math.max(1, current.y - previous.y);
+      const secondDy = Math.max(1, next.y - current.y);
+      const curvature =
+        Math.abs((current.left - previous.left) / firstDy - (next.left - current.left) / secondDy) +
+        Math.abs((current.right - previous.right) / firstDy - (next.right - current.right) / secondDy);
+      if (!rounding || curvature > rounding.curvature) rounding = { sample: current, curvature };
+    }
+    const terminalSample = samples.at(-1);
+    const makePair = (stage, label, sample) => [
+      {
+        id: `${stemId}-${stage}-left`,
+        role: `${stage}-left`,
+        label: `${label} — צד שמאל`,
+        point: roundFeaturePoint({ x: sample.left, y: sample.y })
+      },
+      {
+        id: `${stemId}-${stage}-right`,
+        role: `${stage}-right`,
+        label: `${label} — צד ימין`,
+        point: roundFeaturePoint({ x: sample.right, y: sample.y })
+      }
+    ];
+    const landmarks = [
+      ...makePair('root', 'חיבור הירך לגג', rootSample)
+    ];
+    if (rootSample.width - neckSample.width >= Math.max(1, rootSample.width * .08)) {
+      landmarks.push(...makePair('neck', 'הצטמצמות הירך', neckSample));
+    }
+    if (rounding?.curvature >= .18) {
+      landmarks.push(...makePair('rounding', 'נקודת ההתעגלות', rounding.sample));
+    }
+    landmarks.push(...makePair('terminal', 'סיום הירך', terminalSample));
+    return landmarks;
   }
 
   function detectComponentFeatures(labels, width, component, componentIndex, largestArea) {
@@ -769,6 +879,8 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
       const tip = roundFeaturePoint(stem.tip);
       const confidence = Math.min(roofConfidence, stem.confidence);
       const stemId = `${prefix}-stem-${stemIndex}`;
+      const organId = `${stemId}-organ`;
+      const landmarks = stemStructuralLandmarks(stem, stemId);
       features.push({
         id: stemId,
         type: 'stem-axis',
@@ -779,7 +891,9 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
         angleDeg: Math.round(Math.atan2(tip.x - root.x, tip.y - root.y) * 180000 / Math.PI) / 1000,
         confidence,
         componentIndex,
-        widthPx: Math.round(stem.width * 1000) / 1000
+        widthPx: Math.round(stem.width * 1000) / 1000,
+        organId,
+        landmarkIds: landmarks.map(landmark => landmark.id)
       });
       features.push({
         id: `${prefix}-junction-${stemIndex}`,
@@ -790,33 +904,71 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
         tip,
         confidence,
         componentIndex,
-        stemId
+        stemId,
+        organId,
+        landmarkIds: landmarks.filter(landmark => landmark.role.startsWith('root-')).map(landmark => landmark.id)
       });
+      features.push({
+        id: organId,
+        type: 'stem-organ',
+        label: 'ירך שלמה',
+        point: roundFeaturePoint({
+          x: (root.x + tip.x) / 2,
+          y: (root.y + tip.y) / 2
+        }),
+        root,
+        tip,
+        confidence,
+        componentIndex,
+        stemId,
+        organId,
+        widthPx: Math.round(stem.width * 1000) / 1000,
+        landmarkIds: landmarks.map(landmark => landmark.id)
+      });
+      for (const landmark of landmarks) {
+        features.push({
+          ...landmark,
+          type: 'stem-landmark',
+          confidence,
+          componentIndex,
+          stemId,
+          organId,
+          landmarkIds: [landmark.id],
+          editable: true
+        });
+      }
       stemIndex++;
     }
     return features;
   }
 
-  function detectPhotographedFeatures(binary, width, height) {
-    const { labels, components } = connectedComponents(binary, width, height);
+  function detectPhotographedFeatures(binary, width, height, componentAnalysis = null) {
+    const { labels, components } = componentAnalysis || connectedComponents(binary, width, height);
     if (!components.length) return [];
-    const largestArea = Math.max(...components.map(component => component.area));
-    const meaningful = components
-      .filter(component => component.area >= Math.max(24, largestArea * .012))
-      .sort((first, second) => second.area - first.area || first.label - second.label)
-      .slice(0, 12);
+    const analysis = meaningfulComponents(components);
+    const largestArea = analysis.largestArea;
+    const meaningful = analysis.components;
     const features = [];
     let fallbackBudget = 40;
     for (let index = 0; index < meaningful.length; index++) {
-      const detected = detectComponentFeatures(labels, width, meaningful[index], index, largestArea);
+      const component = meaningful[index];
+      const componentBounds = {
+        left: component.left,
+        top: component.top,
+        right: component.right + 1,
+        bottom: component.bottom + 1
+      };
+      const detected = detectComponentFeatures(labels, width, component, index, largestArea)
+        .map(feature => ({ ...feature, componentBounds: { ...componentBounds } }));
       if (detected.length) features.push(...detected);
       const hasEditableStructure = detected.some(feature =>
         feature.type === 'stem-axis' || feature.type === 'roof-stem-junction'
       );
       if (hasEditableStructure) continue;
       if (fallbackBudget <= 0) continue;
-      const fallback = fallbackComponentFeatures(labels, width, meaningful[index], index)
-        .slice(0, fallbackBudget);
+      const fallback = fallbackComponentFeatures(labels, width, component, index)
+        .slice(0, fallbackBudget)
+        .map(feature => ({ ...feature, componentBounds: { ...componentBounds } }));
       features.push(...fallback);
       fallbackBudget -= fallback.length;
     }
@@ -825,6 +977,189 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
 
   function pointDistance(first, second) {
     return Math.hypot(second.x - first.x, second.y - first.y);
+  }
+
+  function projectPointToSegment(point, first, second) {
+    const dx = second.x - first.x;
+    const dy = second.y - first.y;
+    const lengthSquared = dx * dx + dy * dy;
+    const t = lengthSquared > 1e-9
+      ? clamp(((point.x - first.x) * dx + (point.y - first.y) * dy) / lengthSquared, 0, 1)
+      : 0;
+    const projection = { x: first.x + dx * t, y: first.y + dy * t };
+    return { point: projection, distance: pointDistance(point, projection), t };
+  }
+
+  function injectSemanticLandmarkAnchors(contours, features, options = {}) {
+    const output = contours.map(contour => contour.map(point => ({ ...point })));
+    /*
+     * Only contour-located features may become editable topology stations.
+     * Axes deliberately stay references because their centre points are not on
+     * the outline. Roof endpoints and fallback extrema are projected as well so
+     * an empty anchorIds array never has to masquerade as a valid binding.
+     */
+    const landmarks = features.filter(feature => (
+      ['stem-landmark', 'roof-endpoint', 'contour-extremum'].includes(feature.type)
+      && feature.point
+    ));
+    const maximumDistance = Math.max(4, (+options.tolerance || 0) * 3.2);
+    const contourMetadata = output.map((contour, contourIndex) => ({
+      contourIndex,
+      componentIndex: Number.isInteger(options.contourComponentIndices?.[contourIndex])
+        ? options.contourComponentIndices[contourIndex]
+        : null,
+      bounds: contourBounds(contour),
+      area: Math.abs(polygonArea(contour))
+    }));
+    for (const landmark of landmarks) {
+      let best = null;
+      let eligibleContours = contourMetadata;
+      if (Number.isInteger(landmark.componentIndex)) {
+        const matching = contourMetadata.filter(entry => (
+          entry.componentIndex === landmark.componentIndex
+        ));
+        /* Structural stations are allowed to bind only to contours traced from
+           their exact connected component. Among that component's exterior and
+           counters, the largest contour remains the structural owner. */
+        eligibleContours = matching.length
+          ? [matching.sort((a, b) => b.area - a.area)[0]]
+          : [];
+      }
+      for (const { contourIndex } of eligibleContours) {
+        const contour = output[contourIndex];
+        for (let index = 0; index < contour.length; index++) {
+          const nextIndex = (index + 1) % contour.length;
+          const projected = projectPointToSegment(landmark.point, contour[index], contour[nextIndex]);
+          if (!best || projected.distance < best.distance) {
+            best = { ...projected, contourIndex, index, nextIndex };
+          }
+        }
+      }
+      if (!best || best.distance > maximumDistance) continue;
+      const contour = output[best.contourIndex];
+      const first = contour[best.index];
+      const second = contour[best.nextIndex];
+      const firstDistance = pointDistance(landmark.point, first);
+      const secondDistance = pointDistance(landmark.point, second);
+      let target;
+      if (firstDistance <= .75 || best.t <= .001) target = first;
+      else if (secondDistance <= .75 || best.t >= .999) target = second;
+      else {
+        target = { ...best.point };
+        contour.splice(best.index + 1, 0, target);
+      }
+      target.semanticLandmarkIds = [...new Set([
+        ...(target.semanticLandmarkIds || []),
+        landmark.id
+      ])];
+    }
+    return output;
+  }
+
+  function forwardCyclicIndices(length, start, end) {
+    const result = [];
+    if (length <= 0) return result;
+    let index = start;
+    for (let guard = 0; guard <= length; guard++) {
+      result.push(index);
+      if (index === end) break;
+      index = (index + 1) % length;
+    }
+    return result;
+  }
+
+  function pointLandmarkIds(point) {
+    return new Set(point?.semanticLandmarkIds || []);
+  }
+
+  function locateLandmark(contours, landmarkId) {
+    for (let contourIndex = 0; contourIndex < contours.length; contourIndex++) {
+      for (let pointIndex = 0; pointIndex < contours[contourIndex].length; pointIndex++) {
+        if (pointLandmarkIds(contours[contourIndex][pointIndex]).has(landmarkId)) {
+          return { contourIndex, pointIndex };
+        }
+      }
+    }
+    return null;
+  }
+
+  function organContourOwnership(contours, features) {
+    const definitions = [];
+    const ownedPoints = new Set();
+    const organFeatures = features.filter(feature => feature.type === 'stem-organ');
+    for (const organFeature of organFeatures) {
+      const organId = organFeature.organId || organFeature.id;
+      const landmarks = features.filter(feature => (
+        feature.type === 'stem-landmark' && feature.organId === organId
+      ));
+      const roots = landmarks.filter(feature => feature.role?.startsWith('root-'));
+      const terminals = landmarks.filter(feature => feature.role?.startsWith('terminal-'));
+      const rootLocations = roots.map(feature => ({ feature, location: locateLandmark(contours, feature.id) }));
+      const terminalLocations = terminals.map(feature => ({ feature, location: locateLandmark(contours, feature.id) }));
+      const contourIndex = rootLocations[0]?.location?.contourIndex;
+      const validRoots = rootLocations.length === 2
+        && rootLocations.every(entry => entry.location && entry.location.contourIndex === contourIndex);
+      const validTerminals = terminalLocations.length >= 1
+        && terminalLocations.every(entry => entry.location && entry.location.contourIndex === contourIndex);
+      if (!validRoots || !validTerminals) {
+        definitions.push({ organFeature, organId, topologyStatus: 'unbound-reference' });
+        continue;
+      }
+      const contour = contours[contourIndex];
+      const firstRoot = rootLocations[0].location.pointIndex;
+      const secondRoot = rootLocations[1].location.pointIndex;
+      const forward = forwardCyclicIndices(contour.length, firstRoot, secondRoot);
+      const reverse = forwardCyclicIndices(contour.length, secondRoot, firstRoot).reverse();
+      const scoreArc = indices => {
+        const indexSet = new Set(indices);
+        const terminalScore = terminalLocations.reduce((score, entry) => (
+          score + (indexSet.has(entry.location.pointIndex) ? 100 : 0)
+        ), 0);
+        const landmarkScore = landmarks.reduce((score, landmark) => {
+          const location = locateLandmark(contours, landmark.id);
+          return score + (location?.contourIndex === contourIndex && indexSet.has(location.pointIndex) ? 1 : 0);
+        }, 0);
+        return terminalScore + landmarkScore - indices.length * .0001;
+      };
+      const sourcePointIndices = scoreArc(forward) >= scoreArc(reverse) ? forward : reverse;
+      const terminalIndexSet = new Set(terminalLocations.map(entry => entry.location.pointIndex));
+      const arcIndexSet = new Set(sourcePointIndices);
+      const hasTerminals = [...terminalIndexSet].every(index => arcIndexSet.has(index));
+      const ownershipKeys = sourcePointIndices.map(index => `${contourIndex}:${index}`);
+      const overlapsExisting = ownershipKeys.some(key => ownedPoints.has(key));
+      if (!hasTerminals || sourcePointIndices.length < 3 || overlapsExisting) {
+        definitions.push({ organFeature, organId, topologyStatus: 'ambiguous-ownership' });
+        continue;
+      }
+      ownershipKeys.forEach(key => ownedPoints.add(key));
+      definitions.push({
+        organFeature,
+        organId,
+        contourIndex,
+        sourcePointIndices,
+        rootLandmarkIds: roots.map(feature => feature.id),
+        topologyStatus: 'exclusive-contour-arc'
+      });
+    }
+    return definitions;
+  }
+
+  function decomposeContours(contours, definitions) {
+    const removedInterior = contours.map(() => new Set());
+    for (const definition of definitions) {
+      if (definition.topologyStatus !== 'exclusive-contour-arc') continue;
+      const interior = definition.sourcePointIndices.slice(1, -1);
+      for (const pointIndex of interior) removedInterior[definition.contourIndex].add(pointIndex);
+      definition.contour = definition.sourcePointIndices.map(pointIndex => ({
+        ...contours[definition.contourIndex][pointIndex],
+        semanticLandmarkIds: contours[definition.contourIndex][pointIndex].semanticLandmarkIds?.slice()
+      }));
+    }
+    const baseContours = contours.map((contour, contourIndex) => contour
+      .filter((point, pointIndex) => !removedInterior[contourIndex].has(pointIndex))
+      .map(point => ({ ...point, semanticLandmarkIds: point.semanticLandmarkIds?.slice() })))
+      .filter(contour => contour.length >= 3);
+    return { baseContours, definitions };
   }
 
   function contourCornerFlags(points, options = {}) {
@@ -918,14 +1253,18 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
     );
     const points = prepared.points;
     const cornerFlags = prepared.cornerFlags;
-    const commands = [{ type: 'M', x: points[0].x, y: points[0].y }];
+    const commands = [{
+      type: 'M', x: points[0].x, y: points[0].y,
+      semanticLandmarkIds: points[0].semanticLandmarkIds?.slice()
+    }];
     for (let index = 0; index < points.length - 1; index++) {
       const controls = cubicSegmentControls(points, cornerFlags, index);
       commands.push({
         type: 'C',
         ...controls,
         x: points[index + 1].x,
-        y: points[index + 1].y
+        y: points[index + 1].y,
+        semanticLandmarkIds: points[index + 1].semanticLandmarkIds?.slice()
       });
     }
     /* Z owns the shortest or a corner-to-corner closing edge. This avoids a
@@ -935,15 +1274,116 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
     return commands;
   }
 
-  function buildVector(contours, width, height, metadata = {}, features = [], options = {}) {
+  function commandBundle(contours, options = {}, idPrefix = '') {
     const commands = [];
-    for (const contour of contours) {
-      commands.push(...contourToSmoothCommands(contour, options));
-    }
-    const anchors = commands.filter(command => ['M', 'L', 'C'].includes(command.type)).length;
-    const controls = commands.filter(command => command.type === 'C').length * 2;
+    for (const contour of contours) commands.push(...contourToSmoothCommands(contour, options));
+    const anchorIdsByLandmark = new Map();
+    const commandAnchors = [];
+    commands.forEach((command, commandIndex) => {
+      if (!['M', 'L', 'C'].includes(command.type)) return;
+      const anchorId = `${idPrefix}p0:c${commandIndex}:anchor`;
+      commandAnchors.push({ id: anchorId, point: { x: command.x, y: command.y } });
+      for (const landmarkId of command.semanticLandmarkIds || []) {
+        if (!anchorIdsByLandmark.has(landmarkId)) anchorIdsByLandmark.set(landmarkId, []);
+        anchorIdsByLandmark.get(landmarkId).push(anchorId);
+      }
+      delete command.semanticLandmarkIds;
+    });
     return {
-      schemaVersion: 2,
+      paths: commands.length ? [{ rule: 'evenodd', commands }] : [],
+      commandAnchors,
+      anchorIdsByLandmark
+    };
+  }
+
+  function buildVector(contours, width, height, metadata = {}, features = [], options = {}) {
+    const ownership = organContourOwnership(contours, features);
+    const decomposition = decomposeContours(contours, ownership);
+    const sourceBundle = commandBundle(contours, options);
+    const baseBundle = commandBundle(decomposition.baseContours, options);
+    const organById = new Map();
+    const organs = [];
+    for (const definition of decomposition.definitions) {
+      if (definition.topologyStatus !== 'exclusive-contour-arc' || !definition.contour) continue;
+      const bundle = commandBundle([definition.contour], options, `o:${definition.organId}:`);
+      const anchorIds = bundle.commandAnchors.map(anchor => anchor.id);
+      const boundaryPorts = definition.rootLandmarkIds.map((landmarkId, index) => {
+        const organAnchorId = bundle.anchorIdsByLandmark.get(landmarkId)?.[0] || null;
+        const sourceAnchorId = baseBundle.anchorIdsByLandmark.get(landmarkId)?.[0] || null;
+        const sourceAnchor = baseBundle.commandAnchors.find(anchor => anchor.id === sourceAnchorId);
+        return {
+          id: `${definition.organId}-port-${index}`,
+          role: features.find(feature => feature.id === landmarkId)?.role || `root-${index}`,
+          landmarkFeatureId: landmarkId,
+          sourceAnchorId,
+          organAnchorId,
+          sourcePoint: sourceAnchor ? { ...sourceAnchor.point } : null
+        };
+      }).filter(port => port.sourceAnchorId && port.organAnchorId && port.sourcePoint);
+      if (boundaryPorts.length !== 2 || anchorIds.length < 3) continue;
+      const organ = {
+        id: definition.organId,
+        type: 'stem',
+        label: definition.organFeature.label,
+        stemId: definition.organFeature.stemId,
+        paths: bundle.paths.map(path => ({ ...path, rule: 'nonzero' })),
+        anchorIds,
+        landmarkFeatureIds: definition.organFeature.landmarkIds?.slice() || [],
+        boundaryPorts,
+        junction: {
+          id: `${definition.organId}-junction`,
+          type: 'paired-boundary-port',
+          sourcePortIds: boundaryPorts.map(port => port.sourceAnchorId),
+          organPortIds: boundaryPorts.map(port => port.organAnchorId)
+        },
+        ownership: {
+          componentIndex: definition.organFeature.componentIndex,
+          contourIndex: definition.contourIndex,
+          sourcePointIndices: definition.sourcePointIndices.slice(),
+          exclusive: true
+        },
+        transformMode: 'rigid-subpath',
+        topologyStatus: 'exclusive-contour-arc'
+      };
+      organById.set(organ.id, { organ, bundle });
+      organs.push(organ);
+    }
+    const boundFeatures = features.map(feature => {
+      const organEntry = feature.organId ? organById.get(feature.organId) : null;
+      let anchorIds = [];
+      if (feature.type === 'stem-landmark' && organEntry) {
+        anchorIds = organEntry.bundle.anchorIdsByLandmark.get(feature.id) || [];
+      } else if (['stem-axis', 'stem-organ'].includes(feature.type) && organEntry) {
+        anchorIds = organEntry.organ.anchorIds;
+      } else if (feature.type === 'roof-stem-junction' && organEntry) {
+        anchorIds = organEntry.organ.boundaryPorts.map(port => port.organAnchorId);
+      } else {
+        anchorIds = [...new Set((feature.landmarkIds || [feature.id])
+          .flatMap(landmarkId => baseBundle.anchorIdsByLandmark.get(landmarkId) || []))];
+      }
+      const bound = anchorIds.length > 0;
+      const copy = {
+        ...feature,
+        topologyStatus: bound
+          ? organEntry ? 'bound-organ-subpath' : 'bound-contour'
+          : 'unbound-reference',
+        point: feature.point ? { ...feature.point } : undefined,
+        root: feature.root ? { ...feature.root } : undefined,
+        tip: feature.tip ? { ...feature.tip } : undefined
+      };
+      if (bound) copy.anchorIds = [...new Set(anchorIds)];
+      else if (!['stem-axis', 'stem-organ'].includes(feature.type)) copy.editable = false;
+      return copy;
+    });
+    const editablePaths = [...baseBundle.paths, ...organs.flatMap(organ => organ.paths)];
+    const anchors = editablePaths.reduce((sum, path) => sum + path.commands.filter(command => (
+      ['M', 'L', 'C'].includes(command.type)
+    )).length, 0);
+    const controls = editablePaths.reduce((sum, path) => sum + path.commands.filter(command => (
+      command.type === 'C'
+    )).length * 2, 0);
+    return {
+      schemaVersion: 3,
       sourceKey: 'photographed-selection',
       letter: '',
       tradition: 'custom',
@@ -952,24 +1392,31 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
       viewBox: [0, 0, width, height],
       weight: 1,
       revision: 1,
-      paths: [{ rule: 'evenodd', commands }],
+      paths: sourceBundle.paths,
+      composition: {
+        schemaVersion: 3,
+        mode: 'organ-subpaths-v1',
+        basePaths: baseBundle.paths,
+        connectorMode: 'paired-boundary-port-bridge'
+      },
+      organs,
       handleCounts: { anchors, controls, total: anchors + controls },
       featureCoordinateSpace: 'vector-local',
       featureAngleConvention: 'signed-clockwise-from-vertical',
-      features: features.map(feature => ({
-        ...feature,
-        point: feature.point ? { ...feature.point } : undefined,
-        root: feature.root ? { ...feature.root } : undefined,
-        tip: feature.tip ? { ...feature.tip } : undefined
-      })),
+      features: boundFeatures,
       trace: {
         ...metadata,
         contourCount: contours.length,
         anchorCount: anchors,
+        sourceAnchorCount: sourceBundle.commandAnchors.length,
         controlCount: controls,
         cubicCount: controls / 2,
         featureCount: features.length,
-        stemCount: features.filter(feature => feature.type === 'stem-axis').length
+        stemCount: features.filter(feature => feature.type === 'stem-axis').length,
+        boundLandmarkCount: boundFeatures.filter(feature => (
+          feature.type === 'stem-landmark' && feature.anchorIds?.length
+        )).length,
+        organCount: organs.length
       }
     };
   }
@@ -1003,25 +1450,51 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
     binary = cleanInk(binary, width, height, selectedPixelCount, options);
     const inkPixelCount = binary.reduce((sum, value) => sum + value, 0);
     if (inkPixelCount < 8) throw new Error('No stable ink was found inside the selection.');
+    const componentAnalysis = connectedComponents(binary, width, height);
+    const meaningful = meaningfulComponents(componentAnalysis.components).components;
+    const componentIndexByLabel = new Map(
+      meaningful.map((component, componentIndex) => [component.label, componentIndex])
+    );
     const rawContours = traceContours(binary, width, height);
-    const simplified = simplifyContours(rawContours, width, height, options);
+    const rawContourComponentIndices = rawContours.map(contour => {
+      const label = contourComponentLabel(
+        contour,
+        componentAnalysis.labels,
+        width,
+        height
+      );
+      return componentIndexByLabel.get(label) ?? null;
+    });
+    const features = detectPhotographedFeatures(binary, width, height, componentAnalysis);
+    const requestedMaximumAnchors = Math.max(3, Math.round(+options.maximumAnchors || 420));
+    const landmarkReserve = features.filter(feature => (
+      ['stem-landmark', 'roof-endpoint', 'contour-extremum'].includes(feature.type)
+    )).length;
+    const simplified = simplifyContours(rawContours, width, height, {
+      ...options,
+      contourComponentIndices: rawContourComponentIndices,
+      maximumAnchors: Math.max(3, requestedMaximumAnchors - landmarkReserve)
+    });
     if (!simplified.contours.length) throw new Error('The photographed letter did not produce a closed vector contour.');
-    const features = detectPhotographedFeatures(binary, width, height);
-    const vector = buildVector(simplified.contours, width, height, {
+    const semanticContours = injectSemanticLandmarkAnchors(simplified.contours, features, {
+      tolerance: simplified.tolerance,
+      contourComponentIndices: simplified.componentIndices
+    });
+    const vector = buildVector(semanticContours, width, height, {
       threshold,
       selectedPixelCount,
       inkPixelCount,
       tolerance: simplified.tolerance,
       selectionVertexCount: polygon.length,
       droppedContourCount: simplified.droppedContourCount,
-      semanticMethod: 'component-projection-v1'
+      semanticMethod: 'contour-topology-v3'
     }, features, options);
     return {
       threshold,
       selectedPixelCount,
       inkPixelCount,
-      contours: simplified.contours,
-      features,
+      contours: semanticContours,
+      features: vector.features,
       tolerance: simplified.tolerance,
       selectionVertexCount: polygon.length,
       droppedContourCount: simplified.droppedContourCount,

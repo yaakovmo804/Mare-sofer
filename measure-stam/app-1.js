@@ -172,10 +172,12 @@ function isEditableTarget(target) {
   return target instanceof Element && !!target.closest('input, textarea, select, [contenteditable="true"]');
 }
 
-/* Apple Pencil is reserved for precision surfaces. iPadOS may follow a pen
- * pointerdown with a compatibility click or Scribble focus, so suppress the
- * complete activation sequence while leaving touch, mouse and keyboard alone. */
-const penInterfaceBlock = { until: 0, focusUntil: 0, nodes: new Set() };
+/* Menus are deliberately pointer-agnostic: buttons, tabs, selects, sliders,
+ * checkboxes, colours and file pickers all accept Pencil, finger and mouse.
+ * Only controls that actually accept free text are protected from Pencil
+ * focus, because iPadOS otherwise treats the stroke as Scribble and opens a
+ * keyboard. Finger/mouse/keyboard focus remains untouched. */
+const penTextEntryBlock = { until: 0, nodes: new Set() };
 
 function eventPath(event) {
   return typeof event.composedPath === 'function'
@@ -183,64 +185,76 @@ function eventPath(event) {
     : event.target instanceof Element ? [event.target] : [];
 }
 
-function precisionSurfaceInPath(event) {
-  return eventPath(event).some(node => node.matches?.('[data-precision-surface]'));
+function textEntryControl(target) {
+  if (!(target instanceof Element)) return null;
+  const direct = target.closest('textarea, [contenteditable="true"], input');
+  const control = direct || target.closest('label')?.control || target.control || null;
+  if (!(control instanceof Element)) return null;
+  if (control.matches('textarea, [contenteditable="true"]')) return control;
+  if (!control.matches('input')) return null;
+  const type = (control.getAttribute('type') || 'text').toLowerCase();
+  return ['text', 'number', 'search', 'email', 'url', 'tel', 'password'].includes(type)
+    ? control
+    : null;
 }
 
-function rememberBlockedPenActivation(event) {
+function rememberBlockedPenTextEntry(event, control) {
   const nodes = new Set(eventPath(event));
+  nodes.add(control);
   for (const node of [...nodes]) {
     const label = node.closest?.('label');
     if (label) nodes.add(label);
     if (label?.control) nodes.add(label.control);
     if (node.control) nodes.add(node.control);
   }
-  penInterfaceBlock.nodes = nodes;
-  penInterfaceBlock.until = performance.now() + 900;
-  penInterfaceBlock.focusUntil = performance.now() + 300;
+  penTextEntryBlock.nodes = nodes;
+  penTextEntryBlock.until = performance.now() + 900;
 }
 
-function matchesBlockedPenActivation(event) {
-  if (performance.now() > penInterfaceBlock.until) return false;
-  return eventPath(event).some(node => penInterfaceBlock.nodes.has(node));
+function matchesBlockedPenTextEntry(event) {
+  if (performance.now() > penTextEntryBlock.until) return false;
+  return eventPath(event).some(node => penTextEntryBlock.nodes.has(node));
 }
 
-function clearBlockedPenActivation() {
-  penInterfaceBlock.until = 0;
-  penInterfaceBlock.focusUntil = 0;
-  penInterfaceBlock.nodes.clear();
+function clearBlockedPenTextEntry() {
+  penTextEntryBlock.until = 0;
+  penTextEntryBlock.nodes.clear();
 }
 
-document.addEventListener('pointerdown', event => {
+function handleDocumentPointerDown(event) {
   if (event.pointerType === 'touch' || event.pointerType === 'mouse') {
-    clearBlockedPenActivation();
+    clearBlockedPenTextEntry();
     return;
   }
-  if (event.pointerType !== 'pen' || precisionSurfaceInPath(event)) return;
-  rememberBlockedPenActivation(event);
+  if (event.pointerType !== 'pen') return;
+  const control = textEntryControl(event.target);
+  if (!control) return;
+  rememberBlockedPenTextEntry(event, control);
   event.preventDefault();
   event.stopImmediatePropagation();
-  const focused = document.activeElement;
-  if (focused instanceof HTMLElement && isEditableTarget(focused)) focused.blur();
-  statusText.textContent = 'Apple Pencil מיועד למשטח העבודה; הפעלת התפריטים והשדות נעשית באצבע';
-}, { capture: true, passive: false });
-
-for (const eventName of ['pointerup', 'focusin']) {
-  document.addEventListener(eventName, event => {
-    if (event.pointerType !== 'pen' && !matchesBlockedPenActivation(event)) return;
-    if (eventName === 'focusin' && performance.now() > penInterfaceBlock.focusUntil) return;
-    if (precisionSurfaceInPath(event)) return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    if (eventName === 'focusin' && event.target instanceof HTMLElement) event.target.blur();
-  }, { capture: true, passive: false });
+  const activeTextEntry = textEntryControl(document.activeElement);
+  if (activeTextEntry instanceof HTMLElement) activeTextEntry.blur();
+  if (control instanceof HTMLElement) control.blur();
+  statusText.textContent = 'העט לא פותח שדה כתיבה כדי למנוע Scribble; כפתורים, תפריטים וסרגלים כן פועלים בעט ובאצבע';
 }
+document.addEventListener('pointerdown', handleDocumentPointerDown, { capture: true, passive: false });
 
-document.addEventListener('click', event => {
-  if (event.detail === 0 || !matchesBlockedPenActivation(event)) return;
+function handleBlockedPenFocus(event) {
+  if (!matchesBlockedPenTextEntry(event) || !textEntryControl(event.target)) return;
   event.preventDefault();
   event.stopImmediatePropagation();
-}, { capture: true, passive: false });
+  if (event.target instanceof HTMLElement) event.target.blur();
+}
+document.addEventListener('focusin', handleBlockedPenFocus, { capture: true, passive: false });
+
+function handleBlockedPenClick(event) {
+  if (event.detail === 0 || !matchesBlockedPenTextEntry(event) || !textEntryControl(event.target)) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}
+document.addEventListener('click', handleBlockedPenClick, { capture: true, passive: false });
+
+document.addEventListener('keydown', clearBlockedPenTextEntry, { capture: true });
 
 for (const eventName of ['contextmenu', 'selectstart', 'dragstart']) {
   document.addEventListener(eventName, event => {

@@ -1046,6 +1046,7 @@ function pointerDown(event) {
           handleId: reference.id,
           featureId: reference.featureId || null,
           semanticType: reference.semanticType || null,
+          organId: reference.organId || null,
           rootImage: reference.rootImage || null,
           tipImage: reference.tipImage || null
         };
@@ -1080,10 +1081,13 @@ function pointerDown(event) {
           handleId: hit.letterVectorHandle.id,
           featureId: hit.letterVectorHandle.featureId || null,
           semanticType: hit.letterVectorHandle.semanticType || null,
+          organId: hit.letterVectorHandle.organId || null,
           rootImage: hit.letterVectorHandle.rootImage || null,
           tipImage: hit.letterVectorHandle.tipImage || null
         };
-        statusText.textContent = `גרור להזזת ${groupedIds.length} נקודות העוגן יחד`;
+        statusText.textContent = hit.letterVectorHandle.organId
+          ? `גרור להזזת תת־הווקטור של הירך; ${groupedIds.length} עוגנים נעים יחד ומסלול הבסיס נשאר קבוע`
+          : `גרור להזזת ${groupedIds.length} נקודות העוגן יחד`;
       } else {
         if (hit.letterVectorHandle.kind === 'anchor') {
           hit.object.correctionHandleIds = [hit.letterVectorHandle.id];
@@ -1095,6 +1099,7 @@ function pointerDown(event) {
           handleId: hit.letterVectorHandle.id,
           featureId: hit.letterVectorHandle.featureId || null,
           semanticType: hit.letterVectorHandle.semanticType || null,
+          organId: hit.letterVectorHandle.organId || null,
           rootImage: hit.letterVectorHandle.rootImage || null,
           tipImage: hit.letterVectorHandle.tipImage || null
         };
