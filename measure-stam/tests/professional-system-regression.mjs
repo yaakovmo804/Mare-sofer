@@ -350,11 +350,11 @@ test('the integrated shell exposes composition, vector levels, info and active g
     for (const tool of ['rowAlign', 'circle', 'ellipse']) {
       assert.match(html, new RegExp(`data-tool="${tool}"`));
     }
-    assert.match(html, /master-system\.js\?v=20260801d/);
-    assert.match(html, /professional-tools\.js\?v=20260801d/);
-    assert.match(html, /slant-analyzer\.js\?v=20260801d/);
+    assert.match(html, /master-system\.js\?v=20260801e/);
+    assert.match(html, /professional-tools\.js\?v=20260801e/);
+    assert.match(html, /slant-analyzer\.js\?v=20260801e/);
     assert.ok(
-      html.indexOf('slant-analyzer.js?v=20260801d') < html.indexOf('professional-tools.js?v=20260801d'),
+      html.indexOf('slant-analyzer.js?v=20260801e') < html.indexOf('professional-tools.js?v=20260801e'),
       'the analyzer must load before the professional integration'
     );
     assert.match(html, /id="compositionCanvas"[^>]*tabindex="0"/);
@@ -727,6 +727,9 @@ test('touch targets and professional cards disclose their actual interaction mod
   assert.match(styles, /metric-info[^}]*min-width:44px[^}]*min-height:44px/);
   assert.match(styles, /button,[^}]*min-block-size:44px/);
   assert.match(styles, /technical-details summary[^}]*min-block-size:44px/);
+  assert.match(styles, /master-metric-grid\{[^}]*minmax\(220px,1fr\)/);
+  assert.match(styles, /professional-reference-info\{[^}]*minmax\(132px,1fr\)/);
+  assert.match(styles, /standalone-hint button\{[^}]*min-inline-size:44px/);
   assert.match(system.metric('slants-parallels').measurementDescription, /תחום סריקה/);
   for (const id of ['roofs', 'seats', 'stems']) {
     assert.equal(system.metric(id).operationMode, 'label-only');
