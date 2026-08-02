@@ -14,8 +14,11 @@ function commitDraft(message) {
   state.selectedPoint = null;
   state.selectedSegment = null;
   state.letterVectorSelection = null;
-  if (state.professionalSuite?.pendingMeasurement?.semanticMetricId === object.semanticMetricId) {
+  const completedProfessionalMeasurement = !!object.semanticMetricId &&
+    state.professionalSuite?.pendingMeasurement?.semanticMetricId === object.semanticMetricId;
+  if (completedProfessionalMeasurement) {
     state.professionalSuite.pendingMeasurement = null;
+    setTool('pan');
   }
   syncFormulaFromObject(object);
   if (object.type === 'gap' && object.formulaKey === 'between-lines') {
@@ -343,7 +346,7 @@ function pointerMove(event) {
     if (state.draft.type === 'area') moveAreaAnchor(state.draft, drag.handle, imagePoint);
     else if (['ellipse', 'circle', 'slantScan'].includes(state.draft.type)) {
       state.draft.points = resizedAxisAlignedRect(state.draft.points, drag.handle, imagePoint, state.draft.type === 'circle');
-    } else state.draft.points[drag.handle] = imagePoint;
+    } else state.draft.points[drag.handle] = constrainMeasurementPoint(state.draft, drag.handle, imagePoint);
     state.selectedPoint = { target: 'draft', index: drag.handle };
   } else if (drag.type === 'draftCurveHandle' && state.draft?.type === 'area') {
     if (!dragPassedThreshold(drag, screenPoint)) return;
@@ -363,7 +366,7 @@ function pointerMove(event) {
       if (object.type === 'area') moveAreaAnchor(object, drag.handle, imagePoint);
       else if (['ellipse', 'circle', 'slantScan'].includes(object.type)) {
         object.points = resizedAxisAlignedRect(drag.original || object.points, drag.handle, imagePoint, object.type === 'circle');
-      } else object.points[drag.handle] = imagePoint;
+      } else object.points[drag.handle] = constrainMeasurementPoint(object, drag.handle, imagePoint);
       object.auto = false;
       if (object.type === 'gap') {
         captureGapNormalization(object, state.formula.nibPx, 'manual-endpoint-correction');
@@ -774,15 +777,19 @@ function settleDraftBeforeToolChange(nextTool) {
 
 function setTool(tool) {
   const draftOutcome = settleDraftBeforeToolChange(tool);
+  const armedMeasurement = state.professionalSuite?.pendingMeasurement;
+  const armedTool = armedMeasurement?.tool ||
+    MASTER_SYSTEM.metric(armedMeasurement?.semanticMetricId)?.tool || null;
+  if (armedMeasurement && armedTool !== tool) {
+    state.professionalSuite.pendingMeasurement = null;
+  }
   if (tool !== 'vectorize') state.vectorizeLasso = null;
   if (tool !== 'pan') {
     state.letterVectorLasso = null;
     $('letterAnchorLassoBtn')?.classList.remove('active');
   }
   state.tool = tool;
-  document.querySelectorAll('.tool[data-tool]').forEach(button => button.classList.toggle('active', button.dataset.tool === tool));
-  $('gapsPanelBtn')?.classList.toggle('active', tool === 'gap');
-  $('autoNibToolBtn')?.classList.remove('active');
+  syncToolControlState(tool);
   const pendingMetricId = state.professionalSuite?.pendingMeasurement?.semanticMetricId;
   if (pendingMetricId) ui.color.value = MASTER_SYSTEM.colorFor({ semanticMetricId: pendingMetricId });
   else if (TOOL_COLORS[tool]) ui.color.value = TOOL_COLORS[tool];
@@ -797,10 +804,20 @@ function setTool(tool) {
     kastel: 'קעסטעל: גרור מסגרת סביב האות',
     rowAlign: 'יישור השורה: גרור מסגרת סביב השורה ובדוק תחתיות של מושבים יציבים',
     slantScan: 'נטיות ומקבילות: גרור מסגרת סביב שורה או אזור הכולל את הירכות',
+    thirds: 'חוק השלישים: גע בנקודה בתוך הקעסטעל למדידת מיקומה היחסי',
     ellipse: 'אליפסה: גרור מסגרת ליצירת אליפסה מדידה',
     circle: 'עיגול: גרור מסגרת ליצירת עיגול מדיד',
     vectorize: 'אות מצולמת לווקטור: הקף את האות במסלול חופשי ב־Apple Pencil',
   };
+  const pending = state.professionalSuite?.pendingMeasurement;
+  const pendingTool = pending?.tool || MASTER_SYSTEM.metric(pending?.semanticMetricId)?.tool || null;
+  if (pending && pendingTool === tool && tool === 'length') {
+    messages.length = pending.axisConstraint === 'horizontal'
+      ? 'קו רוחב אופקי: סמן שתי נקודות; הגובה יישמר קבוע גם בתיקון הקצוות'
+      : pending.axisConstraint === 'vertical'
+        ? 'קו גובה אנכי: סמן שתי נקודות; הרוחב יישמר קבוע גם בתיקון הקצוות'
+        : `${pending.name || 'מדידה מקצועית'}: סמן שתי נקודות`;
+  }
   const outcomeMessage = draftOutcome === 'completed'
     ? 'המדידה הקודמת הושלמה. '
     : draftOutcome === 'cancelled'
@@ -813,9 +830,13 @@ function setTool(tool) {
 }
 
 document.querySelectorAll('.tool[data-tool]').forEach(button => button.addEventListener('click', () => {
+  // A direct toolbar choice is explicit: even when its primitive type matches
+  // a professional workflow, it must become the advertised free/manual tool.
   const pending = state.professionalSuite?.pendingMeasurement;
-  const pendingTool = pending?.tool || MASTER_SYSTEM.metric(pending?.semanticMetricId)?.tool || null;
-  if (state.professionalSuite && pendingTool !== button.dataset.tool) state.professionalSuite.pendingMeasurement = null;
+  if (pending?.semanticMetricId && state.draft?.semanticMetricId === pending.semanticMetricId) {
+    cancelDraft();
+  }
+  if (state.professionalSuite) state.professionalSuite.pendingMeasurement = null;
   globalThis.MEDIDAOT_PROFESSIONAL_TOOLS?.switchWorkspaceMode?.('source');
   setTool(button.dataset.tool);
 }));
@@ -897,8 +918,10 @@ function toggleKastelThirds() {
   markObjectModified(kastel);
   selectObject(kastel.id);
   statusText.textContent = kastel.overlays.thirdsVisible
-    ? 'חוק השלישים הוחל: רוחב הקעסטעל חולק לשלושה טורים אנכיים'
+    ? 'חוק השלישים הוחל: גע בנקודה בתוך הקעסטעל למדידת מיקומה היחסי'
     : 'קווי חוק השלישים הוסתרו';
+  if (kastel.overlays.thirdsVisible) setTool('thirds');
+  else if (state.tool === 'thirds') setTool('pan');
   renderAll();
 }
 
@@ -1102,6 +1125,7 @@ function deleteSelectedObject() {
   }
   if (deleted?.type === 'kastel') {
     withdrawNibFromKastelRoof(deleted);
+    state.objects = state.objects.filter(item => !(item.type === 'thirds' && item.kastelId === deleted.id));
   }
   if (deleted?.type === 'gap' && deleted.formulaKey === 'common-gap') {
     const lastGap = [...state.objects].reverse().find(item => item.type === 'gap' && item.formulaKey === 'common-gap');
@@ -1125,23 +1149,44 @@ function activateFormulaTab(tab) {
 }
 document.querySelectorAll('[data-formula-tab]').forEach(button => button.addEventListener('click', () => activateFormulaTab(button.dataset.formulaTab)));
 function startStandardMeasurementTool(tool) {
+  const pending = state.professionalSuite?.pendingMeasurement;
+  if (pending?.semanticMetricId && state.draft?.semanticMetricId === pending.semanticMetricId) {
+    cancelDraft();
+  }
   if (state.professionalSuite) state.professionalSuite.pendingMeasurement = null;
+  if (tool === 'nib' || tool === 'nibRegion') {
+    cancelCalibrationAnalysis();
+  }
   globalThis.MEDIDAOT_PROFESSIONAL_TOOLS?.switchWorkspaceMode?.('source');
   setTool(tool);
 }
 $('startNibBtn').addEventListener('click', () => startStandardMeasurementTool('nib'));
 $('startNibRegionBtn').addEventListener('click', () => startStandardMeasurementTool('nibRegion'));
 $('startGapBtn').addEventListener('click', () => startStandardMeasurementTool('gap'));
-$('analyzeBtn').addEventListener('click', () => {
+function startAutomaticNibAnalysis(options = {}) {
+  if (state.draft) cancelDraft();
+  if (state.professionalSuite) state.professionalSuite.pendingMeasurement = null;
+  cancelCalibrationAnalysis();
+  setTool('pan');
+  activateFormulaTab('nib');
+  if (!state.image) {
+    statusText.textContent = options.missingImageMessage ||
+      'יש להעלות צילום לפני זיהוי עובי הקולמוס; קו ידני ובדיקת אזור נשארים זמינים';
+    renderFormulaUI();
+    return null;
+  }
   const automatic = globalThis.MEDIDAOT_AUTO_MEASURE;
-  if (automatic?.runNib) automatic.runNib({ userInitiated: true }).catch(() => {});
-  else analyzeImage(true);
+  const task = automatic?.runNib
+    ? automatic.runNib({ userInitiated: true })
+    : analyzeImage(true);
+  task?.catch?.(() => {});
+  return task;
+}
+$('analyzeBtn').addEventListener('click', () => {
+  startAutomaticNibAnalysis();
 });
 $('autoNibToolBtn')?.addEventListener('click', () => {
-  activateFormulaTab('nib');
-  const automatic = globalThis.MEDIDAOT_AUTO_MEASURE;
-  if (automatic?.runNib) automatic.runNib({ userInitiated: true }).catch(() => {});
-  else analyzeImage(true);
+  startAutomaticNibAnalysis();
 });
 $('gapsPanelBtn')?.addEventListener('click', () => {
   activateFormulaTab('gaps');
@@ -1463,6 +1508,7 @@ async function analyzeImage(userInitiated) {
     statusText.textContent = 'יש להעלות תמונה תחילה';
     return;
   }
+  cancelCalibrationAnalysis();
   if (userInitiated) snapshot();
   const token = ++state.calibrationAnalysisToken;
   state.formula.analysis.status = 'running';

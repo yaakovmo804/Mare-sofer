@@ -255,20 +255,28 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
     const connectors = [];
     for (const organ of topologyOrgans(vector)) {
       const ports = (organ.boundaryPorts || []).filter(port => port?.sourceAnchorId && port?.organAnchorId);
-      if (ports.length !== 2) continue;
-      const source = ports.map(port => anchorPointForId(vector, port.sourceAnchorId) || port.sourcePoint).filter(Boolean);
-      const target = ports.map(port => anchorPointForId(vector, port.organAnchorId)).filter(Boolean);
-      if (source.length !== 2 || target.length !== 2) continue;
-      connectors.push({
-        rule: 'nonzero',
-        commands: [
-          { type: 'M', x: source[0].x, y: source[0].y },
-          { type: 'L', x: source[1].x, y: source[1].y },
-          { type: 'L', x: target[1].x, y: target[1].y },
-          { type: 'L', x: target[0].x, y: target[0].y },
-          { type: 'Z' }
-        ]
-      });
+      const portById = new Map(ports.map(port => [port.id, port]));
+      const junctionGroups = Array.isArray(organ.junctions) && organ.junctions.length
+        ? organ.junctions.map(junction => (junction.boundaryPortIds || junction.portIds || [])
+          .map(id => portById.get(id))
+          .filter(Boolean))
+        : [ports];
+      for (const group of junctionGroups) {
+        if (group.length !== 2) continue;
+        const source = group.map(port => anchorPointForId(vector, port.sourceAnchorId) || port.sourcePoint).filter(Boolean);
+        const target = group.map(port => anchorPointForId(vector, port.organAnchorId)).filter(Boolean);
+        if (source.length !== 2 || target.length !== 2) continue;
+        connectors.push({
+          rule: 'nonzero',
+          commands: [
+            { type: 'M', x: source[0].x, y: source[0].y },
+            { type: 'L', x: source[1].x, y: source[1].y },
+            { type: 'L', x: target[1].x, y: target[1].y },
+            { type: 'L', x: target[0].x, y: target[0].y },
+            { type: 'Z' }
+          ]
+        });
+      }
     }
     return connectors;
   }
@@ -287,6 +295,560 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
       ...topologyBasePaths(vector),
       ...topologyOrgans(vector).flatMap(organ => organ.paths)
     ];
+  }
+
+  function failure(code, message) {
+    return { ok: false, code, message };
+  }
+
+  function contourDescriptors(paths) {
+    const contours = [];
+    for (let pathIndex = 0; pathIndex < (paths || []).length; pathIndex++) {
+      const commands = paths[pathIndex]?.commands || [];
+      let contourIndex = 0;
+      for (let start = 0; start < commands.length;) {
+        if (commands[start]?.type !== 'M') {
+          start++;
+          continue;
+        }
+        let endExclusive = start + 1;
+        while (endExclusive < commands.length && commands[endExclusive].type !== 'M') endExclusive++;
+        const commandIndices = [];
+        let closed = false;
+        for (let index = start; index < endExclusive; index++) {
+          const type = commands[index]?.type;
+          if (['M', 'L', 'C'].includes(type)) commandIndices.push(index);
+          if (type === 'Z') closed = true;
+        }
+        contours.push({ pathIndex, contourIndex, start, endExclusive, commandIndices, closed });
+        contourIndex++;
+        start = endExclusive;
+      }
+    }
+    return contours;
+  }
+
+  function cyclicAnchorSequence(anchorIndices, startPosition, endPosition) {
+    const result = [];
+    for (let position = startPosition;; position = (position + 1) % anchorIndices.length) {
+      result.push(anchorIndices[position]);
+      if (position === endPosition) return result;
+    }
+  }
+
+  function appendContourArc(target, sourceCommands, sequence, mapAnchor) {
+    const first = sourceCommands[sequence[0]];
+    target.push({ type: 'M', x: first.x, y: first.y });
+    mapAnchor(sequence[0], target.length - 1);
+    for (let offset = 1; offset < sequence.length; offset++) {
+      const command = sourceCommands[sequence[offset]];
+      const segment = command.type === 'M'
+        ? { type: 'L', x: command.x, y: command.y }
+        : cloneCommand(command);
+      target.push(segment);
+      mapAnchor(sequence[offset], target.length - 1);
+    }
+    target.push({ type: 'Z' });
+  }
+
+  function nextManualOrganId(vector, requestedId) {
+    const used = new Set(topologyOrgans(vector).map(organ => organ.id));
+    if (requestedId) {
+      const normalized = String(requestedId).replace(/:/g, '-');
+      if (normalized && !used.has(normalized)) return normalized;
+    }
+    let index = 1;
+    while (used.has(`manual-stem-${index}`)) index++;
+    return `manual-stem-${index}`;
+  }
+
+  function uniqueFeatureId(features, base) {
+    const used = new Set((features || []).map(feature => feature?.id).filter(Boolean));
+    if (!used.has(base)) return base;
+    let index = 2;
+    while (used.has(`${base}-${index}`)) index++;
+    return `${base}-${index}`;
+  }
+
+  function pointForCommand(command) {
+    return { x: finiteNumber(command?.x), y: finiteNumber(command?.y) };
+  }
+
+  function meanPoint(points) {
+    return points.reduce((sum, point) => ({
+      x: sum.x + point.x / points.length,
+      y: sum.y + point.y / points.length
+    }), { x: 0, y: 0 });
+  }
+
+  function pointInClassifiedPath(point, contours, rule) {
+    const containing = (contours || []).filter(contour => pointInPolygon(point, contour.points));
+    if (rule === 'evenodd') return containing.length % 2 === 1;
+    return containing.reduce((winding, contour) => winding + contour.sign, 0) !== 0;
+  }
+
+  function manualOrganLandmarks(organId, stemId, organHandleIds, organCommands) {
+    const entries = organHandleIds.map((id, index) => ({
+      id,
+      point: pointForCommand(organCommands[index])
+    }));
+    const first = entries[0];
+    const last = entries.at(-1);
+    const root = meanPoint([first.point, last.point]);
+    const distances = entries.map(entry => Math.hypot(entry.point.x - root.x, entry.point.y - root.y));
+    const maximumDistance = Math.max(...distances);
+    const terminalCandidates = entries.filter((entry, index) => (
+      distances[index] >= maximumDistance - Math.max(.5, maximumDistance * .04)
+    ));
+    const terminalIndices = terminalCandidates.map(entry => entries.indexOf(entry));
+    const firstTerminalIndex = Math.min(...terminalIndices);
+    const lastTerminalIndex = Math.max(...terminalIndices);
+    const tip = meanPoint(terminalCandidates.map(entry => entry.point));
+    const axisLength = Math.max(EPSILON, Math.hypot(tip.x - root.x, tip.y - root.y));
+    const axis = {
+      x: (tip.x - root.x) / axisLength,
+      y: (tip.y - root.y) / axisLength
+    };
+    const project = entry => (
+      (entry.point.x - root.x) * axis.x + (entry.point.y - root.y) * axis.y
+    );
+    const sideA = entries.slice(0, firstTerminalIndex + 1);
+    const sideB = entries.slice(lastTerminalIndex).reverse();
+    const nearestDepth = (side, ratio) => side.reduce((best, entry) => (
+      Math.abs(project(entry) - axisLength * ratio) < Math.abs(project(best) - axisLength * ratio)
+        ? entry
+        : best
+    ), side[0]);
+    const crossSections = [...new Map([.24, .36, .48, .60, .68].map(ratio => {
+      const a = nearestDepth(sideA, ratio);
+      const b = nearestDepth(sideB, ratio);
+      return [`${a.id}|${b.id}`, {
+        a,
+        b,
+        width: Math.hypot(a.point.x - b.point.x, a.point.y - b.point.y)
+      }];
+    })).values()].filter(section => section.a.id !== section.b.id);
+    const rootWidth = Math.max(EPSILON, Math.hypot(first.point.x - last.point.x, first.point.y - last.point.y));
+    const narrowest = crossSections.reduce((best, section) => (
+      !best || section.width < best.width ? section : best
+    ), null);
+    const hasDetectedNarrowing = narrowest && narrowest.width < rootWidth * .9;
+    const sideSection = hasDetectedNarrowing
+      ? narrowest
+      : crossSections.reduce((best, section) => (
+        Math.abs(project(section.a) - axisLength * .48) < Math.abs(project(best.a) - axisLength * .48)
+          ? section
+          : best
+      ), crossSections[0]);
+    const strongestBend = side => {
+      let best = null;
+      for (let index = 1; index < side.length - 1; index++) {
+        const previous = side[index - 1].point;
+        const current = side[index].point;
+        const next = side[index + 1].point;
+        const firstVector = { x: current.x - previous.x, y: current.y - previous.y };
+        const secondVector = { x: next.x - current.x, y: next.y - current.y };
+        const denominator = Math.hypot(firstVector.x, firstVector.y) * Math.hypot(secondVector.x, secondVector.y);
+        if (denominator < EPSILON) continue;
+        const depthRatio = project(side[index]) / axisLength;
+        if (depthRatio < .55 || depthRatio > .96) continue;
+        const cosine = clamp(
+          (firstVector.x * secondVector.x + firstVector.y * secondVector.y) / denominator,
+          -1,
+          1
+        );
+        const turn = Math.acos(cosine);
+        if (!best || turn > best.turn) best = { entry: side[index], turn };
+      }
+      return best?.turn >= 12 * Math.PI / 180 ? best.entry : null;
+    };
+    const roundingA = strongestBend(sideA);
+    const roundingB = strongestBend(sideB);
+    const definitions = [
+      [first, 'root-a', 'חיבור הירך — צד א'],
+      [last, 'root-b', 'חיבור הירך — צד ב'],
+      [sideSection?.a, hasDetectedNarrowing ? 'neck-a' : 'side-a', hasDetectedNarrowing ? 'הצטמצמות הירך — צד א' : 'מתאר הירך — צד א'],
+      [sideSection?.b, hasDetectedNarrowing ? 'neck-b' : 'side-b', hasDetectedNarrowing ? 'הצטמצמות הירך — צד ב' : 'מתאר הירך — צד ב'],
+      [roundingA, 'rounding-a', 'נקודת ההתעגלות — צד א'],
+      [roundingB, 'rounding-b', 'נקודת ההתעגלות — צד ב'],
+      ...terminalCandidates.map((entry, index) => [
+        entry,
+        terminalCandidates.length > 1 ? `terminal-${index + 1}` : 'terminal',
+        terminalCandidates.length > 1 ? `סיום הירך — צד ${index + 1}` : 'סיום הירך'
+      ])
+    ];
+    const grouped = new Map();
+    for (const [entry, role, label] of definitions) {
+      if (!entry) continue;
+      const existing = grouped.get(entry.id);
+      if (existing) {
+        existing.roles.push(role);
+        existing.labels.push(label);
+        continue;
+      }
+      grouped.set(entry.id, {
+        entry,
+        roles: [role],
+        labels: [label]
+      });
+    }
+    const landmarks = [...grouped.values()].map(group => {
+      const primaryRole = group.roles.find(role => role.startsWith('terminal'))
+        || group.roles.find(role => role.startsWith('root'))
+        || group.roles.find(role => role.startsWith('rounding'))
+        || group.roles[0];
+      return {
+        id: `${organId}-${group.roles.join('-')}`,
+        type: 'stem-landmark',
+        role: primaryRole,
+        structuralRoles: group.roles.slice(),
+        label: group.labels.join(' / '),
+        point: { ...group.entry.point },
+        anchorIds: [group.entry.id],
+        stemId,
+        organId,
+        confidence: 1,
+        editable: true,
+        creationMethod: 'manual-contour-lasso',
+        topologyStatus: 'bound-organ-subpath',
+        geometryStatus: 'current'
+      };
+    });
+    return { root, tip, landmarks };
+  }
+
+  /**
+   * Promotes one contiguous, closed-contour arc selected by its base anchors
+   * into an independently movable organ. The original source paths are kept
+   * byte-for-byte equivalent; only composition.basePaths and the new organ are
+   * changed. Ambiguous or disjoint selections fail atomically.
+   */
+  function promoteBaseSelectionToOrgan(source, baseAnchorIds, options = {}) {
+    const original = getVectorSource(source, options);
+    if (!original) return failure('vector-unavailable', 'לא נמצא מסלול וקטורי עריך.');
+    const candidate = cloneVectorData(original);
+    const basePaths = topologyBasePaths(candidate);
+    const selected = [...new Set((baseAnchorIds || []).map(String))];
+    if (selected.length < 3) {
+      return failure('too-few-anchors', 'יש להקיף לפחות שלוש נקודות מתאר רצופות של הירך.');
+    }
+
+    const parsed = [];
+    try {
+      for (const id of selected) {
+        const handle = parseHandleId(id);
+        if (handle.organId || handle.role !== 'anchor') {
+          return failure('not-base-anchors', 'אפשר ליצור ירך חדשה רק מנקודות המתאר של האות שעדיין אינן שייכות לאיבר.');
+        }
+        const command = basePaths[handle.pathIndex]?.commands?.[handle.commandIndex];
+        if (!command || !['M', 'L', 'C'].includes(command.type)) {
+          return failure('stale-selection', 'ההקפה אינה תואמת עוד לנקודות המתאר הנוכחיות.');
+        }
+        parsed.push({ id, ...handle });
+      }
+    } catch {
+      return failure('invalid-handle-id', 'ההקפה כוללת מזהה נקודה שאינו תקין.');
+    }
+
+    const descriptors = contourDescriptors(basePaths);
+    const matching = descriptors.filter(descriptor => parsed.every(handle => (
+      handle.pathIndex === descriptor.pathIndex && descriptor.commandIndices.includes(handle.commandIndex)
+    )));
+    if (matching.length !== 1) {
+      return failure('multiple-contours', 'ההקפה חוצה יותר ממתאר סגור אחד; יש להקיף ירך רצופה אחת בכל פעם.');
+    }
+    const descriptor = matching[0];
+    if (!descriptor.closed) {
+      return failure('open-contour', 'אי־אפשר להפריד איבר ממסלול פתוח.');
+    }
+    const selectedSet = new Set(selected);
+    const flags = descriptor.commandIndices.map(commandIndex => selectedSet.has(
+      formatHandleId(descriptor.pathIndex, commandIndex, 'anchor')
+    ));
+    if (flags.every(Boolean)) {
+      return failure('whole-contour', 'ההקפה כוללת את כל המתאר; יש להשאיר את גוף האות מחוץ להקפה.');
+    }
+    const runStarts = flags
+      .map((flag, index) => flag && !flags[(index - 1 + flags.length) % flags.length] ? index : -1)
+      .filter(index => index >= 0);
+    if (runStarts.length !== 1) {
+      return failure('disjoint-selection', 'נקודות הירך אינן רציפות לאורך המתאר; יש להקיף את האיבר כיחידה אחת.');
+    }
+    const startPosition = runStarts[0];
+    let endPosition = startPosition;
+    while (flags[(endPosition + 1) % flags.length]) endPosition = (endPosition + 1) % flags.length;
+    const organSequence = cyclicAnchorSequence(descriptor.commandIndices, startPosition, endPosition);
+    if (organSequence.length < 3) {
+      return failure('too-few-anchors', 'יש להקיף לפחות שלוש נקודות מתאר רצופות של הירך.');
+    }
+    const baseSequence = cyclicAnchorSequence(descriptor.commandIndices, endPosition, startPosition);
+    if (baseSequence.length < 3) {
+      return failure('insufficient-base', 'ההקפה אינה משאירה מתאר בסיס תקין לאות.');
+    }
+
+    const sourceCommands = basePaths[descriptor.pathIndex].commands;
+    const strictInteriorIds = new Set(organSequence.slice(1, -1).map(commandIndex => (
+      formatHandleId(descriptor.pathIndex, commandIndex, 'anchor')
+    )));
+    const strictComplementIds = new Set(descriptor.commandIndices
+      .map(commandIndex => formatHandleId(descriptor.pathIndex, commandIndex, 'anchor'))
+      .filter(id => !selectedSet.has(id)));
+    for (const feature of candidate.features || []) {
+      const ids = (feature.anchorIds || []).filter(id => !String(id).startsWith('o:'));
+      const capturesInterior = ids.some(id => strictInteriorIds.has(id));
+      const capturesComplement = ids.some(id => strictComplementIds.has(id));
+      if (capturesInterior && capturesComplement) {
+        return failure('partial-feature-capture', 'ההקפה חוצה נקודה מבנית קיימת; יש לכלול אותה בשלמותה או להשאיר אותה מחוץ לירך.');
+      }
+    }
+    const protectedInteriorPort = topologyOrgans(candidate).some(organ => (
+      (organ.boundaryPorts || []).some(port => strictInteriorIds.has(port?.sourceAnchorId))
+    ));
+    if (protectedInteriorPort) {
+      return failure('overlapping-organ', 'ההקפה חוצה את פנים נקודת החיבור של ירך קיימת; יש להקיף איבר אחד ללא חפיפה.');
+    }
+
+    const viewBox = candidate.viewBox || [0, 0, 100, 100];
+    const flattenTolerance = Math.max(.05, Math.min(Math.abs(+viewBox[2]) || 100, Math.abs(+viewBox[3]) || 100) * .0015);
+    const flattened = flattenPathEntry(basePaths[descriptor.pathIndex], flattenTolerance);
+    const classified = classifyContours(flattened, basePaths[descriptor.pathIndex].rule);
+    const targetContour = classified[descriptor.contourIndex];
+    if (!targetContour || targetContour.role === 'hole') {
+      return failure('hole-contour', 'ההקפה נמצאת על חלל פנימי ולא על מתאר הירך החיצוני.');
+    }
+    const seamStart = pointForCommand(sourceCommands[organSequence[0]]);
+    const seamEnd = pointForCommand(sourceCommands[organSequence.at(-1)]);
+    if (Math.hypot(seamEnd.x - seamStart.x, seamEnd.y - seamStart.y) < flattenTolerance) {
+      return failure('degenerate-organ', 'שתי נקודות החיבור של הירך קרובות מדי זו לזו.');
+    }
+    for (let sample = 1; sample < 32; sample++) {
+      const ratio = sample / 32;
+      const point = {
+        x: seamStart.x + (seamEnd.x - seamStart.x) * ratio,
+        y: seamStart.y + (seamEnd.y - seamStart.y) * ratio
+      };
+      if (!pointInClassifiedPath(point, classified, basePaths[descriptor.pathIndex].rule)) {
+        return failure('non-interior-cut', 'קו החיבור בין קצות ההקפה יוצא מתחומי הדיו; יש להקיף ירך בעלת חיבור רציף וברור יותר.');
+      }
+    }
+
+    const organId = nextManualOrganId(candidate, options.organId);
+    const stemId = `${organId}-axis`;
+    const organCommands = [];
+    const organIdByOldId = new Map();
+    appendContourArc(organCommands, sourceCommands, organSequence, (oldCommandIndex, newCommandIndex) => {
+      organIdByOldId.set(
+        formatHandleId(descriptor.pathIndex, oldCommandIndex, 'anchor'),
+        formatHandleId(0, newCommandIndex, 'anchor', organId)
+      );
+    });
+    const baseValidationCommands = [];
+    appendContourArc(baseValidationCommands, sourceCommands, baseSequence, () => {});
+    const organArea = Math.abs(polygonArea(flattenPathEntry({ rule: 'nonzero', commands: organCommands }, flattenTolerance)[0] || []));
+    const baseArea = Math.abs(polygonArea(flattenPathEntry({ rule: 'nonzero', commands: baseValidationCommands }, flattenTolerance)[0] || []));
+    if (organArea <= flattenTolerance ** 2 || baseArea <= flattenTolerance ** 2) {
+      return failure('degenerate-organ', 'ההקפה אינה יוצרת שני מתארים תקינים בעלי שטח.');
+    }
+
+    const baseIdByOldId = new Map();
+    const rebuiltBasePaths = basePaths.map((entry, pathIndex) => {
+      const commands = [];
+      const appendUntouched = (command, oldCommandIndex) => {
+        commands.push(cloneCommand(command));
+        if (['M', 'L', 'C'].includes(command.type)) {
+          baseIdByOldId.set(
+            formatHandleId(pathIndex, oldCommandIndex, 'anchor'),
+            formatHandleId(pathIndex, commands.length - 1, 'anchor')
+          );
+        }
+      };
+      if (pathIndex !== descriptor.pathIndex) {
+        entry.commands.forEach(appendUntouched);
+        return { rule: entry.rule, commands };
+      }
+      for (let index = 0; index < entry.commands.length;) {
+        if (index === descriptor.start) {
+          appendContourArc(commands, entry.commands, baseSequence, (oldCommandIndex, newCommandIndex) => {
+            baseIdByOldId.set(
+              formatHandleId(pathIndex, oldCommandIndex, 'anchor'),
+              formatHandleId(pathIndex, newCommandIndex, 'anchor')
+            );
+          });
+          index = descriptor.endExclusive;
+        } else {
+          appendUntouched(entry.commands[index], index);
+          index++;
+        }
+      }
+      return { rule: entry.rule, commands };
+    });
+
+    candidate.composition = {
+      ...clonePlainMetadata(candidate.composition || {}),
+      schemaVersion: VECTOR_SCHEMA_VERSION,
+      mode: 'organ-subpaths-v1',
+      basePaths: rebuiltBasePaths,
+      connectorMode: 'paired-boundary-port-bridge'
+    };
+
+    for (const organ of candidate.organs || []) {
+      for (const port of organ.boundaryPorts || []) {
+        port.sourceAnchorId = baseIdByOldId.get(port.sourceAnchorId) || port.sourceAnchorId;
+        const sourcePoint = anchorPointForId(candidate, port.sourceAnchorId);
+        if (sourcePoint) port.sourcePoint = { ...sourcePoint };
+      }
+      if (organ.junction?.sourcePortIds) {
+        organ.junction.sourcePortIds = organ.junction.sourcePortIds.map(id => baseIdByOldId.get(id) || id);
+      }
+    }
+
+    candidate.features = (candidate.features || []).map(feature => {
+      if (!Array.isArray(feature.anchorIds) || !feature.anchorIds.length) return feature;
+      const movesToOrgan = feature.anchorIds.some(id => strictInteriorIds.has(id));
+      const mappedIds = [...new Set(feature.anchorIds.map(id => {
+        if (id.startsWith('o:')) return id;
+        if (movesToOrgan && selectedSet.has(id) && organIdByOldId.has(id)) return organIdByOldId.get(id);
+        return baseIdByOldId.get(id) || null;
+      }).filter(Boolean))];
+      const copy = { ...feature, anchorIds: mappedIds };
+      if (mappedIds.length && mappedIds.every(id => id.startsWith(`o:${organId}:`))) {
+        copy.organId = organId;
+        copy.topologyStatus = 'bound-organ-subpath';
+      } else if (!mappedIds.length) {
+        delete copy.anchorIds;
+        copy.topologyStatus = 'unbound-reference';
+        copy.editable = false;
+      }
+      return copy;
+    });
+
+    const organHandleIds = organSequence.map(commandIndex => organIdByOldId.get(
+      formatHandleId(descriptor.pathIndex, commandIndex, 'anchor')
+    ));
+    const boundaryOldIds = [organSequence[0], organSequence.at(-1)].map(commandIndex => (
+      formatHandleId(descriptor.pathIndex, commandIndex, 'anchor')
+    ));
+    const boundaryPorts = boundaryOldIds.map((oldId, index) => {
+      const sourceAnchorId = baseIdByOldId.get(oldId);
+      const organAnchorId = organIdByOldId.get(oldId);
+      return {
+        id: `${organId}-port-${index}`,
+        junctionId: `${organId}-junction`,
+        role: index === 0 ? 'root-a' : 'root-b',
+        sourceAnchorId,
+        organAnchorId,
+        sourcePoint: anchorPointForId(candidate, sourceAnchorId)
+      };
+    });
+    const landmarkData = manualOrganLandmarks(organId, stemId, organHandleIds, organCommands);
+    const organ = {
+      id: organId,
+      type: 'stem',
+      label: options.label || 'ירך שהוגדרה בהקפה',
+      stemId,
+      paths: [{ rule: 'nonzero', commands: organCommands }],
+      anchorIds: organHandleIds,
+      landmarkFeatureIds: landmarkData.landmarks.map(feature => feature.id),
+      boundaryPorts,
+      junction: {
+        id: `${organId}-junction`,
+        type: 'paired-boundary-port',
+        portIds: boundaryPorts.map(port => port.id),
+        sourcePortIds: boundaryPorts.map(port => port.sourceAnchorId),
+        organPortIds: boundaryPorts.map(port => port.organAnchorId)
+      },
+      junctions: [{
+        id: `${organId}-junction`,
+        type: 'paired-boundary-port',
+        role: 'root',
+        boundaryPortIds: boundaryPorts.map(port => port.id),
+        portIds: boundaryPorts.map(port => port.id)
+      }],
+      ownership: {
+        sourcePathIndex: descriptor.pathIndex,
+        sourceCommandIndices: organSequence.slice(),
+        exclusive: true,
+        creationMethod: 'manual-contour-lasso'
+      },
+      transformMode: 'rigid-subpath',
+      creationMethod: 'manual-contour-lasso',
+      topologyStatus: 'exclusive-contour-arc'
+    };
+    candidate.organs = [...(candidate.organs || []), organ];
+    const root = landmarkData.root;
+    const tip = landmarkData.tip;
+    const commonFeature = {
+      root: { ...root },
+      tip: { ...tip },
+      confidence: 1,
+      stemId,
+      organId,
+      creationMethod: 'manual-contour-lasso',
+      topologyStatus: 'bound-organ-subpath',
+      geometryStatus: 'current'
+    };
+    const axisFeature = {
+      ...commonFeature,
+      id: uniqueFeatureId(candidate.features, stemId),
+      type: 'stem-axis',
+      label: 'ציר הטיית הירך',
+      point: { ...root },
+      angleDeg: Math.atan2(tip.x - root.x, tip.y - root.y) * 180 / Math.PI,
+      anchorIds: organHandleIds.slice()
+    };
+    organ.stemId = axisFeature.id;
+    for (const landmark of landmarkData.landmarks) landmark.stemId = axisFeature.id;
+    const junctionFeature = {
+      ...commonFeature,
+      stemId: axisFeature.id,
+      id: uniqueFeatureId([...candidate.features, axisFeature], `${organId}-junction-feature`),
+      type: 'roof-stem-junction',
+      label: 'נקודות חיבור הירך למתאר הבסיס',
+      point: { ...root },
+      anchorIds: boundaryPorts.map(port => port.organAnchorId)
+    };
+    const organFeature = {
+      ...commonFeature,
+      stemId: axisFeature.id,
+      id: uniqueFeatureId([...candidate.features, axisFeature, junctionFeature], `${organId}-feature`),
+      type: 'stem-organ',
+      label: organ.label,
+      point: meanPoint(organHandleIds.map(id => anchorPointForId({ ...candidate, organs: [...candidate.organs] }, id)).filter(Boolean)),
+      anchorIds: organHandleIds.slice(),
+      landmarkIds: landmarkData.landmarks.map(feature => feature.id)
+    };
+    candidate.features.push(axisFeature, junctionFeature, organFeature, ...landmarkData.landmarks);
+    if (candidate.trace && typeof candidate.trace === 'object') {
+      candidate.trace.organCount = candidate.organs.length;
+      candidate.trace.manualOrganCount = (candidate.trace.manualOrganCount || 0) + 1;
+    }
+    touchVector(candidate);
+
+    const resolvedAnchorIds = new Set(enumerateHandles(candidate)
+      .filter(handle => handle.kind === 'anchor')
+      .map(handle => handle.id));
+    const unresolvedFeature = (candidate.features || []).find(feature => (
+      (feature.anchorIds || []).some(id => !resolvedAnchorIds.has(id))
+    ));
+    const unresolvedPort = (candidate.organs || []).some(item => (
+      (item.boundaryPorts || []).some(port => (
+        !resolvedAnchorIds.has(port.sourceAnchorId) || !resolvedAnchorIds.has(port.organAnchorId)
+      )) || (item.anchorIds || []).some(id => !resolvedAnchorIds.has(id))
+    ));
+    if (unresolvedFeature || unresolvedPort) {
+      return failure('unresolved-reference', 'לא ניתן להשלים את ההפרדה בלי להשאיר הפניה וקטורית שבורה.');
+    }
+    return {
+      ok: true,
+      vector: candidate,
+      organ,
+      organId,
+      handleIds: organHandleIds.slice(),
+      featureId: organFeature.id,
+      axisFeatureId: axisFeature.id,
+      root: { ...root },
+      tip: { ...tip }
+    };
   }
 
   function deepFreezePaths(paths) {
@@ -2170,6 +2732,7 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
     getVisualBounds,
     enumerateHandles,
     getHandleCounts,
+    promoteBaseSelectionToOrgan,
     moveVectorHandle,
     moveObjectHandle,
     translateObjectHandles,

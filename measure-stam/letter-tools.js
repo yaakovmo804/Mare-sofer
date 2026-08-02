@@ -499,8 +499,9 @@ function cachedLetterPaths(asset) {
 }
 
 function letterMasterSignature(object, asset) {
-  const paths = object?.letterVector?.paths;
-  if (!Array.isArray(paths)) return `${asset?.style || ''}:${asset?.slug || ''}:source`;
+  if (!Array.isArray(object?.letterVector?.paths)) return `${asset?.style || ''}:${asset?.slug || ''}:source`;
+  const paths = letterVectorEngine()?.getRenderVector?.(object, { asset, weight: 1 })?.paths
+    || object.letterVector.paths;
   let hash = 2166136261;
   const mix = value => {
     const string = String(value);
@@ -973,7 +974,9 @@ function normalizeLetterTemplateObject(object) {
     : object.letterEditAnchors === true
       ? 'full'
       : 'structural';
-  object.letterEditAnchors = photographed || object.vectorDetailLevel !== 'structural';
+  object.letterEditAnchors = typeof object.letterEditAnchors === 'boolean'
+    ? object.letterEditAnchors
+    : photographed || object.vectorDetailLevel !== 'structural';
   object.letterGridVisible = object.letterGridVisible !== false;
   object.letterLockAspect = object.letterLockAspect !== false;
   object.editTarget = photographed && object.editTarget === 'source-region'
@@ -1378,7 +1381,10 @@ function letterVectorHandles(object) {
   const handles = allLetterVectorHandles(object);
   const semanticHandles = semanticFeatureHandles(object, handles);
   if (object.vectorDetailLevel === 'structural') {
-    return semanticHandles.filter(handle => handle.semanticType !== 'stem-organ');
+    return semanticHandles.filter(handle => (
+      handle.topologyStatus !== 'unbound-reference' &&
+      ['stem-landmark', 'contour-extremum'].includes(handle.semanticType)
+    ));
   }
   if (object.vectorDetailLevel === 'organs') {
     const selectedIds = state.letterVectorSelection?.id === object.id
@@ -1387,10 +1393,22 @@ function letterVectorHandles(object) {
     const independentOrganIds = new Set((object.letterVector?.organs || [])
       .filter(organ => organ.topologyStatus === 'exclusive-contour-arc' && Array.isArray(organ.paths) && organ.paths.length)
       .map(organ => organ.id));
-    const organHandles = semanticHandles.filter(handle => (
-      independentOrganIds.has(handle.organId) &&
-      ['stem-organ', 'stem-axis', 'roof-stem-junction'].includes(handle.semanticType)
-    ));
+    const organById = new Map((object.letterVector?.organs || []).map(organ => [organ.id, organ]));
+    const organHandles = semanticHandles
+      .filter(handle => independentOrganIds.has(handle.organId) && handle.semanticType === 'stem-landmark')
+      .map(handle => {
+        const organ = organById.get(handle.organId);
+        const groupIds = [...new Set(organ?.anchorIds || handle.groupIds || [])];
+        return {
+          ...handle,
+          groupIds,
+          groupCount: groupIds.length,
+          semanticLabel: `${handle.semanticLabel || 'נקודת מתאר'} — הזזת הירך השלמה`
+        };
+      });
+    const coveredOrganIds = new Set(organHandles.map(handle => handle.organId));
+    organHandles.push(...organLevelVectorHandles(handles, object.letterVector?.organs)
+      .filter(handle => !coveredOrganIds.has(handle.organId)));
     if (!selectedIds.length) return organHandles;
     const selectedSet = new Set(selectedIds);
     const selectedAnchors = handles.filter(handle => handle.kind === 'anchor' && selectedSet.has(handle.id));
@@ -1452,12 +1470,13 @@ function drawLetterVectorHandles(object) {
   }
   const anchors = handles.filter(handle => handle.kind === 'anchor');
   const anchorByCommand = new Map(
-    anchors.map(handle => [`${handle.pathIndex}:${handle.commandIndex}`, handle])
+    anchors.map(handle => [`${handle.organId || 'base'}:${handle.pathIndex}:${handle.commandIndex}`, handle])
   );
   const pathAnchors = new Map();
   for (const anchor of anchors) {
-    if (!pathAnchors.has(anchor.pathIndex)) pathAnchors.set(anchor.pathIndex, []);
-    pathAnchors.get(anchor.pathIndex).push(anchor);
+    const pathKey = `${anchor.organId || 'base'}:${anchor.pathIndex}`;
+    if (!pathAnchors.has(pathKey)) pathAnchors.set(pathKey, []);
+    pathAnchors.get(pathKey).push(anchor);
   }
   for (const list of pathAnchors.values()) {
     list.sort((a, b) => a.commandIndex - b.commandIndex);
@@ -1476,10 +1495,12 @@ function drawLetterVectorHandles(object) {
   ctx.setLineDash([]);
   for (const handle of handles.filter(item => item.kind === 'control')) {
     let anchor = null;
+    const namespace = handle.organId || 'base';
+    const pathKey = `${namespace}:${handle.pathIndex}`;
     if (handle.role === 'control-in') {
-      anchor = anchorByCommand.get(`${handle.pathIndex}:${handle.commandIndex}`) || null;
+      anchor = anchorByCommand.get(`${namespace}:${handle.pathIndex}:${handle.commandIndex}`) || null;
     } else {
-      const candidates = pathAnchors.get(handle.pathIndex) || [];
+      const candidates = pathAnchors.get(pathKey) || [];
       anchor = [...candidates].reverse().find(item => item.commandIndex < handle.commandIndex)
         || candidates[candidates.length - 1]
         || null;
@@ -1493,7 +1514,12 @@ function drawLetterVectorHandles(object) {
     ctx.stroke();
   }
 
-  for (const handle of handles.filter(item => item.semanticType === 'stem-axis' && item.tipImage)) {
+  const selectedOrganId = state.letterVectorSelection?.id === object.id
+    ? state.letterVectorSelection.organId
+    : null;
+  for (const handle of handles.filter(item => (
+    item.semanticType === 'stem-axis' && item.tipImage && item.organId === selectedOrganId
+  ))) {
     const root = imageToScreen(handle.rootImage || handle.point);
     const tip = imageToScreen(handle.tipImage);
     ctx.save();
@@ -1537,7 +1563,7 @@ function drawLetterVectorHandles(object) {
     }
     ctx.fill();
     ctx.stroke();
-    if (handle.semanticType && (selected || object.vectorDetailLevel === 'structural')) {
+    if (handle.semanticType && selected) {
       ctx.fillStyle = '#78350f';
       ctx.font = '700 9px system-ui, sans-serif';
       ctx.textAlign = 'right';
@@ -1834,7 +1860,11 @@ function nearestLetterVectorHandle(object, imagePoint, thresholdScreen = 16) {
   let bestDistance = Infinity;
   for (const handle of letterVectorHandles(object)) {
     const current = distance(target, imageToScreen(handle.point));
-    if (current <= thresholdScreen && current < bestDistance) {
+    const currentPriority = handle.organId ? 2 : handle.semanticType ? 1 : 0;
+    const bestPriority = best?.organId ? 2 : best?.semanticType ? 1 : 0;
+    if (current <= thresholdScreen && (
+      current < bestDistance - .01 || (Math.abs(current - bestDistance) <= .01 && currentPriority > bestPriority)
+    )) {
       best = handle;
       bestDistance = current;
     }
@@ -2048,8 +2078,8 @@ function refreshBoundVectorFeaturePoints(object, organId = null) {
         y: sum.y + point.y / points.length
       }), { x: 0, y: 0 });
     };
-    const root = meanRole('root-') || axis.root;
-    const tip = meanRole('terminal-') || axis.tip;
+    const root = meanRole('root') || axis.root;
+    const tip = meanRole('terminal') || axis.tip;
     if (!root || !tip) continue;
     axis.root = { ...root };
     axis.point = { ...root };
@@ -2405,8 +2435,8 @@ function syncLetterControls(object = selectedLetterTemplate()) {
       ? `מבנה: ${letterVectorHandles(object).length} תחנות מתאר — חיבור, הצטמצמות, התעגלות וסיום ירך`
       : 'מבנה: הזזה ושינוי מסגרת בלבד',
     organs: photographed
-      ? `איברים: ${independentOrganCount} ירכות כתת־מסלולים עצמאיים; סימון חופשי בוחר איבר שלם`
-      : 'איברים: אין קבוצות מומצאות; סימון חופשי בוחר רק את העוגנים שהוקפו',
+      ? `איברים: ${independentOrganCount} ירכות כתת־מסלולים עצמאיים; הקפה בוחרת ירך קיימת או מגדירה ירך רציפה חדשה`
+      : `איברים: ${independentOrganCount} איברים עצמאיים; הקפה מגדירה תת־מסלול רק כאשר החיתוך הטופולוגי תקין`,
     curves: 'עקומות: נקודות העוגן ללא ידיות הבקרה',
     full: 'מלא: כל נקודות העוגן וידיות ה־Bézier'
   };
@@ -2487,11 +2517,19 @@ function resetSelectedLetterRatio() {
     object.letterVector = structuredCloneSafe(object.sourceOriginalVector);
     object.points = structuredCloneSafe(object.sourceOriginalPoints);
     object.letterWeight = 1;
+    const restoredPhotograph = isSourceRegionEdit(object);
+    if (restoredPhotograph) {
+      object.editTarget = 'overlay-copy';
+      object.role = 'reference-overlay';
+      object.color = object.sourceOverlayColor || '#2563eb';
+      object.letterOpacity = .72;
+    }
     state.letterVectorSelection = null;
+    object.correctionHandleIds = [];
     markObjectModified(object);
     renderAll();
-    statusText.textContent = isSourceRegionEdit(object)
-      ? 'העיוות בוטל והאות הפעילה חזרה לצורתה המצולמת'
+    statusText.textContent = restoredPhotograph
+      ? 'העיוות בוטל והצילום המקורי חזר; הווקטור נשאר כעותק נפרד שאפשר להפעיל שוב על המקור'
       : 'העותק הווקטורי חזר לצורה ולמיקום של אזור המקור';
     return;
   }
@@ -2882,7 +2920,7 @@ function armLetterAnchorLasso() {
   state.letterVectorLasso = { armed: true, id: object.id, points: [] };
   state.letterVectorSelection = null;
   $('letterAnchorLassoBtn')?.classList.add('active');
-  statusText.textContent = 'הקף ב־Apple Pencil את קבוצת נקודות העוגן הרצויה';
+  statusText.textContent = 'הקף את מתאר הירך הרצוי; ירך קיימת תיבחר, ומתאר רציף חדש יופרד לתת־וקטור עצמאי';
   draw();
 }
 
@@ -2921,27 +2959,56 @@ function finishLetterAnchorLasso() {
     const overlap = ids.filter(id => rawSet.has(id)).length;
     return pointInPolygon(handle.point, points) || overlap / ids.length >= .35;
   });
-  const selected = matchedOrgans.length
+  let selected = matchedOrgans.length
     ? [...new Set(matchedOrgans.flatMap(handle => handle.groupIds || []))]
-    : rawSelected;
+    : [];
+  let promoted = null;
+  if (!matchedOrgans.length && rawSelected.length) {
+    const engine = letterVectorEngine();
+    promoted = engine?.promoteBaseSelectionToOrgan?.(object, rawSelected, {
+      asset: letterAsset(object)
+    }) || { ok: false, message: 'מנוע הפרדת האיברים אינו זמין.' };
+    if (!promoted.ok) {
+      state.letterVectorSelection = null;
+      object.correctionHandleIds = [];
+      syncLetterControls(object);
+      statusText.textContent = `${promoted.message} האות לא שונתה.`;
+      draw();
+      return [];
+    }
+    snapshot();
+    object.letterVector = promoted.vector;
+    object.letterWeight = promoted.vector.weight;
+    object.auto = false;
+    markObjectModified(object);
+    selected = [...promoted.handleIds];
+  }
   const primaryOrgan = matchedOrgans.length === 1 ? matchedOrgans[0] : null;
+  const promotedRootImage = promoted?.ok
+    ? letterVectorEngine()?.localToImage?.(object, promoted.root, { asset: letterAsset(object) })
+    : null;
+  const promotedTipImage = promoted?.ok
+    ? letterVectorEngine()?.localToImage?.(object, promoted.tip, { asset: letterAsset(object) })
+    : null;
   state.letterVectorSelection = selected.length ? {
     id: object.id,
     handleIds: selected,
     primaryHandleId: selected[0],
     handleId: selected[0],
-    featureId: primaryOrgan?.featureId || null,
-    semanticType: primaryOrgan?.semanticType || null,
-    organId: primaryOrgan?.organId || null,
-    rootImage: primaryOrgan?.rootImage || null,
-    tipImage: primaryOrgan?.tipImage || null
+    featureId: promoted?.featureId || primaryOrgan?.featureId || null,
+    semanticType: promoted?.ok ? 'stem-organ' : primaryOrgan?.semanticType || null,
+    organId: promoted?.organId || primaryOrgan?.organId || null,
+    rootImage: promotedRootImage || primaryOrgan?.rootImage || null,
+    tipImage: promotedTipImage || primaryOrgan?.tipImage || null
   } : null;
   object.correctionHandleIds = [...selected];
   syncLetterControls(object);
   statusText.textContent = selected.length
-    ? matchedOrgans.length
+    ? promoted?.ok
+      ? `הוגדרה ירך עצמאית עם ${selected.length} עוגני מתאר ממשיים; גרירה מזיזה רק אותה וכלי הטיית הציר פעיל`
+      : matchedOrgans.length
       ? `נבחר${matchedOrgans.length > 1 ? 'ו' : 'ה'} ${matchedOrgans.length} ${matchedOrgans.length > 1 ? 'ירכות שלמות' : 'ירך שלמה'}; גרירה מזיזה רק את תת־המסלול של כל ירך`
-      : `נבחרו ${selected.length} עוגנים מדויקים; גרירה מזיזה את הקבוצה בלי להזיז עוגנים מחוץ לסימון`
+      : 'לא נוצרה בחירת איבר'
     : 'לא נמצאו נקודות עוגן בתוך הסימון';
   draw();
   return selected;
@@ -3107,8 +3174,8 @@ $('letterLockAspectInput')?.addEventListener('change', event => {
 $('letterEditAnchorsInput')?.addEventListener('change', event => {
   const object = selectedLetterTemplate();
   if (!object) return;
-  object.vectorDetailLevel = event.target.checked ? 'full' : 'structural';
-  object.letterEditAnchors = object.vectorDetailLevel !== 'structural';
+  snapshot();
+  object.letterEditAnchors = event.target.checked === true;
   state.letterVectorSelection = null;
   state.letterVectorLasso = null;
   $('letterAnchorLassoBtn')?.classList.remove('active');
@@ -3125,7 +3192,7 @@ $('letterVectorLevelSelect')?.addEventListener('change', event => {
   object.vectorDetailLevel = ['structural', 'organs', 'curves', 'full'].includes(event.target.value)
     ? event.target.value
     : 'structural';
-  object.letterEditAnchors = object.vectorDetailLevel !== 'structural';
+  object.letterEditAnchors = true;
   object.correctionHandleIds = [];
   state.letterVectorSelection = null;
   state.letterVectorLasso = null;
@@ -3138,8 +3205,8 @@ $('letterVectorLevelSelect')?.addEventListener('change', event => {
       ? 'דרגת מבנה: מוצגות תחנות אמיתיות במתאר — חיבור, הצטמצמות, התעגלות וסיום'
       : 'דרגת מבנה: אפשר להזיז ולשנות את מסגרת האות, והווקטור המלא נשמר מתחתיה',
     organs: isPhotographedVector(object)
-      ? 'דרגת איברים: ירך מזוהה נבחרת כתת־מסלול עצמאי; גרירה אינה משנה את מסלול הבסיס'
-      : 'דרגת איברים: הקפה חופשית בוחרת עוגנים מדויקים; אין חלוקה אוטומטית שרירותית',
+      ? 'דרגת איברים: הקפה בוחרת ירך קיימת או מפרידה מתאר רציף לתת־מסלול עצמאי'
+      : 'דרגת איברים: הקפה תקינה מפרידה איבר וקטורי; הקפה עמומה נעצרת בלי לעוות את האות',
     curves: 'דרגת עקומות: מוצגות כל נקודות העוגן ללא עומס ידיות',
     full: 'דרגה מלאה: כל נקודות העוגן וידיות ה־Bézier מוצגות לעריכה מדויקת'
   };

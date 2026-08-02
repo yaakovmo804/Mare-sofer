@@ -169,7 +169,7 @@ function structuredCloneSafe(value) {
 }
 
 function isEditableTarget(target) {
-  return target instanceof Element && !!target.closest('input, textarea, select, [contenteditable="true"]');
+  return target instanceof Element && !!target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])');
 }
 
 /* Menus are deliberately pointer-agnostic: buttons, tabs, selects, sliders,
@@ -187,10 +187,10 @@ function eventPath(event) {
 
 function textEntryControl(target) {
   if (!(target instanceof Element)) return null;
-  const direct = target.closest('textarea, [contenteditable="true"], input');
+  const direct = target.closest('textarea, [contenteditable]:not([contenteditable="false"]), input');
   const control = direct || target.closest('label')?.control || target.control || null;
   if (!(control instanceof Element)) return null;
-  if (control.matches('textarea, [contenteditable="true"]')) return control;
+  if (control.matches('textarea, [contenteditable]:not([contenteditable="false"])')) return control;
   if (!control.matches('input')) return null;
   const type = (control.getAttribute('type') || 'text').toLowerCase();
   return ['text', 'number', 'search', 'email', 'url', 'tel', 'password'].includes(type)
@@ -221,19 +221,30 @@ function clearBlockedPenTextEntry() {
   penTextEntryBlock.nodes.clear();
 }
 
+function syncToolControlState(tool = state.tool) {
+  document.querySelectorAll('.tool[data-tool]').forEach(button => {
+    button.classList.toggle('active', button.dataset.tool === tool);
+  });
+  $('gapsPanelBtn')?.classList.toggle('active', tool === 'gap');
+  $('autoNibToolBtn')?.classList.remove('active');
+}
+
 function handleDocumentPointerDown(event) {
   if (event.pointerType === 'touch' || event.pointerType === 'mouse') {
     clearBlockedPenTextEntry();
     return;
   }
   if (event.pointerType !== 'pen') return;
+  const activeTextEntry = textEntryControl(document.activeElement);
+  if (activeTextEntry instanceof HTMLElement) activeTextEntry.blur();
   const control = textEntryControl(event.target);
-  if (!control) return;
+  if (!control) {
+    clearBlockedPenTextEntry();
+    return;
+  }
   rememberBlockedPenTextEntry(event, control);
   event.preventDefault();
   event.stopImmediatePropagation();
-  const activeTextEntry = textEntryControl(document.activeElement);
-  if (activeTextEntry instanceof HTMLElement) activeTextEntry.blur();
   if (control instanceof HTMLElement) control.blur();
   statusText.textContent = 'העט לא פותח שדה כתיבה כדי למנוע Scribble; כפתורים, תפריטים וסרגלים כן פועלים בעט ובאצבע';
 }
@@ -472,18 +483,26 @@ function captureSnapshot() {
   return {
     objects: structuredCloneSafe(state.objects),
     formula: structuredCloneSafe(state.formula),
+    tool: state.tool,
     // Source undo keeps only lightweight source-facing UI state. Composition
     // vectors, uploaded backgrounds and editable professional copy have their
     // own lifecycle and must not be duplicated into as many as 80 snapshots.
     professionalSuite: {
       activeGroup: state.professionalSuite?.activeGroup || 'regaim',
-      activeMetricId: state.professionalSuite?.activeMetricId || null
+      activeMetricId: state.professionalSuite?.activeMetricId || null,
+      // This descriptor belongs to in-memory Undo/Redo only. Project export
+      // strips it so opening a saved file never starts an unfinished tool.
+      pendingMeasurement: structuredCloneSafe(state.professionalSuite?.pendingMeasurement || null)
     },
     nextId: state.nextId
   };
 }
 function cancelCalibrationAnalysis() {
   state.calibrationAnalysisToken++;
+  // The legacy region analyzer and the automatic CV engine have independent
+  // run tokens. Every lifecycle reset must invalidate both or a late promise
+  // can repopulate measurements after Undo/Clear.
+  globalThis.MEDIDAOT_AUTO_MEASURE?.cancelActiveRun?.({ render: false });
   analysisOverlay.hidden = true;
   if (state.formula.analysis?.status === 'running') state.formula.analysis.status = 'idle';
 }
@@ -505,11 +524,22 @@ function restoreSnapshot(snapshotData) {
   cancelCalibrationAnalysis();
   state.activeCalibrationRegionId = state.formula.calibration?.regionObjectId || null;
   state.nextId = snapshotData.nextId || nextAvailableId();
+  state.tool = typeof snapshotData.tool === 'string' ? snapshotData.tool : 'pan';
+  const savedPending = snapshotData.professionalSuite?.pendingMeasurement;
+  const pendingMetric = MASTER_SYSTEM.metric(savedPending?.semanticMetricId);
+  const pendingTool = savedPending?.tool || pendingMetric?.tool || null;
+  state.professionalSuite.pendingMeasurement = savedPending && pendingMetric && pendingTool === state.tool
+    ? structuredCloneSafe(savedPending)
+    : null;
   state.selectedId = null;
   state.selectedPoint = null;
   state.selectedSegment = null;
   state.letterVectorSelection = null;
   analysisOverlay.hidden = true;
+  syncToolControlState(state.tool);
+  const pendingMetricId = state.professionalSuite?.pendingMeasurement?.semanticMetricId;
+  if (pendingMetricId) ui.color.value = MASTER_SYSTEM.colorFor({ semanticMetricId: pendingMetricId });
+  else if (TOOL_COLORS[state.tool]) ui.color.value = TOOL_COLORS[state.tool];
   renderAll();
 }
 

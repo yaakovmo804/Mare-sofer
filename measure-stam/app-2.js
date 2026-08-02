@@ -185,7 +185,7 @@ function measurementResultModel(object) {
     return {
       canvasText: `רוחב ${fmt(value.xPct, 1)}% · סטייה משליש ${fmt(value.xDev, 1)}%`,
       primaryText: `רוחב ${fmt(value.xPct, 1)}%`,
-      secondaryText: `מדידת נקודה ישנה · סטייה משליש ${fmt(value.xDev, 1)}%`
+      secondaryText: `נקודה בתוך קעסטעל · סטייה משליש ${fmt(value.xDev, 1)}%`
     };
   }
 
@@ -412,7 +412,7 @@ function renderResults() {
       const value = thirdsValues(kastel, object.points[0]);
       html += `<p>מיקום לרוחב: <b>${fmt(value.xPct, 1)}%</b></p>`;
       html += `<p>סטייה מקו השליש הקרוב: <b>${fmt(value.xDev, 1)}%</b></p>`;
-      html += '<p class="result-note">זו מדידת נקודה מגרסה קודמת. חוק השלישים החדש פועל ישירות על הקעסטעל.</p>';
+      html += '<p class="result-note">הנקודה נמדדה בתוך הקעסטעל הפעיל; אפשר להזיז אותה ולראות את מיקומה היחסי ואת הסטייה מן השליש הקרוב.</p>';
     }
   }
   if (object.category) html += `<p class="result-note">קטגוריה: ${escapeHtml(categoryName(object.category))}</p>`;
@@ -1260,6 +1260,17 @@ function handleAreaPointer(imagePoint) {
   renderAll();
 }
 
+function constrainMeasurementPoint(object, pointIndex, imagePoint) {
+  if (object?.type !== 'length' || !['horizontal', 'vertical'].includes(object.axisConstraint)) {
+    return imagePoint;
+  }
+  const counterpart = object.points?.[pointIndex === 0 ? 1 : 0];
+  if (!counterpart) return imagePoint;
+  return object.axisConstraint === 'vertical'
+    ? { x: counterpart.x, y: imagePoint.y }
+    : { x: imagePoint.x, y: counterpart.y };
+}
+
 function handleFixedPointTool(type, imagePoint, count) {
   if (!ensureCompatibleDraft(type)) return;
   if (!state.draft) {
@@ -1268,7 +1279,8 @@ function handleFixedPointTool(type, imagePoint, count) {
       color: TOOL_COLORS[type],
       semanticMetricId: pending?.semanticMetricId,
       category: pending?.category,
-      formulaKey: pending?.formulaKey
+      formulaKey: pending?.formulaKey,
+      axisConstraint: pending?.axisConstraint || null
     });
     if (pending?.name) state.draft.name = pending.name;
     if (pending?.letter) state.draft.letterRole = pending.letter;
@@ -1287,7 +1299,8 @@ function handleFixedPointTool(type, imagePoint, count) {
     renderAll();
     return;
   }
-  state.draft.points.push(imagePoint);
+  const constrainedPoint = constrainMeasurementPoint(state.draft, state.draft.points.length, imagePoint);
+  state.draft.points.push(constrainedPoint);
   state.selectedPoint = { target: 'draft', index: state.draft.points.length - 1 };
   if (state.draft.points.length >= count) {
     if (type === 'gap') {
@@ -1344,5 +1357,5 @@ function handleThirdsPointer(imagePoint) {
   const object = makeObject('thirds', [imagePoint], { color: TOOL_COLORS.thirds, kastelId: kastel.id });
   state.objects.push(object);
   selectObject(object.id);
-  statusText.textContent = 'נמדד מיקום בגובה ביחס לשלישים, וברוחב ביחידות עובי קולמוס';
+  statusText.textContent = 'נמדד המיקום הרוחבי ביחס לקווי השלישים בתוך הקעסטעל';
 }

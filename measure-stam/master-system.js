@@ -37,13 +37,13 @@ globalThis.MEDIDAOT_MASTER_SYSTEM = (() => {
       id: 'widths', name: 'רוחבים', group: 'regaim', color: '#2563eb',
       description: 'בדיקת רוחב האות והלובן הפנימי ביחס למשפחת האותיות. כללי הרוחב היחיד והחריגה יוגדרו בהמשך.',
       measurementDescription: 'מסמנים שתי נקודות לרוחב הנבדק. האפליקציה שומרת את ערך הפיקסלים ומציגה אותו ביחידות עובי קולמוס כאשר קיים כיול.',
-      tool: 'length', category: 'width', operationMode: 'manual', operationLabel: 'קו ידני · ללא השוואת משפחה'
+      tool: 'length', category: 'width', axisConstraint: 'horizontal', operationMode: 'manual', operationLabel: 'קו רוחב אופקי · ללא השוואת משפחה'
     }),
     Object.freeze({
       id: 'heights', name: 'גבהים', group: 'regaim', color: '#059669',
       description: 'בדיקת גובה האות או האיבר ביחס לשורה ולמשפחת האותיות.',
-      measurementDescription: 'מסמנים שתי נקודות לאורך הגובה הנבדק. ההשוואה למשפחת אותיות תופעל רק לאחר שיוגדרו כללי המשפחה.',
-      tool: 'length', category: 'height', operationMode: 'manual', operationLabel: 'קו ידני · ללא השוואת משפחה'
+      measurementDescription: 'מסמנים שתי נקודות לאורך הגובה הנבדק. הקו ננעל לציר אנכי; ההשוואה למשפחת אותיות תופעל רק לאחר שיוגדרו כללי המשפחה.',
+      tool: 'length', category: 'height', axisConstraint: 'vertical', operationMode: 'manual', operationLabel: 'קו גובה אנכי · ללא השוואת משפחה'
     }),
     Object.freeze({
       id: 'nib', name: 'עובי קולמוס', group: 'regaim', color: '#7c3aed',

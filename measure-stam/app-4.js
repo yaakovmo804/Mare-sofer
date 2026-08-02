@@ -776,6 +776,7 @@ function registerRegionNibSample(region, valuePx, analysis) {
 
 async function analyzeCalibrationRegion(region, rollbackSnapshot = null) {
   if (!state.image || !region?.points?.length) return;
+  cancelCalibrationAnalysis();
   normalizeQuadObject(region);
   const safeRollback = structuredCloneSafe(rollbackSnapshot || captureSnapshot());
   const previousActiveRegionId = safeRollback.formula?.calibration?.regionObjectId || null;
@@ -1889,7 +1890,7 @@ async function serializeProjectV3() {
       title: captured.projectMeta.title || 'פרויקט מדידאות',
       createdAt: captured.projectMeta.createdAt,
       updatedAt: now,
-      appVersion: '2026.08.01e',
+      appVersion: '2026.08.01f',
       locale: 'he-IL'
     },
     source: {
