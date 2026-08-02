@@ -6,8 +6,8 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
-const TEST_VERSION = '20260801e';
-const TEST_CACHE_DATE = '2026-08-01e';
+const TEST_VERSION = '20260801f';
+const TEST_CACHE_DATE = '2026-08-01f';
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const appDirectory = path.resolve(testDirectory, '..');
 
@@ -189,6 +189,36 @@ function makeLassoOrganObject() {
   const object = makeIndependentOrganObject();
   object.id = 'lasso-organ-object';
   return object;
+}
+
+function makePromotableContourObject() {
+  const sourcePaths = JSON.parse(JSON.stringify(makeIndependentOrganObject().letterVector.paths));
+  return {
+    id: 'promotable-contour-object',
+    type: 'letterTemplate',
+    template: { kind: 'image-region-vector', tradition: 'custom', layoutMode: 'tight-v1' },
+    points: [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 }],
+    letterEditAnchors: true,
+    vectorDetailLevel: 'organs',
+    letterVector: {
+      schemaVersion: 3,
+      sourceKey: 'photographed-selection', letter: '', tradition: 'custom',
+      style: 'photographed-letter', slug: 'photographed-selection',
+      viewBox: [0, 0, 100, 100], weight: 1, revision: 4,
+      paths: sourcePaths,
+      composition: {
+        schemaVersion: 3,
+        mode: 'flat-source-v3',
+        basePaths: JSON.parse(JSON.stringify(sourcePaths)),
+        connectorMode: 'none'
+      },
+      handleCounts: { anchors: 8, controls: 6, total: 14 },
+      featureCoordinateSpace: 'vector-local',
+      featureAngleConvention: 'signed-clockwise-from-vertical',
+      features: [],
+      organs: []
+    }
+  };
 }
 
 function approximateInkArea(paths, cubicSteps = 18) {
@@ -831,6 +861,183 @@ test('the public vector engine and render payload advertise contour topology sch
   assert.equal(JSON.stringify(render.paths[1]), JSON.stringify(object.letterVector.organs[0].paths[0]));
   assert.equal(render.paths[2].commands.at(-1).type, 'Z', 'the junction bridge is a closed fill path');
   assert.equal(vector.stats(object).schemaVersion, 3);
+});
+
+test('one contiguous contour arc promotes with exact base and organ commands', () => {
+  const object = makePromotableContourObject();
+  const objectBefore = JSON.stringify(object);
+  const sourceBefore = JSON.stringify(object.letterVector.paths);
+  const selected = [3, 4, 5, 6].map(index => `p0:c${index}:anchor`);
+  const result = vector.promoteBaseSelectionToOrgan(object, selected);
+
+  assert.equal(result.ok, true, result.message);
+  assert.equal(result.organId, 'manual-stem-1');
+  assert.deepEqual(Array.from(result.handleIds), [0, 1, 2, 3].map(
+    index => `o:manual-stem-1:p0:c${index}:anchor`
+  ));
+  assert.equal(result.vector.revision, object.letterVector.revision + 1);
+  assert.equal(JSON.stringify(object), objectBefore, 'promotion planning must not mutate the source object');
+  assert.equal(JSON.stringify(result.vector.paths), sourceBefore,
+    'the immutable photographed source contour must remain byte-identical');
+
+  assert.deepEqual(JSON.parse(JSON.stringify(result.vector.composition.basePaths)), [{
+    rule: 'evenodd',
+    commands: [
+      { type: 'M', x: 40, y: 20 },
+      { type: 'L', x: 10, y: 20 },
+      { type: 'L', x: 10, y: 10 },
+      { type: 'L', x: 90, y: 10 },
+      { type: 'L', x: 90, y: 20 },
+      { type: 'L', x: 60, y: 20 },
+      { type: 'Z' }
+    ]
+  }], 'the base must use the exact complementary arc and expand the old Z edge to L');
+  assert.deepEqual(JSON.parse(JSON.stringify(result.organ.paths)), [{
+    rule: 'nonzero',
+    commands: [
+      { type: 'M', x: 60, y: 20 },
+      { type: 'C', x1: 59, y1: 45, x2: 59, y2: 70, x: 58, y: 90 },
+      { type: 'C', x1: 53, y1: 94, x2: 47, y2: 94, x: 42, y: 90 },
+      { type: 'C', x1: 41, y1: 70, x2: 41, y2: 45, x: 40, y: 20 },
+      { type: 'Z' }
+    ]
+  }], 'promotion must preserve every selected cubic and its controls exactly');
+  assert.deepEqual(JSON.parse(JSON.stringify(result.organ.boundaryPorts.map(port => ({
+    source: port.sourceAnchorId,
+    organ: port.organAnchorId
+  })))), [{
+    source: 'p0:c5:anchor',
+    organ: 'o:manual-stem-1:p0:c0:anchor'
+  }, {
+    source: 'p0:c0:anchor',
+    organ: 'o:manual-stem-1:p0:c3:anchor'
+  }]);
+  assert.equal(result.organ.junctions.length, 1);
+  assert.equal(result.organ.boundaryPorts.length, 2);
+});
+
+test('invalid contour promotions fail atomically with specific reasons', () => {
+  const cases = [{
+    label: 'disconnected anchors',
+    ids: ['p0:c3:anchor', 'p0:c4:anchor', 'p0:c6:anchor'],
+    code: 'disjoint-selection'
+  }, {
+    label: 'whole contour',
+    ids: Array.from({ length: 8 }, (_, index) => `p0:c${index}:anchor`),
+    code: 'whole-contour'
+  }, {
+    label: 'cubic control mixed into the selection',
+    ids: ['p0:c3:anchor', 'p0:c4:anchor', 'p0:c5:control-in'],
+    code: 'not-base-anchors'
+  }];
+
+  for (const fixture of cases) {
+    const object = makePromotableContourObject();
+    const before = JSON.stringify(object);
+    const result = vector.promoteBaseSelectionToOrgan(object, fixture.ids);
+    assert.equal(result.ok, false, fixture.label);
+    assert.equal(result.code, fixture.code, fixture.label);
+    assert.equal(JSON.stringify(object), before, `${fixture.label} must leave the object byte-identical`);
+  }
+});
+
+test('a promoted organ translates without changing its source or base contours', () => {
+  const object = makePromotableContourObject();
+  const plan = vector.promoteBaseSelectionToOrgan(
+    object,
+    [3, 4, 5, 6].map(index => `p0:c${index}:anchor`)
+  );
+  assert.equal(plan.ok, true, plan.message);
+  object.letterVector = plan.vector;
+  const sourceBefore = JSON.stringify(object.letterVector.paths);
+  const baseBefore = JSON.stringify(object.letterVector.composition.basePaths);
+  const handlesBefore = new Map(vector.enumerateHandles(object, { coordinateSpace: 'image' })
+    .filter(handle => plan.handleIds.includes(handle.id))
+    .map(handle => [handle.id, handle.point]));
+  const delta = { x: 12, y: -7 };
+
+  vector.translateObjectHandles(object, plan.handleIds, delta, {
+    moveAdjacentControls: true,
+    moveInternalControlsOnly: true
+  });
+
+  assert.equal(JSON.stringify(object.letterVector.paths), sourceBefore);
+  assert.equal(JSON.stringify(object.letterVector.composition.basePaths), baseBefore);
+  const handlesAfter = new Map(vector.enumerateHandles(object, { coordinateSpace: 'image' })
+    .filter(handle => plan.handleIds.includes(handle.id))
+    .map(handle => [handle.id, handle.point]));
+  for (const id of plan.handleIds) {
+    closeTo(handlesAfter.get(id).x - handlesBefore.get(id).x, delta.x, 1e-7, `${id} x translation`);
+    closeTo(handlesAfter.get(id).y - handlesBefore.get(id).y, delta.y, 1e-7, `${id} y translation`);
+  }
+});
+
+test('a promoted organ tilts rigidly while its source and base remain unchanged', () => {
+  const object = makePromotableContourObject();
+  const plan = vector.promoteBaseSelectionToOrgan(
+    object,
+    [3, 4, 5, 6].map(index => `p0:c${index}:anchor`)
+  );
+  assert.equal(plan.ok, true, plan.message);
+  object.letterVector = plan.vector;
+  const sourceBefore = JSON.stringify(object.letterVector.paths);
+  const baseBefore = JSON.stringify(object.letterVector.composition.basePaths);
+  const before = new Map(vector.enumerateHandles(object, { coordinateSpace: 'image' })
+    .filter(handle => plan.handleIds.includes(handle.id))
+    .map(handle => [handle.id, handle.point]));
+  const distances = [];
+  for (let first = 0; first < plan.handleIds.length; first++) {
+    for (let second = first + 1; second < plan.handleIds.length; second++) {
+      const a = before.get(plan.handleIds[first]);
+      const b = before.get(plan.handleIds[second]);
+      distances.push([plan.handleIds[first], plan.handleIds[second], Math.hypot(a.x - b.x, a.y - b.y)]);
+    }
+  }
+  const currentAngle = Math.atan2(plan.tip.x - plan.root.x, plan.tip.y - plan.root.y) * 180 / Math.PI;
+
+  vector.tiltObjectHandles(object, plan.handleIds, 18, {
+    rootImage: plan.root,
+    tipImage: plan.tip,
+    pivotImage: plan.root,
+    currentAngleDeg: currentAngle,
+    moveAdjacentControls: true,
+    moveInternalControlsOnly: true,
+    transformMode: 'rotate'
+  });
+
+  assert.equal(JSON.stringify(object.letterVector.paths), sourceBefore);
+  assert.equal(JSON.stringify(object.letterVector.composition.basePaths), baseBefore);
+  const after = new Map(vector.enumerateHandles(object, { coordinateSpace: 'image' })
+    .filter(handle => plan.handleIds.includes(handle.id))
+    .map(handle => [handle.id, handle.point]));
+  for (const [firstId, secondId, expected] of distances) {
+    const first = after.get(firstId);
+    const second = after.get(secondId);
+    closeTo(Math.hypot(first.x - second.x, first.y - second.y), expected, 1e-7,
+      `${firstId}/${secondId} rigid distance`);
+  }
+  const firstPort = after.get(plan.handleIds[0]);
+  const secondPort = after.get(plan.handleIds.at(-1));
+  closeTo((firstPort.x + secondPort.x) / 2, plan.root.x, 1e-7, 'tilt pivot x');
+  closeTo((firstPort.y + secondPort.y) / 2, plan.root.y, 1e-7, 'tilt pivot y');
+});
+
+test('lasso completion promotes new organs and has no raw-base movement fallback', () => {
+  const source = readAppFile('letter-tools.js');
+  const start = source.indexOf('function finishLetterAnchorLasso(');
+  const end = source.indexOf('\nfunction runScheduledLetterWeightRender(', start);
+  assert.ok(start >= 0 && end > start, 'lasso completion source must be present');
+  const finish = source.slice(start, end);
+  assert.match(finish, /promoteBaseSelectionToOrgan\?\.\(object,\s*rawSelected/,
+    'an unmatched lasso must invoke the topology promotion API');
+  assert.match(finish, /selected\s*=\s*\[\.\.\.promoted\.handleIds\]/,
+    'successful promotion must select namespaced organ handles');
+  assert.match(finish, /if \(!promoted\.ok\)[\s\S]*?return \[\];/,
+    'failed promotion must exit before any raw group can move');
+  assert.doesNotMatch(finish, /:\s*rawSelected\b/,
+    'organ-mode lasso must never fall back to translating raw base anchors');
+  assert.doesNotMatch(finish, /selected\s*=\s*rawSelected\b/,
+    'raw base anchors must not become a draggable organ selection');
 });
 
 test('saved schema v1 and v2 vectors migrate canonically to v3 without changing source contours', () => {
@@ -1755,6 +1962,29 @@ test('a rapid second interline request cancels the stale first apply', async () 
   assert.equal(harness.analysisOverlay.hidden, true);
 });
 
+test('cancelActiveRun invalidates an in-flight engine result before it can repopulate measurements', async () => {
+  const state = makeAppState(makeBetLikeRows());
+  const harness = createAppHarness(state);
+  const pending = harness.autoMeasure.runInterline();
+  const cancellationToken = harness.autoMeasure.cancelActiveRun({ render: false });
+  const staleResult = await pending;
+
+  assert.equal(cancellationToken, 2);
+  assert.equal(staleResult.stale, true);
+  assert.equal(staleResult.applied, undefined);
+  assert.equal(state.objects.length, 0, 'a late canceled result may not recreate measurements');
+  assert.equal(state.formula.analysis.status, 'idle');
+  assert.equal(state.formula.analysis.runToken, cancellationToken);
+  assert.equal(state.formula.analysis.runKind, null);
+  assert.equal(harness.analysisOverlay.hidden, true);
+  assert.equal(harness.calls.snapshots, 0);
+
+  const currentResult = await harness.autoMeasure.runInterline();
+  assert.equal(currentResult.stale, undefined);
+  assertThreeRowsAndTwoGaps(currentResult, 'run after explicit cancellation');
+  assert.equal(state.formula.analysis.runToken, 3);
+});
+
 test('photographed vector source links round-trip through stable project identifiers', () => {
   const noop = () => {};
   const element = { addEventListener: noop, showModal: noop, close: noop };
@@ -1926,7 +2156,7 @@ test('HTML, manifests, and service worker reference one complete release asset s
     assert.match(manifest.start_url, new RegExp(`(?:\\?|&)v=${TEST_VERSION}(?:&|$)`));
   }
 
-  assert.match(readAppFile('app-4.js'), /appVersion:\s*'2026\.08\.01e'/);
+  assert.match(readAppFile('app-4.js'), /appVersion:\s*'2026\.08\.01f'/);
 
   const serviceWorker = readAppFile('sw.js');
   const cacheNameMatch = serviceWorker.match(/const CACHE_NAME = '([^']+)'/);

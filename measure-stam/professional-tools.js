@@ -273,7 +273,8 @@ function armProfessionalMeasurement(metric, options = {}) {
     formulaKey: metric.formulaKey || null,
     name: options.name || metric.name,
     letter: options.letter || null,
-    tool: options.tool || metric.tool || null
+    tool: options.tool || metric.tool || null,
+    axisConstraint: options.axisConstraint || metric.axisConstraint || null
   };
   if (state.draft) {
     const draftMetricId = state.draft.semanticMetricId || null;
@@ -313,6 +314,13 @@ function activateProfessionalMetric(metricId, options = {}) {
   if (metricId === 'optical-center') {
     renderProfessionalReport(metricId);
     statusText.textContent = 'המרכז האופטי פתוח כעת להגדרת דרך המדידה; לא נקבע כלל מספרי';
+    return;
+  }
+  if (metricId === 'nib') {
+    renderProfessionalReport(metricId);
+    startAutomaticNibAnalysis({
+      missingImageMessage: 'יש להעלות צילום לפני זיהוי עובי הקולמוס; קו ידני נשאר זמין בלשונית עובי קולמוס'
+    });
     return;
   }
   if (metricId === 'roof-seat') {
@@ -598,7 +606,10 @@ function renderProfessionalReport(metricId) {
       run.className = 'btn compact primary';
       run.textContent = labelText;
       run.addEventListener('click', () => {
-        armProfessionalMeasurement(metric, { name: type === 'circle' ? 'עיגול' : 'אליפסה' });
+        armProfessionalMeasurement(metric, {
+          name: type === 'circle' ? 'עיגול' : 'אליפסה',
+          tool: type
+        });
         setTool(type);
       });
       actions.append(run);

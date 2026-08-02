@@ -1955,6 +1955,25 @@
     return token === analysisRunToken;
   }
 
+  function cancelActiveRun(options = {}) {
+    const token = ++analysisRunToken;
+    if (options.resetUi !== false) {
+      const currentState = appState();
+      if (currentState?.formula?.analysis?.status === 'running') {
+        currentState.formula.analysis = {
+          ...currentState.formula.analysis,
+          status: 'idle',
+          runToken: token,
+          runKind: null,
+          error: null
+        };
+      }
+      safeBusy(false);
+      if (options.render === true) safeRender();
+    }
+    return token;
+  }
+
   function finishAnalysisRun(token, status, error = null) {
     if (!analysisRunIsCurrent(token)) return false;
     const currentState = appState();
@@ -2613,6 +2632,7 @@
     analyzeLoadedImage,
     applyNib,
     applyInterline,
+    cancelActiveRun,
     runNib,
     runInterline,
     helpers: Object.freeze({

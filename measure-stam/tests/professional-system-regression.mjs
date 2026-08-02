@@ -32,24 +32,40 @@ function loadPointerInputRouting() {
     addEventListener(name, listener) { listeners.set(name, listener); }
   };
   class FakeElement {
-    constructor(tagName, { type = null, label = null } = {}) {
+    constructor(tagName, { type = null, label = null, parent = null, contenteditable = null } = {}) {
       this.tagName = tagName.toLowerCase();
       this.type = type;
       this.label = label;
+      this.parent = parent;
+      this.contenteditable = contenteditable;
       this.control = null;
       this.blurCount = 0;
     }
-    getAttribute(name) { return name === 'type' ? this.type : null; }
+    getAttribute(name) {
+      if (name === 'type') return this.type;
+      if (name === 'contenteditable') return this.contenteditable;
+      return null;
+    }
+    hasAttribute(name) {
+      return name === 'contenteditable' && this.contenteditable !== null;
+    }
     matches(selector) {
-      if (selector === 'input') return this.tagName === 'input';
-      if (selector === 'textarea, [contenteditable="true"]') return this.tagName === 'textarea';
-      return false;
+      return selector.split(',').some(part => {
+        const candidate = part.trim();
+        if (candidate === this.tagName) return true;
+        if (candidate === '[contenteditable="true"]') return this.contenteditable === 'true';
+        if (candidate === '[contenteditable]') return this.hasAttribute('contenteditable');
+        if (candidate === '[contenteditable]:not([contenteditable="false"])') {
+          return this.hasAttribute('contenteditable') && this.contenteditable !== 'false';
+        }
+        return false;
+      });
     }
     closest(selector) {
-      if (selector === 'textarea, [contenteditable="true"], input') {
-        return ['textarea', 'input'].includes(this.tagName) ? this : null;
+      if (selector === 'label' && this.label) return this.label;
+      for (let node = this; node; node = node.parent) {
+        if (node.matches(selector)) return node;
       }
-      if (selector === 'label') return this.tagName === 'label' ? this : this.label;
       return null;
     }
     blur() {
@@ -234,6 +250,506 @@ function loadCorrectionGeometryHelpers() {
   return context.selectedFeatureAngle;
 }
 
+function loadBoundFeatureRefreshHelper(handles) {
+  const source = read('letter-tools.js');
+  const start = source.indexOf('function refreshBoundVectorFeaturePoints');
+  const end = source.indexOf('function updateSemanticFeatureAfterHandleMove', start);
+  assert.ok(start >= 0 && end > start, 'bound feature refresh helper must remain available');
+  const engine = { enumerateHandles: () => handles };
+  const context = vm.createContext({
+    Math,
+    Map,
+    letterAsset: () => null,
+    letterVectorEngine: () => engine,
+    midpoint: (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 })
+  });
+  vm.runInContext(`${source.slice(start, end)}\nthis.refreshBoundVectorFeaturePoints = refreshBoundVectorFeaturePoints;`, context);
+  return context.refreshBoundVectorFeaturePoints;
+}
+
+function loadLetterMasterSignature() {
+  const source = read('letter-tools.js');
+  const start = source.indexOf('function letterMasterSignature');
+  const end = source.indexOf('function createLetterMaskCanvas', start);
+  assert.ok(start >= 0 && end > start, 'letter render signature helper must remain available');
+  const calls = [];
+  const engine = {
+    getRenderVector(object, options) {
+      calls.push({ object, options });
+      return { paths: object.topologyRenderPaths };
+    }
+  };
+  const context = vm.createContext({
+    Math,
+    Number,
+    letterVectorEngine: () => engine
+  });
+  vm.runInContext(`${source.slice(start, end)}\nthis.letterMasterSignature = letterMasterSignature;`, context);
+  return { letterMasterSignature: context.letterMasterSignature, calls };
+}
+
+function loadPhotographedResetHarness() {
+  const source = read('letter-tools.js');
+  const start = source.indexOf('function resetSelectedLetterRatio');
+  const end = source.indexOf('function samePhotographedSourceRegion', start);
+  assert.ok(start >= 0 && end > start, 'photographed reset helper must remain available');
+  const object = {
+    id: 71,
+    type: 'letterTemplate',
+    editTarget: 'source-region',
+    role: 'editable-source-region',
+    color: '#111111',
+    letterOpacity: 1,
+    correctionHandleIds: ['o:stem:p0:c1:anchor'],
+    points: [{ x: 5, y: 6 }, { x: 60, y: 70 }],
+    letterVector: { revision: 9, paths: [{ commands: [{ type: 'M', x: 1, y: 2 }] }] },
+    sourceOriginalPoints: [{ x: 10, y: 20 }, { x: 90, y: 120 }],
+    sourceOriginalVector: { revision: 1, paths: [{ commands: [{ type: 'M', x: 4, y: 8 }] }] },
+    sourceOverlayColor: '#2244aa'
+  };
+  const state = {
+    selectedId: object.id,
+    objects: [object],
+    letterVectorSelection: { id: object.id, handleIds: object.correctionHandleIds.slice() }
+  };
+  const calls = { snapshots: 0, renders: 0, modifications: 0 };
+  const context = vm.createContext({
+    state,
+    statusText: { textContent: '' },
+    selectedLetterTemplate: () => object,
+    isPhotographedVector: candidate => candidate === object,
+    isSourceRegionEdit: candidate => candidate.editTarget === 'source-region',
+    structuredCloneSafe: value => JSON.parse(JSON.stringify(value)),
+    snapshot: () => { calls.snapshots++; },
+    markObjectModified: () => { calls.modifications++; },
+    renderAll: () => { calls.renders++; }
+  });
+  vm.runInContext(`${source.slice(start, end)}\nthis.resetSelectedLetterRatio = resetSelectedLetterRatio;`, context);
+  return { resetSelectedLetterRatio: context.resetSelectedLetterRatio, object, state, calls, statusText: context.statusText };
+}
+
+function loadNibActivationHarness() {
+  const source = read('professional-tools.js');
+  const start = source.indexOf('function activateProfessionalMetric');
+  const end = source.indexOf('function measurementValueNib', start);
+  assert.ok(start >= 0 && end > start, 'professional metric activation must remain available');
+  const state = {
+    image: null,
+    draft: { type: 'length', semanticMetricId: 'widths' },
+    formula: { analysis: { status: 'idle' } },
+    tool: 'length'
+  };
+  const professionalSuite = {
+    activeMetricId: 'widths',
+    pendingMeasurement: { semanticMetricId: 'widths', tool: 'length' }
+  };
+  const calls = [];
+  const context = vm.createContext({
+    state,
+    professionalSuite,
+    statusText: { textContent: '' },
+    MASTER_SYSTEM: { metric: id => id === 'nib' ? { id: 'nib', name: 'עובי קולמוס' } : null },
+    switchWorkspaceMode: mode => calls.push(['workspace', mode]),
+    startAutomaticNibAnalysis: options => calls.push(['startAutomaticNibAnalysis', options]),
+    renderProfessionalReport: id => calls.push(['report', id])
+  });
+  context.globalThis = context;
+  vm.runInContext(`${source.slice(start, end)}\nthis.activateProfessionalMetric = activateProfessionalMetric;`, context);
+  return { activateProfessionalMetric: context.activateProfessionalMetric, state, professionalSuite, calls };
+}
+
+function loadSnapshotHarness(options = {}) {
+  const source = read('app-1.js');
+  const start = source.indexOf('function captureSnapshot');
+  const end = source.indexOf('function mergeProfessionalSuite', start);
+  assert.ok(start >= 0 && end > start, 'snapshot capture and restore helpers must remain available');
+  const state = {
+    objects: [{ id: 1, type: 'kastel' }],
+    formula: { analysis: { status: 'idle' }, calibration: {} },
+    tool: options.tool || 'thirds',
+    professionalSuite: {
+      activeGroup: 'regaim',
+      activeMetricId: 'thirds',
+      descriptions: {}, measurementNotes: {}, composition: {}, correctionSessions: [],
+      pendingMeasurement: options.pendingMeasurement || null
+    },
+    nextId: 2,
+    calibrationAnalysisToken: 0,
+    activeCalibrationRegionId: null,
+    selectedId: 1,
+    selectedPoint: { index: 0 },
+    selectedSegment: 0,
+    letterVectorSelection: { id: 1 }
+  };
+  const syncedTools = [];
+  const autoCancelCalls = [];
+  const context = vm.createContext({
+    state,
+    analysisOverlay: { hidden: false },
+    ui: { color: { value: '#000000' } },
+    TOOL_COLORS: { thirds: '#16a34a', length: '#2563eb', circle: '#db2777', pan: '#000000' },
+    MASTER_SYSTEM: {
+      metric(id) {
+        if (id === 'widths') return { id, tool: 'length', axisConstraint: 'horizontal' };
+        if (id === 'heights') return { id, tool: 'length', axisConstraint: 'vertical' };
+        if (id === 'thirds') return { id, tool: 'thirds' };
+        if (id === 'circle-ellipse') return { id, tool: 'ellipse' };
+        return null;
+      },
+      colorFor: () => '#16a34a'
+    },
+    structuredCloneSafe: value => JSON.parse(JSON.stringify(value)),
+    mergeFormula: value => JSON.parse(JSON.stringify(value)),
+    restoreProfessionalSuite(saved) {
+      state.professionalSuite = { ...state.professionalSuite, ...saved, pendingMeasurement: null };
+    },
+    nextAvailableId: () => 99,
+    syncToolControlState: tool => syncedTools.push(tool),
+    renderAll: () => {},
+    MEDIDAOT_AUTO_MEASURE: {
+      cancelActiveRun: options => autoCancelCalls.push(options)
+    }
+  });
+  vm.runInContext(`${source.slice(start, end)}\nthis.snapshotHelpers = { captureSnapshot, restoreSnapshot, cancelCalibrationAnalysis };`, context);
+  return { ...context.snapshotHelpers, state, syncedTools, autoCancelCalls };
+}
+
+function loadProfessionalArmHarness() {
+  const source = read('professional-tools.js');
+  const start = source.indexOf('function armProfessionalMeasurement');
+  const end = source.indexOf('function activateProfessionalMetric', start);
+  assert.ok(start >= 0 && end > start, 'professional measurement arming must remain available');
+  const state = { draft: null };
+  const professionalSuite = { pendingMeasurement: null };
+  const context = vm.createContext({ state, professionalSuite });
+  vm.runInContext(`${source.slice(start, end)}\nthis.armProfessionalMeasurement = armProfessionalMeasurement;`, context);
+  return { armProfessionalMeasurement: context.armProfessionalMeasurement, state, professionalSuite };
+}
+
+function loadProjectProfessionalMerge() {
+  const source = read('app-1.js');
+  const start = source.indexOf('function mergeProfessionalSuite');
+  const end = source.indexOf('function restoreProfessionalSuite', start);
+  assert.ok(start >= 0 && end > start, 'project professional-state merge must remain available');
+  const context = vm.createContext({
+    Number,
+    MASTER_SYSTEM: {
+      metric: id => ['widths', 'heights'].includes(id) ? { id, tool: 'length' } : null,
+      mergeDescriptions: value => ({ ...(value || {}) }),
+      mergeMeasurementNotes: value => ({ ...(value || {}) })
+    },
+    structuredCloneSafe: value => JSON.parse(JSON.stringify(value))
+  });
+  vm.runInContext(`${source.slice(start, end)}\nthis.mergeProfessionalSuite = mergeProfessionalSuite;`, context);
+  return context.mergeProfessionalSuite;
+}
+
+function loadCommitDraftHarness() {
+  const source = read('app-3.js');
+  const start = source.indexOf('function commitDraft');
+  const end = source.indexOf('function replaceCalibrationOverlays', start);
+  assert.ok(start >= 0 && end > start, 'draft commit helper must remain available');
+  const draft = {
+    id: 81, type: 'length', semanticMetricId: 'widths', axisConstraint: 'horizontal',
+    points: [{ x: 0, y: 12 }, { x: 40, y: 12 }]
+  };
+  const state = {
+    draft,
+    objects: [], draftHistory: [{}], selectedPoint: { index: 1 }, selectedSegment: 0,
+    letterVectorSelection: { id: 81 }, formula: {},
+    professionalSuite: {
+      pendingMeasurement: { semanticMetricId: 'widths', tool: 'length', axisConstraint: 'horizontal' }
+    },
+    tool: 'length'
+  };
+  const toolCalls = [];
+  const context = vm.createContext({
+    state,
+    statusText: { textContent: '' },
+    snapshot: () => {},
+    setTool: tool => { state.tool = tool; toolCalls.push(tool); },
+    syncFormulaFromObject: () => {},
+    selectObject: id => { state.selectedId = id; }
+  });
+  vm.runInContext(`${source.slice(start, end)}\nthis.commitDraft = commitDraft;`, context);
+  return { commitDraft: context.commitDraft, state, toolCalls };
+}
+
+function loadGenericToolbarHarness() {
+  const source = read('app-3.js');
+  const start = source.indexOf("document.querySelectorAll('.tool[data-tool]').forEach");
+  const end = source.indexOf("$('thirdsToggleBtn')", start);
+  assert.ok(start >= 0 && end > start, 'generic toolbar handler must remain available');
+  const listeners = new Map();
+  const button = {
+    dataset: { tool: 'length' },
+    addEventListener(name, listener) { listeners.set(name, listener); }
+  };
+  const state = {
+    draft: {
+      id: 79, type: 'length', semanticMetricId: 'widths', axisConstraint: 'horizontal',
+      points: [{ x: 0, y: 4 }]
+    },
+    professionalSuite: {
+      pendingMeasurement: { semanticMetricId: 'widths', tool: 'length', axisConstraint: 'horizontal' }
+    }
+  };
+  const toolCalls = [];
+  const cancelCalls = [];
+  const context = vm.createContext({
+    state,
+    document: { querySelectorAll: () => [button] },
+    cancelDraft() { cancelCalls.push(state.draft?.id); state.draft = null; },
+    setTool: tool => toolCalls.push(tool),
+    MEDIDAOT_PROFESSIONAL_TOOLS: { switchWorkspaceMode: () => {} }
+  });
+  context.globalThis = context;
+  vm.runInContext(source.slice(start, end), context);
+  return { state, button, click: listeners.get('click'), toolCalls, cancelCalls };
+}
+
+function loadSetToolHarness() {
+  const source = read('app-3.js');
+  const start = source.indexOf('function setTool');
+  const end = source.indexOf("document.querySelectorAll('.tool[data-tool]')", start);
+  assert.ok(start >= 0 && end > start, 'tool status helper must remain available');
+  const state = {
+    tool: 'pan', vectorizeLasso: null, letterVectorLasso: null,
+    professionalSuite: { pendingMeasurement: null }
+  };
+  const lassoButton = { classList: { remove() {} } };
+  const context = vm.createContext({
+    state,
+    ui: { color: { value: '#000000' } },
+    statusText: { textContent: '' },
+    TOOL_COLORS: { length: '#2563eb', thirds: '#16a34a', pan: '#000000' },
+    MASTER_SYSTEM: {
+      metric: id => ['widths', 'heights'].includes(id) ? { id, tool: 'length' } : null,
+      colorFor: () => '#2563eb'
+    },
+    settleDraftBeforeToolChange: () => null,
+    syncToolControlState: () => {},
+    selectedVariableName: () => 'מרווח',
+    activateFormulaTab: () => {},
+    renderAll: () => {},
+    $: () => lassoButton
+  });
+  vm.runInContext(`${source.slice(start, end)}\nthis.setTool = setTool;`, context);
+  return { setTool: context.setTool, state, statusText: context.statusText };
+}
+
+function loadProfessionalDraftTransitionHarness() {
+  const source = read('app-3.js');
+  const commitStart = source.indexOf('function commitDraft');
+  const commitEnd = source.indexOf('function replaceCalibrationOverlays', commitStart);
+  const settleStart = source.indexOf('function settleDraftBeforeToolChange');
+  const setToolStart = source.indexOf('function setTool', settleStart);
+  const setToolEnd = source.indexOf("document.querySelectorAll('.tool[data-tool]')", setToolStart);
+  assert.ok(commitStart >= 0 && commitEnd > commitStart && settleStart >= 0 &&
+    setToolStart > settleStart && setToolEnd > setToolStart,
+  'draft commit, settling and tool transition helpers must remain available');
+  const descriptor = {
+    semanticMetricId: 'widths', category: 'width', name: 'קו רוחב אופקי',
+    tool: 'length', axisConstraint: 'horizontal'
+  };
+  const state = {
+    tool: 'length',
+    draft: {
+      id: 91, type: 'length', semanticMetricId: 'widths', axisConstraint: 'horizontal',
+      points: [{ x: 5, y: 20 }, { x: 45, y: 20 }]
+    },
+    objects: [], draftHistory: [], selectedPoint: { target: 'draft', index: 1 },
+    selectedSegment: null, letterVectorSelection: null, vectorizeLasso: null,
+    letterVectorLasso: null, activePointerId: null, interactionBefore: null, dragging: null,
+    formula: { analysis: {}, selectedVariable: 'common-gap' },
+    professionalSuite: { pendingMeasurement: descriptor },
+    history: []
+  };
+  const toolCalls = [];
+  const context = vm.createContext({
+    Math,
+    state,
+    ui: { color: { value: '#000000' }, angleRef: { value: 'nearest' } },
+    statusText: { textContent: '' },
+    TOOL_COLORS: { length: '#2563eb', thirds: '#16a34a', pan: '#000000' },
+    MASTER_SYSTEM: {
+      metric: id => id === 'widths' ? { id, tool: 'length' } : null,
+      colorFor: () => '#2563eb'
+    },
+    canvas: { releasePointerCapture() {} },
+    distance: (a, b) => Math.hypot(a.x - b.x, a.y - b.y),
+    snapshot() {
+      state.history.push({
+        tool: state.tool,
+        professionalSuite: {
+          pendingMeasurement: JSON.parse(JSON.stringify(state.professionalSuite.pendingMeasurement))
+        }
+      });
+    },
+    syncFormulaFromObject: () => {},
+    selectObject: id => { state.selectedId = id; },
+    syncToolControlState: tool => toolCalls.push(tool),
+    selectedVariableName: () => 'מרווח',
+    activateFormulaTab: () => {},
+    renderAll: () => {},
+    $: () => ({ classList: { remove() {} } })
+  });
+  vm.runInContext(`
+    ${source.slice(commitStart, commitEnd)}
+    ${source.slice(settleStart, setToolEnd)}
+    this.setTool = setTool;
+  `, context);
+  return { setTool: context.setTool, state, descriptor, toolCalls, statusText: context.statusText };
+}
+
+function loadAutomaticNibStartHarness() {
+  const source = read('app-3.js');
+  const start = source.indexOf('function startAutomaticNibAnalysis');
+  const end = source.indexOf("$('analyzeBtn')", start);
+  assert.ok(start >= 0 && end > start, 'automatic nib coordinator must remain available');
+  const state = {
+    image: { width: 20, height: 20 },
+    draft: { type: 'length', semanticMetricId: 'widths' },
+    formula: { analysis: { status: 'running' } },
+    professionalSuite: {
+      pendingMeasurement: { semanticMetricId: 'widths', tool: 'length', axisConstraint: 'horizontal' }
+    },
+    calibrationAnalysisToken: 5,
+    tool: 'length'
+  };
+  const calls = [];
+  const completedTask = Promise.resolve({ valuePx: 7 });
+  const context = vm.createContext({
+    state,
+    statusText: { textContent: '' },
+    cancelDraft() { calls.push('cancelDraft'); state.draft = null; },
+    cancelCalibrationAnalysis() {
+      calls.push('cancelCalibrationAnalysis');
+      state.calibrationAnalysisToken++;
+      state.formula.analysis.status = 'idle';
+    },
+    setTool(tool) { calls.push(`setTool:${tool}`); state.tool = tool; },
+    activateFormulaTab(tab) { calls.push(`formulaTab:${tab}`); },
+    renderFormulaUI: () => {},
+    MEDIDAOT_AUTO_MEASURE: {
+      runNib(options) { calls.push(['runNib', options]); return completedTask; }
+    }
+  });
+  context.globalThis = context;
+  vm.runInContext(`${source.slice(start, end)}\nthis.startAutomaticNibAnalysis = startAutomaticNibAnalysis;`, context);
+  return { startAutomaticNibAnalysis: context.startAutomaticNibAnalysis, state, calls, completedTask };
+}
+
+function loadStandardMeasurementToolHarness() {
+  const source = read('app-3.js');
+  const start = source.indexOf('function startStandardMeasurementTool');
+  const end = source.indexOf("$('startNibBtn')", start);
+  assert.ok(start >= 0 && end > start, 'standard manual tool coordinator must remain available');
+  const descriptor = { semanticMetricId: 'balconies', tool: 'gap', formulaKey: 'balcony' };
+  const state = {
+    draft: {
+      id: 101, type: 'gap', semanticMetricId: 'balconies', formulaKey: 'balcony',
+      points: [{ x: 5, y: 5 }]
+    },
+    professionalSuite: { pendingMeasurement: descriptor }
+  };
+  const calls = [];
+  const context = vm.createContext({
+    state,
+    cancelDraft() {
+      calls.push({ name: 'cancelDraft', pendingAtCancel: state.professionalSuite.pendingMeasurement });
+      state.draft = null;
+    },
+    cancelCalibrationAnalysis: () => calls.push({ name: 'cancelCalibrationAnalysis' }),
+    setTool: tool => calls.push({ name: 'setTool', tool }),
+    MEDIDAOT_PROFESSIONAL_TOOLS: { switchWorkspaceMode: () => {} }
+  });
+  context.globalThis = context;
+  vm.runInContext(`${source.slice(start, end)}\nthis.startStandardMeasurementTool = startStandardMeasurementTool;`, context);
+  return { startStandardMeasurementTool: context.startStandardMeasurementTool, state, descriptor, calls };
+}
+
+function loadThirdsToggleHarness(kastel) {
+  const source = read('app-3.js');
+  const start = source.indexOf('function prepareKastelAction');
+  const end = source.indexOf('function detectActiveKastelStructure', start);
+  assert.ok(start >= 0 && end > start, 'thirds toggle helper must remain available');
+  const state = { objects: [kastel], tool: 'thirds' };
+  const toolCalls = [];
+  const context = vm.createContext({
+    state,
+    statusText: { textContent: '' },
+    activeKastelForAction: () => kastel,
+    setTool: tool => { state.tool = tool; toolCalls.push(tool); },
+    snapshot: () => {},
+    markObjectModified: () => {},
+    selectObject: () => {},
+    renderAll: () => {}
+  });
+  vm.runInContext(`${source.slice(start, end)}\nthis.toggleKastelThirds = toggleKastelThirds;`, context);
+  return { toggleKastelThirds: context.toggleKastelThirds, state, toolCalls, statusText: context.statusText };
+}
+
+function loadDeleteSelectedHarness(objects, selectedId) {
+  const source = read('app-3.js');
+  const start = source.indexOf('function deleteSelectedObject');
+  const end = source.indexOf('function activateFormulaTab', start);
+  assert.ok(start >= 0 && end > start, 'selected-object deletion helper must remain available');
+  const state = {
+    objects,
+    selectedId,
+    selectedPoint: null,
+    selectedSegment: null,
+    letterVectorSelection: null,
+    formula: { nibSamples: [] },
+    activeCalibrationRegionId: null
+  };
+  const withdrawn = [];
+  const context = vm.createContext({
+    state,
+    statusText: { textContent: '' },
+    snapshot: () => {},
+    isLetterTemplate: () => false,
+    withdrawNibFromKastelRoof: object => withdrawn.push(object.id),
+    renderAll: () => {}
+  });
+  vm.runInContext(`${source.slice(start, end)}\nthis.deleteSelectedObject = deleteSelectedObject;`, context);
+  return { deleteSelectedObject: context.deleteSelectedObject, state, withdrawn };
+}
+
+function loadThirdsMeasurementHarness() {
+  const source = read('app-2.js');
+  const resultStart = source.indexOf('function measurementResultModel');
+  const resultEnd = source.indexOf('function renderList', resultStart);
+  const pointerStart = source.indexOf('function handleThirdsPointer');
+  assert.ok(resultStart >= 0 && resultEnd > resultStart && pointerStart >= 0,
+    'thirds result and pointer helpers must remain available');
+  const kastel = {
+    id: 12,
+    type: 'kastel',
+    points: [{ x: 0, y: 0 }, { x: 90, y: 0 }, { x: 90, y: 90 }, { x: 0, y: 90 }]
+  };
+  const state = {
+    objects: [kastel], selectedId: kastel.id, draft: null,
+    formula: { nibPx: 9 }
+  };
+  const context = vm.createContext({
+    Math,
+    state,
+    statusText: { textContent: '' },
+    TOOL_COLORS: { thirds: '#16a34a' },
+    typeLabel: type => type,
+    fmt: value => Number(value).toFixed(1),
+    thirdsValues: () => ({ xPct: 42, xDev: 8.666 }),
+    pointInPolygon: () => true,
+    snapshot: () => {},
+    makeObject: (type, points, extra) => ({ id: 13, type, points, ...extra }),
+    selectObject: id => { state.selectedId = id; }
+  });
+  vm.runInContext(`${source.slice(resultStart, resultEnd)}\n${source.slice(pointerStart)}\nthis.thirdsHelpers = { measurementResultModel, handleThirdsPointer };`, context);
+  return { ...context.thirdsHelpers, state, kastel, statusText: context.statusText };
+}
+
 test('רגעים and אמן preserve the approved acronym structure', () => {
   const system = loadMasterSystem();
   const regaim = system.GROUPS.find(group => group.id === 'regaim');
@@ -338,6 +854,368 @@ test('correction angle rejects isotropic anchor clouds', () => {
   assert.ok(Number.isFinite(selectedFeatureAngle(vertical)));
 });
 
+test('manual organ feature refresh recognizes both exact and prefixed terminal roles', () => {
+  const handles = [
+    ['root-a', 0, 0], ['root-b', 10, 0],
+    ['terminal', 7, 100], ['terminal-left', 3, 96], ['terminal-right', 11, 104]
+  ].map(([id, x, y]) => ({ id, kind: 'anchor', point: { x, y } }));
+  const refresh = loadBoundFeatureRefreshHelper(handles);
+  const makeObject = terminalRoles => ({
+    letterVector: {
+      features: [{
+        id: 'manual-axis', type: 'stem-axis', organId: 'manual-stem',
+        root: { x: -1, y: -1 }, point: { x: -1, y: -1 }, tip: { x: -1, y: -1 }
+      }, {
+        id: 'root-a-feature', type: 'stem-landmark', role: 'root-a',
+        stemId: 'manual-axis', organId: 'manual-stem', anchorIds: ['root-a']
+      }, {
+        id: 'root-b-feature', type: 'stem-landmark', role: 'root-b',
+        stemId: 'manual-axis', organId: 'manual-stem', anchorIds: ['root-b']
+      }, ...terminalRoles.map((role, index) => ({
+        id: `terminal-${index}`, type: 'stem-landmark', role,
+        stemId: 'manual-axis', organId: 'manual-stem', anchorIds: [role]
+      })), {
+        id: 'manual-stem', type: 'stem-organ', stemId: 'manual-axis', organId: 'manual-stem',
+        anchorIds: handles.map(handle => handle.id)
+      }]
+    }
+  });
+
+  const singleTerminal = makeObject(['terminal']);
+  refresh(singleTerminal, 'manual-stem');
+  const exactAxis = singleTerminal.letterVector.features.find(feature => feature.type === 'stem-axis');
+  assert.deepEqual({ ...exactAxis.root }, { x: 5, y: 0 });
+  assert.deepEqual({ ...exactAxis.tip }, { x: 7, y: 100 },
+    'the unsuffixed terminal created for a single tip must refresh the axis');
+
+  const pairedTerminals = makeObject(['terminal-left', 'terminal-right']);
+  refresh(pairedTerminals, 'manual-stem');
+  const prefixedAxis = pairedTerminals.letterVector.features.find(feature => feature.type === 'stem-axis');
+  assert.deepEqual({ ...prefixedAxis.tip }, { x: 7, y: 100 },
+    'prefixed terminal roles must still refresh to their mean point');
+});
+
+test('weighted preview signatures hash the current topology render, not immutable source paths', () => {
+  const { letterMasterSignature, calls } = loadLetterMasterSignature();
+  const sourcePaths = [{ rule: 'evenodd', commands: [
+    { type: 'M', x: 0, y: 0 }, { type: 'L', x: 20, y: 0 }, { type: 'Z' }
+  ] }];
+  const asset = { style: 'photographed-letter', slug: 'selection' };
+  const first = {
+    letterVector: { paths: sourcePaths },
+    topologyRenderPaths: [{ rule: 'evenodd', commands: [
+      { type: 'M', x: 0, y: 0 }, { type: 'L', x: 20, y: 0 }, { type: 'Z' }
+    ] }]
+  };
+  const second = {
+    letterVector: { paths: sourcePaths },
+    topologyRenderPaths: [{ rule: 'evenodd', commands: [
+      { type: 'M', x: 0, y: 0 }, { type: 'L', x: 24, y: 4 }, { type: 'Z' }
+    ] }]
+  };
+
+  const firstSignature = letterMasterSignature(first, asset);
+  const secondSignature = letterMasterSignature(second, asset);
+  assert.notEqual(firstSignature, secondSignature,
+    'two independent-organ layouts with identical source contours need different weight caches');
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls.map(call => call.options.weight), [1, 1],
+    'the signature must be based on the neutral-weight topology render');
+});
+
+test('resetting a photographed vector clears stale correction handles and restores its source lifecycle', () => {
+  const harness = loadPhotographedResetHarness();
+  harness.resetSelectedLetterRatio();
+
+  assert.deepEqual(Array.from(harness.object.correctionHandleIds), []);
+  assert.equal(harness.state.letterVectorSelection, null);
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.object.letterVector)), harness.object.sourceOriginalVector);
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.object.points)), harness.object.sourceOriginalPoints);
+  assert.equal(harness.object.editTarget, 'overlay-copy', 'reset reveals the photograph instead of leaving a source patch');
+  assert.equal(harness.object.role, 'reference-overlay');
+  assert.equal(harness.calls.snapshots, 1);
+  assert.equal(harness.calls.modifications, 1);
+  assert.equal(harness.calls.renders, 1);
+});
+
+test('the professional nib card delegates to the shared automatic-analysis coordinator', () => {
+  const harness = loadNibActivationHarness();
+  harness.activateProfessionalMetric('nib');
+
+  const coordinatorCalls = harness.calls.filter(([name]) => name === 'startAutomaticNibAnalysis');
+  assert.equal(coordinatorCalls.length, 1);
+  assert.match(coordinatorCalls[0][1].missingImageMessage, /יש להעלות צילום/);
+  assert.ok(harness.calls.some(([name, value]) => name === 'report' && value === 'nib'));
+});
+
+test('automatic nib coordination cancels draft, pending workflow and legacy analysis before running', async () => {
+  const harness = loadAutomaticNibStartHarness();
+  const result = harness.startAutomaticNibAnalysis();
+
+  assert.equal(result, harness.completedTask);
+  assert.equal(harness.state.draft, null);
+  assert.equal(harness.state.professionalSuite.pendingMeasurement, null);
+  assert.equal(harness.state.calibrationAnalysisToken, 6);
+  assert.equal(harness.state.formula.analysis.status, 'idle');
+  assert.equal(harness.state.tool, 'pan');
+  assert.ok(harness.calls.includes('cancelDraft'));
+  assert.ok(harness.calls.includes('cancelCalibrationAnalysis'));
+  assert.ok(harness.calls.includes('setTool:pan'));
+  assert.ok(harness.calls.includes('formulaTab:nib'));
+  const runNibCall = harness.calls.find(call => Array.isArray(call) && call[0] === 'runNib');
+  assert.equal(runNibCall?.[0], 'runNib');
+  assert.equal(runNibCall?.[1]?.userInitiated, true);
+  await result;
+});
+
+test('undo snapshots restore the active tool and disabling thirds leaves a neutral pan tool', () => {
+  const snapshotHarness = loadSnapshotHarness();
+  const captured = snapshotHarness.captureSnapshot();
+  assert.equal(captured.tool, 'thirds');
+  snapshotHarness.state.tool = 'length';
+  snapshotHarness.restoreSnapshot(captured);
+  assert.equal(snapshotHarness.state.tool, 'thirds');
+  assert.deepEqual(snapshotHarness.syncedTools, ['thirds']);
+
+  const kastel = { id: 22, type: 'kastel', overlays: { thirdsVisible: true } };
+  const thirdsHarness = loadThirdsToggleHarness(kastel);
+  thirdsHarness.toggleKastelThirds();
+  assert.equal(kastel.overlays.thirdsVisible, false);
+  assert.equal(thirdsHarness.state.tool, 'pan');
+  assert.deepEqual(thirdsHarness.toolCalls, ['pan'],
+    'disabling the guide must not silently leave the point-probe tool armed');
+});
+
+test('in-memory history preserves professional width and height descriptors with their axis locks', () => {
+  for (const descriptor of [{
+    semanticMetricId: 'widths', category: 'width', name: 'קו רוחב אופקי',
+    tool: 'length', axisConstraint: 'horizontal'
+  }, {
+    semanticMetricId: 'heights', category: 'height', name: 'קו גובה אנכי',
+    tool: 'length', axisConstraint: 'vertical'
+  }]) {
+    const harness = loadSnapshotHarness({ tool: 'length', pendingMeasurement: descriptor });
+    const captured = harness.captureSnapshot();
+    assert.deepEqual(JSON.parse(JSON.stringify(captured.professionalSuite.pendingMeasurement)), descriptor);
+
+    harness.state.tool = 'pan';
+    harness.state.professionalSuite.pendingMeasurement = null;
+    harness.restoreSnapshot(captured);
+    assert.equal(harness.state.tool, 'length');
+    assert.deepEqual(JSON.parse(JSON.stringify(harness.state.professionalSuite.pendingMeasurement)), descriptor);
+    assert.equal(harness.state.professionalSuite.pendingMeasurement.axisConstraint, descriptor.axisConstraint);
+  }
+});
+
+test('professional circle arming records circle and survives compatible history restore', () => {
+  const arming = loadProfessionalArmHarness();
+  const metric = { id: 'circle-ellipse', name: 'עיגול ואליפסה', category: 'geometry', tool: 'ellipse' };
+  const descriptor = arming.armProfessionalMeasurement(metric, { name: 'עיגול', tool: 'circle' });
+  assert.equal(descriptor.tool, 'circle', 'the explicit circle choice must override the metric default ellipse');
+  assert.equal(arming.professionalSuite.pendingMeasurement.tool, 'circle');
+
+  const professional = read('professional-tools.js');
+  const circleStart = professional.indexOf("for (const [type, labelText] of [['circle'");
+  const circleEnd = professional.indexOf('appendMetricInfoButton(actions, metricId)', circleStart);
+  assert.ok(circleStart >= 0 && circleEnd > circleStart);
+  assert.match(professional.slice(circleStart, circleEnd), /armProfessionalMeasurement\(metric,[\s\S]*?tool:\s*type/);
+
+  const snapshot = loadSnapshotHarness({
+    tool: 'circle',
+    pendingMeasurement: JSON.parse(JSON.stringify(descriptor))
+  });
+  const captured = snapshot.captureSnapshot();
+  snapshot.state.tool = 'pan';
+  snapshot.state.professionalSuite.pendingMeasurement = null;
+  snapshot.restoreSnapshot(captured);
+  assert.equal(snapshot.state.tool, 'circle');
+  assert.equal(snapshot.state.professionalSuite.pendingMeasurement.tool, 'circle');
+});
+
+test('committing a professional measurement clears its descriptor and returns to pan', () => {
+  const harness = loadCommitDraftHarness();
+  const committed = harness.commitDraft('המדידה נוספה');
+
+  assert.equal(committed.semanticMetricId, 'widths');
+  assert.equal(committed.axisConstraint, 'horizontal');
+  assert.equal(harness.state.professionalSuite.pendingMeasurement, null);
+  assert.equal(harness.state.tool, 'pan');
+  assert.deepEqual(harness.toolCalls, ['pan']);
+});
+
+test('a direct generic toolbar click clears a professional descriptor even for the same primitive', () => {
+  const harness = loadGenericToolbarHarness();
+  assert.equal(harness.state.professionalSuite.pendingMeasurement.tool, 'length');
+  assert.equal(harness.state.draft.semanticMetricId, 'widths');
+  harness.click();
+  assert.equal(harness.state.draft, null,
+    'the partial constrained line must not survive beneath the generic free-length tool');
+  assert.deepEqual(harness.cancelCalls, [79]);
+  assert.equal(harness.state.professionalSuite.pendingMeasurement, null,
+    'clicking generic length after professional width must produce a free line');
+  assert.deepEqual(harness.toolCalls, ['length']);
+});
+
+test('setTool preserves a compatible professional arm and clears it on incompatible direct transitions', () => {
+  const harness = loadSetToolHarness();
+  const widthDescriptor = {
+    semanticMetricId: 'widths', tool: 'length', axisConstraint: 'horizontal'
+  };
+  harness.state.professionalSuite.pendingMeasurement = widthDescriptor;
+  harness.setTool('length');
+  assert.equal(harness.state.professionalSuite.pendingMeasurement, widthDescriptor,
+    'professional activation may arm the same primitive without being canceled by setTool');
+  assert.equal(harness.state.professionalSuite.pendingMeasurement.axisConstraint, 'horizontal');
+
+  harness.setTool('thirds');
+  assert.equal(harness.state.professionalSuite.pendingMeasurement, null,
+    'a direct thirds transition may not leak a pending width descriptor');
+
+  const inferredWidthDescriptor = {
+    semanticMetricId: 'widths', axisConstraint: 'horizontal'
+  };
+  harness.state.professionalSuite.pendingMeasurement = inferredWidthDescriptor;
+  harness.setTool('length');
+  assert.equal(harness.state.professionalSuite.pendingMeasurement, inferredWidthDescriptor,
+    'metric metadata may supply the compatible primitive when the descriptor omits tool');
+
+  harness.setTool('pan');
+  assert.equal(harness.state.professionalSuite.pendingMeasurement, null,
+    'returning to pan must disarm every unfinished professional primitive');
+});
+
+test('tool transition settles a complete professional draft before disarming its descriptor', () => {
+  const harness = loadProfessionalDraftTransitionHarness();
+  harness.setTool('thirds');
+
+  assert.equal(harness.state.objects.length, 1);
+  assert.equal(harness.state.objects[0].semanticMetricId, 'widths');
+  assert.equal(harness.state.objects[0].axisConstraint, 'horizontal');
+  assert.equal(harness.state.draft, null);
+  assert.equal(harness.state.history.length, 1, 'the committed draft must create one undo snapshot');
+  assert.deepEqual(
+    harness.state.history[0].professionalSuite.pendingMeasurement,
+    harness.descriptor,
+    'the snapshot must capture the professional descriptor before commit clears it'
+  );
+  assert.equal(harness.state.professionalSuite.pendingMeasurement, null);
+  assert.equal(harness.state.tool, 'thirds');
+  assert.deepEqual(harness.toolCalls, ['pan', 'thirds']);
+  assert.match(harness.statusText.textContent, /המדידה הקודמת הושלמה/);
+});
+
+test('manual standard-tool activation cancels a matching partial professional draft before disarming', () => {
+  const harness = loadStandardMeasurementToolHarness();
+  harness.startStandardMeasurementTool('gap');
+
+  assert.equal(harness.state.draft, null);
+  assert.equal(harness.state.professionalSuite.pendingMeasurement, null);
+  assert.deepEqual(harness.calls.map(call => call.name), ['cancelDraft', 'setTool']);
+  assert.equal(harness.calls[0].pendingAtCancel, harness.descriptor,
+    'cancelDraft must still see the professional descriptor so it can discard the matching partial geometry');
+  assert.equal(harness.calls[1].tool, 'gap');
+});
+
+test('length tool status distinguishes constrained width, constrained height and a free line', () => {
+  const harness = loadSetToolHarness();
+  harness.state.professionalSuite.pendingMeasurement = {
+    semanticMetricId: 'widths', tool: 'length', axisConstraint: 'horizontal'
+  };
+  harness.setTool('length');
+  assert.match(harness.statusText.textContent, /קו רוחב אופקי/);
+  assert.match(harness.statusText.textContent, /הגובה יישמר קבוע/);
+
+  harness.state.professionalSuite.pendingMeasurement = {
+    semanticMetricId: 'heights', tool: 'length', axisConstraint: 'vertical'
+  };
+  harness.setTool('length');
+  assert.match(harness.statusText.textContent, /קו גובה אנכי/);
+  assert.match(harness.statusText.textContent, /הרוחב יישמר קבוע/);
+
+  harness.state.professionalSuite.pendingMeasurement = null;
+  harness.setTool('length');
+  assert.equal(harness.statusText.textContent, 'אורך חופשי: סמן שתי נקודות');
+
+  harness.setTool('thirds');
+  assert.equal(harness.statusText.textContent,
+    'חוק השלישים: גע בנקודה בתוך הקעסטעל למדידת מיקומה היחסי');
+});
+
+test('every automatic nib launcher routes through the shared coordinator and region analysis cancels engine work', () => {
+  const app3 = read('app-3.js');
+  const professional = read('professional-tools.js');
+  const app4 = read('app-4.js');
+  const analyzeButton = app3.slice(app3.indexOf("$('analyzeBtn')"), app3.indexOf("$('autoNibToolBtn')"));
+  const autoTool = app3.slice(app3.indexOf("$('autoNibToolBtn')"), app3.indexOf("$('gapsPanelBtn')"));
+  const professionalNib = professional.slice(
+    professional.indexOf("if (metricId === 'nib')"),
+    professional.indexOf("if (metricId === 'roof-seat')")
+  );
+  assert.match(analyzeButton, /startAutomaticNibAnalysis\(\)/);
+  assert.match(autoTool, /startAutomaticNibAnalysis\(\)/);
+  assert.match(professionalNib, /startAutomaticNibAnalysis\(\{/);
+  for (const launcher of [analyzeButton, autoTool, professionalNib]) {
+    assert.doesNotMatch(launcher, /\.runNib\(|analyzeImage\(/,
+      'launchers may not bypass shared cancellation and state cleanup');
+  }
+
+  const regionStart = app4.indexOf('async function analyzeCalibrationRegion');
+  const regionEnd = app4.indexOf('\nasync function ', regionStart + 1);
+  const regionAnalysis = app4.slice(regionStart, regionEnd > regionStart ? regionEnd : undefined);
+  assert.match(regionAnalysis, /cancelCalibrationAnalysis\(\)/,
+    'region calibration must use the centralized lifecycle cancellation');
+  assert.ok(
+    regionAnalysis.indexOf('cancelCalibrationAnalysis()') < regionAnalysis.indexOf('++state.calibrationAnalysisToken'),
+    'region calibration must cancel engine and legacy work before beginning its new token run'
+  );
+});
+
+test('legacy calibration cancellation also invalidates the automatic engine run token', () => {
+  const harness = loadSnapshotHarness();
+  harness.state.calibrationAnalysisToken = 17;
+  harness.state.formula.analysis.status = 'running';
+  harness.cancelCalibrationAnalysis();
+
+  assert.equal(harness.state.calibrationAnalysisToken, 18);
+  assert.equal(harness.state.formula.analysis.status, 'idle');
+  assert.equal(harness.autoCancelCalls.length, 1);
+  assert.equal(harness.autoCancelCalls[0].render, false);
+});
+
+test('deleting a kastel also deletes only its linked thirds probes', () => {
+  const objects = [
+    { id: 31, type: 'kastel' },
+    { id: 32, type: 'thirds', kastelId: 31 },
+    { id: 33, type: 'thirds', kastelId: 99 },
+    { id: 34, type: 'length', points: [{ x: 0, y: 0 }, { x: 10, y: 0 }] }
+  ];
+  const harness = loadDeleteSelectedHarness(objects, 31);
+  harness.deleteSelectedObject();
+
+  assert.deepEqual(Array.from(harness.state.objects, object => object.id), [33, 34]);
+  assert.deepEqual(harness.withdrawn, [31]);
+  assert.equal(harness.state.selectedId, null);
+});
+
+test('thirds results and status describe the current horizontal probe without legacy or height claims', () => {
+  const harness = loadThirdsMeasurementHarness();
+  const result = harness.measurementResultModel({
+    id: 13, type: 'thirds', kastelId: harness.kastel.id, points: [{ x: 42, y: 55 }]
+  });
+  assert.match(result.primaryText, /רוחב/);
+  assert.match(result.secondaryText, /נקודה בתוך קעסטעל/);
+  assert.doesNotMatch(`${result.primaryText} ${result.secondaryText}`, /ישנה|גרסה קודמת|גובה|עובי קולמוס/);
+
+  harness.state.selectedId = harness.kastel.id;
+  harness.handleThirdsPointer({ x: 42, y: 55 });
+  assert.equal(harness.statusText.textContent, 'נמדד המיקום הרוחבי ביחס לקווי השלישים בתוך הקעסטעל');
+  assert.equal(harness.state.objects.at(-1).type, 'thirds');
+
+  const app2 = read('app-2.js');
+  assert.doesNotMatch(app2, /מדידת נקודה ישנה|מגרסה קודמת/);
+  assert.doesNotMatch(app2, /נמדד מיקום בגובה ביחס לשלישים, וברוחב ביחידות עובי קולמוס/);
+});
+
 test('the integrated shell exposes composition, vector levels, info and active geometry tools', () => {
   for (const filename of ['index.html', 'medidaot.html']) {
     const html = read(filename);
@@ -350,11 +1228,11 @@ test('the integrated shell exposes composition, vector levels, info and active g
     for (const tool of ['rowAlign', 'circle', 'ellipse']) {
       assert.match(html, new RegExp(`data-tool="${tool}"`));
     }
-    assert.match(html, /master-system\.js\?v=20260801e/);
-    assert.match(html, /professional-tools\.js\?v=20260801e/);
-    assert.match(html, /slant-analyzer\.js\?v=20260801e/);
+    assert.match(html, /master-system\.js\?v=20260801f/);
+    assert.match(html, /professional-tools\.js\?v=20260801f/);
+    assert.match(html, /slant-analyzer\.js\?v=20260801f/);
     assert.ok(
-      html.indexOf('slant-analyzer.js?v=20260801e') < html.indexOf('professional-tools.js?v=20260801e'),
+      html.indexOf('slant-analyzer.js?v=20260801f') < html.indexOf('professional-tools.js?v=20260801f'),
       'the analyzer must load before the professional integration'
     );
     assert.match(html, /id="compositionCanvas"[^>]*tabindex="0"/);
@@ -398,7 +1276,7 @@ test('Pencil activates menus while text-entry focus and source-region editing re
   assert.match(app4, /drawSourceEditPatches\(context, \{ exportQuality: true \}\)/);
 });
 
-test('Pencil pointer events block only text entry and close an already open text field', () => {
+test('Pencil blocks every text-entry variant while finger focus remains available', () => {
   const routing = loadPointerInputRouting();
   const makeEvent = (target, overrides = {}) => ({
     target,
@@ -413,8 +1291,6 @@ test('Pencil pointer events block only text entry and close an already open text
   });
   const firstText = new routing.FakeElement('input', { type: 'text' });
   const secondText = new routing.FakeElement('input', { type: 'number' });
-  const menuButton = new routing.FakeElement('button');
-  const slider = new routing.FakeElement('input', { type: 'range' });
 
   routing.document.activeElement = firstText;
   const penTextEvent = makeEvent(secondText);
@@ -426,10 +1302,18 @@ test('Pencil pointer events block only text entry and close an already open text
   routing.handleBlockedPenFocus(penFocus);
   assert.equal(penFocus.defaultPrevented, true, 'the focus event synthesized by Pencil is rejected');
 
-  for (const target of [menuButton, slider]) {
+  const textEntries = [
+    new routing.FakeElement('textarea'),
+    new routing.FakeElement('div', { contenteditable: 'true' }),
+    new routing.FakeElement('div', { contenteditable: '' }),
+    new routing.FakeElement('div', { contenteditable: 'plaintext-only' })
+  ];
+  for (const target of textEntries) {
     const event = makeEvent(target);
     routing.handleDocumentPointerDown(event);
-    assert.equal(event.defaultPrevented, false, 'Pencil keeps menu controls interactive');
+    assert.equal(event.defaultPrevented, true,
+      `${target.tagName} contenteditable=${String(target.contenteditable)} rejects Pencil text focus`);
+    assert.equal(event.stopped, true, 'a rejected Pencil text entry does not leak to component handlers');
   }
 
   const fingerEvent = makeEvent(secondText, { pointerType: 'touch' });
@@ -438,6 +1322,79 @@ test('Pencil pointer events block only text entry and close an already open text
   const fingerFocus = makeEvent(secondText, { pointerType: undefined });
   routing.handleBlockedPenFocus(fingerFocus);
   assert.equal(fingerFocus.defaultPrevented, false, 'finger focus is not mistaken for Scribble');
+});
+
+test('Pencil blurs an active text field but leaves every menu-control family interactive', () => {
+  const routing = loadPointerInputRouting();
+  const makeEvent = (target, path = [target]) => ({
+    target,
+    pointerType: 'pen',
+    detail: 1,
+    defaultPrevented: false,
+    stopped: false,
+    composedPath: () => path,
+    preventDefault() { this.defaultPrevented = true; },
+    stopImmediatePropagation() { this.stopped = true; }
+  });
+  const fileInput = new routing.FakeElement('input', { type: 'file' });
+  const fileLabel = new routing.FakeElement('label');
+  fileLabel.control = fileInput;
+  fileInput.label = fileLabel;
+  const controls = [
+    ['button', new routing.FakeElement('button')],
+    ['select', new routing.FakeElement('select')],
+    ['checkbox', new routing.FakeElement('input', { type: 'checkbox' })],
+    ['colour picker', new routing.FakeElement('input', { type: 'color' })],
+    ['file label', fileLabel],
+    ['range slider', new routing.FakeElement('input', { type: 'range' })],
+    ['details summary', new routing.FakeElement('summary')],
+    ['non-editable content', new routing.FakeElement('div', { contenteditable: 'false' })]
+  ];
+
+  for (const [name, target] of controls) {
+    const activeText = new routing.FakeElement('input', { type: 'text' });
+    routing.document.activeElement = activeText;
+    const path = target === fileLabel ? [fileLabel] : [target];
+    const event = makeEvent(target, path);
+    routing.handleDocumentPointerDown(event);
+    assert.equal(activeText.blurCount, 1, `${name} closes an already open text field`);
+    assert.equal(routing.document.activeElement, null, `${name} leaves no text field focused`);
+    assert.equal(event.defaultPrevented, false, `${name} keeps its Pencil default action`);
+    assert.equal(event.stopped, false, `${name} keeps its component handlers reachable`);
+  }
+});
+
+test('Pencil distinguishes a file-upload label from a text-entry label', () => {
+  const routing = loadPointerInputRouting();
+  const makeEvent = (target, path) => ({
+    target,
+    pointerType: 'pen',
+    detail: 1,
+    defaultPrevented: false,
+    stopped: false,
+    composedPath: () => path,
+    preventDefault() { this.defaultPrevented = true; },
+    stopImmediatePropagation() { this.stopped = true; }
+  });
+  const makeLabel = type => {
+    const label = new routing.FakeElement('label');
+    const input = new routing.FakeElement('input', { type, label, parent: label });
+    label.control = input;
+    const caption = new routing.FakeElement('span', { label, parent: label });
+    return { label, input, caption };
+  };
+  const file = makeLabel('file');
+  const text = makeLabel('text');
+
+  const fileEvent = makeEvent(file.caption, [file.caption, file.label]);
+  routing.handleDocumentPointerDown(fileEvent);
+  assert.equal(fileEvent.defaultPrevented, false, 'Pencil can open a file picker through its visible label');
+  assert.equal(fileEvent.stopped, false);
+
+  const textEvent = makeEvent(text.caption, [text.caption, text.label]);
+  routing.handleDocumentPointerDown(textEvent);
+  assert.equal(textEvent.defaultPrevented, true, 'Pencil cannot focus a text input through its label');
+  assert.equal(textEvent.stopped, true);
 });
 
 test('source replacement mask follows the retained vector and preserves omitted dark components', () => {
@@ -608,11 +1565,19 @@ test('slant classifications survive small ROI changes without crossing to a neig
   );
 });
 
-test('transient measurement arming is not restored or persisted as project data', () => {
+test('project restore and project serialization drop in-progress professional arming', () => {
   const app1 = read('app-1.js');
   const app4 = read('app-4.js');
-  assert.match(app1, /pendingMeasurement:\s*null/);
-  assert.doesNotMatch(app1, /pendingMeasurement:\s*saved\.pendingMeasurement/);
+  const mergeProfessionalSuite = loadProjectProfessionalMerge();
+  const restored = mergeProfessionalSuite({
+    activeMetricId: 'widths',
+    pendingMeasurement: {
+      semanticMetricId: 'widths', tool: 'length', axisConstraint: 'horizontal'
+    }
+  });
+  assert.equal(restored.pendingMeasurement, null,
+    'opening a project may not arm the saved canvas for an unfinished width line');
+  assert.match(app1, /A pending tool choice is transient UI state, never project data\.[\s\S]*?pendingMeasurement:\s*null/);
   assert.match(app4, /captured\.professionalSuite\.pendingMeasurement = null/);
 });
 
@@ -761,6 +1726,10 @@ test('four vector control levels keep a full editable source under the coarse vi
   assert.match(source, /vectorDetailLevel:\s*'structural'/);
   assert.match(source, /maximumAnchors:\s*220/);
   assert.match(source, /sampleScale = Math\.min\([\s\S]*?2,/);
+  assert.match(source, /letterVectorLevelSelect[\s\S]*?object\.letterEditAnchors = true;/,
+    'choosing structural view must expose its real contour landmarks');
+  assert.match(source, /letterEditAnchorsInput[\s\S]*?object\.letterEditAnchors = event\.target\.checked === true;/,
+    'the explicit edit toggle, not the detail level, controls handle visibility');
 });
 
 test('organ controls expose only explicit organ definitions and never invent sqrt groups', () => {
@@ -809,7 +1778,7 @@ test('organ controls expose only explicit organ definitions and never invent sqr
   assert.doesNotMatch(source, /Math\.round\(Math\.sqrt\(run\.length\)\)/);
 });
 
-test('organ-level freeform lasso selects exact full anchors instead of coarse representatives', () => {
+test('organ lasso captures exact anchors before topology validation', () => {
   const { anchorIdsInsideLasso } = loadLetterOrganHelpers();
   const handles = [
     { id: 'p0:c0:anchor', kind: 'anchor', pathIndex: 0, commandIndex: 0, point: { x: 2, y: 2 } },
