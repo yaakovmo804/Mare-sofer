@@ -962,6 +962,29 @@ function drawGapDetectionBoundaries(object) {
   ctx.restore();
 }
 
+function drawDetectedStemBody(object) {
+  if (object?.auto !== true) return;
+  const outline = object.candidateBodyOutline?.source;
+  if (!Array.isArray(outline?.leftEdge) || !Array.isArray(outline?.rightEdge) ||
+      outline.leftEdge.length < 2 || outline.rightEdge.length < 2) return;
+  const left = outline.leftEdge.map(imageToScreen);
+  const right = outline.rightEdge.map(imageToScreen);
+  ctx.save();
+  ctx.setLineDash([]);
+  ctx.lineWidth = Math.max(1.25, Math.min(2.25, (object.lineWidth || 4) * .48));
+  ctx.strokeStyle = object.color;
+  ctx.fillStyle = hexToRgba(object.color, .13);
+  ctx.globalAlpha = .92;
+  ctx.beginPath();
+  ctx.moveTo(left[0].x, left[0].y);
+  for (const point of left.slice(1)) ctx.lineTo(point.x, point.y);
+  for (const point of right.slice().reverse()) ctx.lineTo(point.x, point.y);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawObject(object, selected, draft) {
   enforceSemanticStyle(object);
   const points = object.points.map(imageToScreen);
@@ -1063,6 +1086,7 @@ function drawObject(object, selected, draft) {
     }
   } else if (object.type === 'angle') {
     if (points.length > 1) {
+      drawDetectedStemBody(object);
       drawLine(points[0], points[1]);
       drawEndCaps(points[0], points[1], object.color);
       if (resultLabelVisible) label(midpoint(points[0], points[1]), measurementResultModel(object).canvasText, object.color);

@@ -3,6 +3,12 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import test from 'node:test';
+import {
+  IRREGULAR_SLANT_EXPECTATIONS,
+  irregularFixtureRoleForRootX,
+  irregularSlantRowFixture,
+  paddedIrregularSlantFixture
+} from './slant-fixtures.mjs';
 
 const require = createRequire(import.meta.url);
 const analyzer = require('../slant-analyzer.js');
@@ -68,6 +74,46 @@ function rgbaFromGray(raster) {
     data[offset + 3] = 255;
   }
   return { width: raster.width, height: raster.height, data };
+}
+
+function assertIrregularFixtureCandidates(result) {
+  assert.equal(result.diagnostics.reason, 'ok');
+  assert.deepEqual(
+    result.candidates.map(candidate => irregularFixtureRoleForRootX(candidate.root.x)),
+    IRREGULAR_SLANT_EXPECTATIONS.map(expected => expected.id),
+    'the exact candidate set must contain only the three connected full-height thighs'
+  );
+  assert.equal(result.candidates.length, IRREGULAR_SLANT_EXPECTATIONS.length,
+    `expected only the three attached thighs; received ${result.candidates.length}`);
+  for (const [index, candidate] of result.candidates.entries()) {
+    const expected = IRREGULAR_SLANT_EXPECTATIONS[index];
+    assert.ok(Math.abs(candidate.root.x - expected.rootX) <= 6,
+      `candidate root ${candidate.root.x} is not the expected attached thigh near x=${expected.rootX}`);
+    assert.ok(Math.abs(candidate.tip.x - expected.tipX) <= 7,
+      `candidate tip ${candidate.tip.x} is not the expected attached thigh near x=${expected.tipX}`);
+    assert.ok(Math.abs(candidate.signedVerticalAngleDeg - expected.angleDeg) <= .4,
+      `expected ${expected.angleDeg}°, received ${candidate.signedVerticalAngleDeg}°`);
+    assert.equal(candidate.roofSupport.connectedToStem, true);
+    assert.equal(candidate.axisFit?.method, 'trimmed-outline-midpoints-linear-v1');
+    assert.ok(candidate.axisFit.fittedRowCount < candidate.axisFit.sampledRowCount,
+      'terminal and junction rows must be trimmed before fitting the thigh axis');
+    const outline = candidate.bodyOutline;
+    assert.equal(outline?.method, 'sampled-row-edge-envelope-v1');
+    assert.equal(outline.sampleCount, outline.roi.leftEdge.length);
+    assert.equal(outline.sampleCount, outline.roi.rightEdge.length);
+    assert.ok(outline.sampleCount <= 48);
+    for (let row = 0; row < outline.sampleCount; row++) {
+      const left = outline.roi.leftEdge[row];
+      const right = outline.roi.rightEdge[row];
+      assert.equal(left.y, right.y);
+      assert.ok(left.x <= right.x);
+      if (row) assert.ok(left.y >= outline.roi.leftEdge[row - 1].y);
+    }
+  }
+  assert.ok(result.candidates.every(candidate => Math.abs(candidate.root.x - 184) > 15),
+    'the disconnected he leg must not be promoted to a roof-attached thigh');
+  assert.ok(result.candidates.every(candidate => candidate.root.x < 330),
+    'the nearby short vav must not be promoted to a full-height thigh');
 }
 
 test('detects multiple long roof-attached stems and ignores tagin and short noise', () => {
@@ -146,6 +192,21 @@ test('accepts an ImageData-like RGBA raster with the same deterministic geometry
       angle: candidate.signedVerticalAngleDeg,
       bounds: candidate.bounds
     }))
+  );
+});
+
+test('irregular attached thighs survive page-height ROI while a disconnected he leg and short vav are rejected', () => {
+  const tight = analyzer.analyze(irregularSlantRowFixture());
+  assertIrregularFixtureCandidates(tight);
+
+  // The same ink is placed unchanged at the top of a page-height scan.
+  // Detector scale must not depend on the amount of surrounding page.
+  const padded = analyzer.analyze(paddedIrregularSlantFixture());
+  assertIrregularFixtureCandidates(padded);
+  assert.deepEqual(
+    padded.candidates.map(candidate => candidate.id),
+    tight.candidates.map(candidate => candidate.id),
+    'padding the ROI must not change candidate identity'
   );
 });
 

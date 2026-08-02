@@ -89,9 +89,9 @@ globalThis.MEDIDAOT_MASTER_SYSTEM = (() => {
     }),
     Object.freeze({
       id: 'slants-parallels', name: 'נטיות ומקבילות', group: 'aman', color: '#d97706',
-      description: 'מדידת זווית לכל ירך מסומנת והשוואת הנטיות והמקבילות בין מופעי ד׳, ה׳ ות׳.',
-      measurementDescription: 'מסמנים תחום סריקה; האפליקציה מציעה ירכות וזווית חתומה, והמשתמש מסווג כל מועמד כד׳, ה׳ או ת׳. אם הזיהוי אינו מתאים, אפשר למדוד ירך ידנית בשתי נקודות.',
-      tool: 'angle', category: 'slant', operationMode: 'assisted', operationLabel: 'סריקת תחום + סיווג אנושי'
+      description: 'זיהוי גוף הירך המחובר לגג, מדידת צירה והשוואת הזוויות והמקבילות בין מופעי ד׳, ה׳ ות׳.',
+      measurementDescription: 'לחיצה מפעילה סריקה של כל התמונה. האפליקציה מסמנת את שתי שפות גוף הירך, מתאימה ציר מרכז ומציגה זווית וכיוון. אפשר לסרוק גם תחום ממוקד ולסווג כל מועמד כד׳, ה׳, ת׳ או „לא לכלול”.',
+      tool: 'angle', category: 'slant', operationMode: 'assisted', operationLabel: 'זיהוי אוטומטי מלא + סיווג אנושי'
     }),
     Object.freeze({
       id: 'thirds', name: 'חוק השלישים', group: 'reference', color: '#16a34a',
@@ -126,8 +126,8 @@ globalThis.MEDIDAOT_MASTER_SYSTEM = (() => {
     Object.freeze({
       id: 'stems', name: 'ירכות ודפנות', group: 'reference', color: '#65a30d',
       description: 'סימון ירך או דופן לצורך בדיקת מבנה, נטייה ומקבילות.',
-      measurementDescription: 'זהו תיוג בלבד: בוחרים סימון קיים ומשייכים לו קטגוריית ירך/דופן. למדידת זווית משתמשים בכלי נטיות ומקבילות; הכרטיס אינו מפעיל כלי.',
-      tool: null, category: 'stem', operationMode: 'label-only', operationLabel: 'תיוג בלבד · למדידה השתמש בנטיות'
+      measurementDescription: 'זהו תיוג ידני לסימון קיים. לזיהוי אוטומטי של גוף הירך וזוויתו משתמשים ב„זיהוי ירכות וזוויתן” או במדד „נטיות ומקבילות”.',
+      tool: null, category: 'stem', operationMode: 'label-only', operationLabel: 'תיוג ידני · הזיהוי נמצא בנטיות'
     }),
     Object.freeze({
       id: 'reference-template', name: 'תבנית אות', group: 'reference', color: '#a16207',

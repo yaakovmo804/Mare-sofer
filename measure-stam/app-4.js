@@ -1482,7 +1482,29 @@ function exportResultLabelPoint(object) {
   }
   return null;
 }
+
+function drawDetectedStemBodyToContext(context, object) {
+  if (object?.auto !== true) return;
+  const outline = object.candidateBodyOutline?.source;
+  if (!Array.isArray(outline?.leftEdge) || !Array.isArray(outline?.rightEdge) ||
+      outline.leftEdge.length < 2 || outline.rightEdge.length < 2) return;
+  context.save();
+  context.setLineDash([]);
+  context.lineWidth = Math.max(1, (object.lineWidth || 4) * .48);
+  context.strokeStyle = object.color;
+  context.fillStyle = hexToRgba(object.color, .13);
+  context.beginPath();
+  context.moveTo(outline.leftEdge[0].x, outline.leftEdge[0].y);
+  for (const point of outline.leftEdge.slice(1)) context.lineTo(point.x, point.y);
+  for (const point of outline.rightEdge.slice().reverse()) context.lineTo(point.x, point.y);
+  context.closePath();
+  context.fill();
+  context.stroke();
+  context.restore();
+}
+
 function drawObjectToContext(context, object) {
+  if (object.type === 'slantScan' && object.fullImageAuto === true && state.selectedId !== object.id) return;
   enforceSemanticStyle(object);
   const points = object.points;
   if (!points.length) return;
@@ -1669,6 +1691,7 @@ function drawObjectToContext(context, object) {
       }
     }
   } else if (['length', 'nib', 'gap', 'angle'].includes(object.type) && points.length >= 2) {
+    if (object.type === 'angle') drawDetectedStemBodyToContext(context, object);
     if (object.type === 'gap' && object.gapDetection?.manualCorrected !== true) {
       const boundaries = [
         object.gapDetection.upperBoundary,
@@ -1890,7 +1913,7 @@ async function serializeProjectV3() {
       title: captured.projectMeta.title || 'פרויקט מדידאות',
       createdAt: captured.projectMeta.createdAt,
       updatedAt: now,
-      appVersion: '2026.08.01f',
+      appVersion: '2026.08.02a',
       locale: 'he-IL'
     },
     source: {

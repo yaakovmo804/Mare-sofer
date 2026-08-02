@@ -285,6 +285,56 @@ function armProfessionalMeasurement(metric, options = {}) {
   return next;
 }
 
+function runFullImageSlantScan() {
+  professionalSuite.activeGroup = 'aman';
+  professionalSuite.activeMetricId = 'slants-parallels';
+  switchWorkspaceMode('source');
+  $('professionalSuitePanel').hidden = false;
+  if (!state.image) {
+    renderProfessionalPanel();
+    statusText.textContent = 'יש להעלות צילום לפני זיהוי ירכות וזוויתן';
+    return null;
+  }
+  if (state.draft) cancelDraft();
+  professionalSuite.pendingMeasurement = null;
+  setTool('pan');
+  snapshot();
+  let scan = state.objects.find(object => object.type === 'slantScan' && object.fullImageAuto === true);
+  const points = [
+    { x: 0, y: 0 },
+    { x: state.image.width, y: 0 },
+    { x: state.image.width, y: state.image.height },
+    { x: 0, y: state.image.height }
+  ];
+  if (!scan) {
+    scan = makeObject('slantScan', points, {
+      name: 'זיהוי ירכות — כל התמונה',
+      semanticMetricId: 'slants-parallels',
+      category: 'slant',
+      auto: true,
+      fullImageAuto: true,
+      display: { resultLabelVisible: false }
+    });
+    scan.closed = true;
+    state.objects.push(scan);
+  } else {
+    scan.points = points;
+    scan.auto = true;
+    scan.fullImageAuto = true;
+    scan.display = { ...(scan.display || {}), resultLabelVisible: false };
+  }
+  state.selectedId = scan.id;
+  statusText.textContent = 'סורק את כל התמונה לאיתור ירכות מחוברות ולמדידת זוויתן…';
+  const analysis = analyzeSlantScan(scan);
+  const firstCandidate = state.objects.find(object =>
+    object.type === 'angle' && slantCandidateIsLinkedToScan(object, scan)
+  );
+  state.selectedId = firstCandidate?.id || null;
+  renderAll();
+  renderProfessionalPanel();
+  return analysis;
+}
+
 function activateProfessionalMetric(metricId, options = {}) {
   const metric = MASTER_SYSTEM.metric(metricId);
   if (!metric) return;
@@ -302,13 +352,10 @@ function activateProfessionalMetric(metricId, options = {}) {
       statusText.textContent = 'יש להעלות צילום לפני סריקת ירכות ונטיות';
       return;
     }
-    if (state.formula.analysis.status === 'running') {
-      statusText.textContent = 'ניתוח התמונה עדיין פועל; מיד בסיומו ניתן לסמן אזור ירכות';
-      return;
-    }
+    if (options.scanMode !== 'region') return runFullImageSlantScan();
     armProfessionalMeasurement(metric, { name: 'סריקת ירכות ונטיות', tool: 'slantScan' });
     setTool('slantScan');
-    statusText.textContent = 'גרור מסגרת סביב שורה או אזור הכולל את הירכות לבדיקה';
+    statusText.textContent = 'גרור מסגרת סביב שורה או אזור ממוקד הכולל את הירכות לבדיקה';
     return;
   }
   if (metricId === 'optical-center') {
@@ -363,8 +410,9 @@ function signedSlantAngle(object) {
 
 function formatSignedAngle(value, digits = 1) {
   if (!Number.isFinite(value)) return '—';
-  const rounded = Math.abs(value) < 10 ** (-digits) / 2 ? 0 : value;
-  return `${rounded > 0 ? '+' : ''}${fmt(rounded, digits)}°`;
+  const magnitude = Math.abs(value) < 10 ** (-digits) / 2 ? 0 : Math.abs(value);
+  if (magnitude === 0) return '0° אנכית';
+  return `${fmt(magnitude, digits)}° ${value < 0 ? 'ימינה' : 'שמאלה'}`;
 }
 
 function createMeasurementButton(label, metricId, letter) {
@@ -560,8 +608,8 @@ function renderProfessionalReport(metricId) {
       const empty = document.createElement('tr');
       const completedScan = scans.find(scan => scan.slantAnalysis?.status === 'done');
       empty.innerHTML = `<td colspan="4">${completedScan
-        ? 'לא זוהו ירכות בתחום שסומן. אפשר לסמן אזור אחר או להשתמש במדידה הידנית.'
-        : 'טרם סומנה שורה או אזור לסריקת ירכות.'}</td>`;
+        ? 'לא זוהו ירכות מחוברות בתחום שנסרק. אפשר לסרוק אזור ממוקד או להשתמש במדידה הידנית.'
+        : 'טרם הופעל זיהוי ירכות וזוויתן.'}</td>`;
       body.append(empty);
     }
     table.append(body);
@@ -581,18 +629,24 @@ function renderProfessionalReport(metricId) {
       const spread = signedAngles.length ? Math.max(...signedAngles) - Math.min(...signedAngles) : null;
       const summary = document.createElement('p');
       summary.className = 'microcopy';
-      summary.textContent = `חציון חתום: ${formatSignedAngle(median)} · פיזור כיווני: ${fmt(spread, 1)}°. כל מופע נשמר בנפרד; סימנים מנוגדים אינם נחשבים מקבילים.`;
+      summary.textContent = `חציון כיווני: ${formatSignedAngle(median)} · פיזור כיווני: ${fmt(spread, 1)}°. כל מופע נשמר בנפרד; כיוונים מנוגדים אינם נחשבים מקבילים.`;
       box.append(summary);
     }
     const actions = document.createElement('div');
     actions.className = 'professional-actions';
-    const scan = document.createElement('button');
-    scan.type = 'button';
-    scan.className = 'btn compact primary';
-    scan.textContent = scans.length ? 'סרוק שורה או אזור נוסף' : 'סמן שורה או אזור לסריקה';
-    scan.disabled = !state.image || state.formula.analysis.status === 'running';
-    scan.addEventListener('click', () => activateProfessionalMetric(metricId));
-    actions.append(scan);
+    const fullScan = document.createElement('button');
+    fullScan.type = 'button';
+    fullScan.className = 'btn compact primary';
+    fullScan.textContent = scans.some(item => item.fullImageAuto) ? 'סרוק שוב את כל התמונה' : 'זהה ירכות בכל התמונה';
+    fullScan.disabled = !state.image;
+    fullScan.addEventListener('click', runFullImageSlantScan);
+    const focusedScan = document.createElement('button');
+    focusedScan.type = 'button';
+    focusedScan.className = 'btn compact';
+    focusedScan.textContent = 'סמן אזור ממוקד';
+    focusedScan.disabled = !state.image;
+    focusedScan.addEventListener('click', () => activateProfessionalMetric(metricId, { scanMode: 'region' }));
+    actions.append(fullScan, focusedScan);
     for (const letter of ['ד', 'ה', 'ת']) actions.append(createMeasurementButton(`מדוד ירך ${letter}׳`, metricId, letter));
     appendMetricInfoButton(actions, metricId);
     box.append(actions);
@@ -1088,7 +1142,14 @@ function analyzeSlantScan(object) {
     }
     context.restore();
     const imageData = context.getImageData(0, 0, width, height);
-    const result = analyzer.analyze(imageData, { x: 0, y: 0, width, height });
+    const calibratedNibPx = Number.isFinite(+state.formula?.nibPx) && +state.formula.nibPx > 0
+      ? +state.formula.nibPx * factor
+      : null;
+    const result = analyzer.analyze(
+      imageData,
+      { x: 0, y: 0, width, height },
+      calibratedNibPx ? { strokeWidthPx: calibratedNibPx } : {}
+    );
     state.objects = state.objects.filter(candidate => !slantCandidateIsLinkedToScan(candidate, object));
     const candidateObjects = [];
     const toSourcePoint = point => ({
@@ -1105,6 +1166,20 @@ function analyzeSlantScan(object) {
       right: left + bounds.right / factor,
       bottom: top + bounds.bottom / factor
     } : null;
+    const toSourceBodyOutline = outline => {
+      const roiEdges = outline?.roi;
+      if (!Array.isArray(roiEdges?.leftEdge) || !Array.isArray(roiEdges?.rightEdge)) return null;
+      return {
+        method: outline.method || 'sampled-row-edge-envelope-v1',
+        detectedRowCount: outline.detectedRowCount || roiEdges.leftEdge.length,
+        sampleCount: outline.sampleCount || roiEdges.leftEdge.length,
+        roi: structuredCloneSafe(roiEdges),
+        source: {
+          leftEdge: roiEdges.leftEdge.map(toSourcePoint),
+          rightEdge: roiEdges.rightEdge.map(toSourcePoint)
+        }
+      };
+    };
     for (const [index, candidate] of (result.candidates || []).entries()) {
       const sourceRoot = toSourcePoint(candidate.roiRoot);
       const sourceTip = toSourcePoint(candidate.roiTip);
@@ -1143,6 +1218,8 @@ function analyzeSlantScan(object) {
         candidateBounds: sourceBounds,
         candidateStrokeWidthPx: Number.isFinite(+candidate.strokeWidthPx) ? +candidate.strokeWidthPx / factor : null,
         candidateLengthPx: Number.isFinite(+candidate.lengthPx) ? +candidate.lengthPx / factor : null,
+        candidateAxisFit: structuredCloneSafe(candidate.axisFit || null),
+        candidateBodyOutline: toSourceBodyOutline(candidate.bodyOutline),
         candidateRoofSupport: candidate.roofSupport?.found ? {
           ...structuredCloneSafe(candidate.roofSupport),
           sourceY: top + candidate.roofSupport.roiY / factor,
@@ -1197,6 +1274,7 @@ function analyzeSlantScan(object) {
 
 function drawSlantScanObject(context, object, { selected, draft, points }) {
   if (!Array.isArray(points) || points.length !== 4) return;
+  if (object.fullImageAuto === true && !selected && !draft) return;
   context.save();
   context.strokeStyle = semanticColorForObject(object, MASTER_SYSTEM.colorFor({ semanticMetricId: 'slants-parallels' }));
   context.lineWidth = Math.max(selected ? 3.5 : 2.5, object.lineWidth || 3);
@@ -1813,6 +1891,7 @@ $('professionalMenuBtn').addEventListener('click', () => {
   renderProfessionalPanel();
   $('professionalSuitePanel').scrollIntoView({ block: 'start', behavior: 'smooth' });
 });
+$('autoSlantToolBtn')?.addEventListener('click', runFullImageSlantScan);
 $('closeProfessionalSuiteBtn').addEventListener('click', () => { $('professionalSuitePanel').hidden = true; });
 document.querySelectorAll('[data-master-group]').forEach(button => button.addEventListener('click', () => {
   professionalSuite.activeGroup = button.dataset.masterGroup;
@@ -1820,7 +1899,7 @@ document.querySelectorAll('[data-master-group]').forEach(button => button.addEve
   renderProfessionalPanel();
 }));
 document.querySelectorAll('[data-workspace-mode]').forEach(button => button.addEventListener('click', () => switchWorkspaceMode(button.dataset.workspaceMode)));
-for (const id of ['professionalMenuBtn', 'letterBoardBtn', 'autoNibToolBtn', 'gapsPanelBtn', 'thirdsToggleBtn', 'detectStructureBtn']) {
+for (const id of ['professionalMenuBtn', 'letterBoardBtn', 'autoNibToolBtn', 'autoSlantToolBtn', 'gapsPanelBtn', 'thirdsToggleBtn', 'detectStructureBtn']) {
   $(id)?.addEventListener('click', () => {
     if (isCompositionMode()) switchWorkspaceMode('source');
   }, { capture: true });
@@ -1872,6 +1951,7 @@ globalThis.MEDIDAOT_PROFESSIONAL_TOOLS = Object.freeze({
   resolveRowAlignmentCandidates,
   setRowCandidateClassification,
   analyzeSlantScan,
+  runFullImageSlantScan,
   setSlantCandidateClassification,
   drawSlantScanObject,
   measureRoofSeatFromActiveKastel,

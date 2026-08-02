@@ -13,7 +13,7 @@
   if (typeof module === 'object' && module.exports) module.exports = api;
   if (root) root.MEDIDAOT_SLANT_ANALYZER = api;
 })(typeof globalThis === 'object' ? globalThis : this, function createSlantAnalyzer() {
-  const VERSION = '1.0.0';
+  const VERSION = '1.1.0';
   const ALLOWED_LETTER_CLASSIFICATIONS = Object.freeze(['ד', 'ה', 'ת', 'exclude']);
 
   function clamp(value, minimum, maximum) {
@@ -261,7 +261,42 @@
     return { mask: oriented, count };
   }
 
-  function connectedComponents(mask, width, height) {
+  function connectedInkLabels(mask, width, height) {
+    const labels = new Uint32Array(mask.length);
+    const queue = new Int32Array(mask.length);
+    let componentCount = 0;
+    const neighbors = [
+      [-1, -1], [0, -1], [1, -1],
+      [-1, 0],           [1, 0],
+      [-1, 1],  [0, 1], [1, 1]
+    ];
+
+    for (let start = 0; start < mask.length; start++) {
+      if (!mask[start] || labels[start]) continue;
+      const label = ++componentCount;
+      let head = 0;
+      let tail = 0;
+      queue[tail++] = start;
+      labels[start] = label;
+      while (head < tail) {
+        const index = queue[head++];
+        const y = Math.floor(index / width);
+        const x = index - y * width;
+        for (const [dx, dy] of neighbors) {
+          const nextX = x + dx;
+          const nextY = y + dy;
+          if (nextX < 0 || nextX >= width || nextY < 0 || nextY >= height) continue;
+          const next = nextY * width + nextX;
+          if (!mask[next] || labels[next]) continue;
+          labels[next] = label;
+          queue[tail++] = next;
+        }
+      }
+    }
+    return { labels, componentCount };
+  }
+
+  function connectedComponents(mask, width, height, sourceLabels = null) {
     const visited = new Uint8Array(mask.length);
     const queue = new Int32Array(mask.length);
     const components = [];
@@ -310,12 +345,31 @@
           queue[tail++] = next;
         }
       }
-      components.push({ area, left, right, top, bottom, rows });
+      components.push({
+        area,
+        left,
+        right,
+        top,
+        bottom,
+        rows,
+        sourceComponentId: sourceLabels ? sourceLabels[start] || null : null
+      });
     }
     return components;
   }
 
-  function roofSupportFor(component, originalMask, runLengths, width, height, strokeWidth, roofMinimumRun) {
+  function roofSupportFor(
+    component,
+    originalMask,
+    originalComponentLabels,
+    runLengths,
+    width,
+    height,
+    strokeWidth,
+    roofMinimumRun
+  ) {
+    const sourceComponentId = component.sourceComponentId;
+    if (!sourceComponentId || !originalComponentLabels) return null;
     const startY = Math.max(0, Math.floor(component.top - strokeWidth * 2.5));
     const endY = Math.min(height - 1, Math.ceil(component.top + Math.max(1, strokeWidth * .5)));
     const startX = Math.max(0, Math.floor(component.left - strokeWidth * 2));
@@ -324,44 +378,101 @@
     for (let y = startY; y <= endY; y++) {
       const row = y * width;
       for (let x = startX; x <= endX; x++) {
-        const runLength = originalMask[row + x] ? runLengths[row + x] : 0;
+        const index = row + x;
+        const runLength = originalMask[index] ? runLengths[index] : 0;
         if (runLength < roofMinimumRun) continue;
+        // Spatial proximity is insufficient: a detached he leg or short vav
+        // can sit directly below a long roof.  The roof pixel must belong to
+        // the same 8-connected component of the original ink as the proposed
+        // stem, proving an actual ink path between them.
+        if (originalComponentLabels[index] !== sourceComponentId) continue;
         const distanceFromRoot = Math.abs(component.top - y);
         if (!best || runLength > best.runLength || (runLength === best.runLength && distanceFromRoot < best.distancePx)) {
-          best = { y, runLength, distancePx: distanceFromRoot };
+          best = { y, runLength, distancePx: distanceFromRoot, connectedToStem: true };
         }
       }
     }
     return best;
   }
 
-  function fitComponent(component) {
+  function fitComponent(component, strokeWidth) {
     const rowEntries = [...component.rows.entries()]
       .sort((a, b) => a[0] - b[0])
-      .map(([y, row]) => ({ y, x: row.sumX / row.count, width: row.maximumX - row.minimumX + 1 }));
+      .map(([y, row]) => ({
+        y,
+        // The geometric axis lies midway between the two outline edges.  A
+        // mass centroid drifts toward ink burrs and asymmetric filled pixels.
+        x: (row.minimumX + row.maximumX) / 2,
+        width: row.maximumX - row.minimumX + 1,
+        leftX: row.minimumX,
+        rightX: row.maximumX
+      }));
     if (rowEntries.length < 2) return null;
-    const meanY = rowEntries.reduce((sum, row) => sum + row.y, 0) / rowEntries.length;
-    const meanX = rowEntries.reduce((sum, row) => sum + row.x, 0) / rowEntries.length;
+    const maximumTrim = Math.max(0, Math.floor((rowEntries.length - 2) / 2));
+    const endpointTrim = Math.min(
+      maximumTrim,
+      Math.max(1, Math.round(Math.min(strokeWidth * .5, rowEntries.length * .1)))
+    );
+    const fitRows = endpointTrim
+      ? rowEntries.slice(endpointTrim, rowEntries.length - endpointTrim)
+      : rowEntries;
+    const meanY = fitRows.reduce((sum, row) => sum + row.y, 0) / fitRows.length;
+    const meanX = fitRows.reduce((sum, row) => sum + row.x, 0) / fitRows.length;
     let covariance = 0;
     let varianceY = 0;
-    for (const row of rowEntries) {
+    for (const row of fitRows) {
       covariance += (row.y - meanY) * (row.x - meanX);
       varianceY += (row.y - meanY) ** 2;
     }
     const slope = varianceY > 0 ? covariance / varianceY : 0;
     const intercept = meanX - slope * meanY;
     let residualSquared = 0;
-    for (const row of rowEntries) residualSquared += (row.x - (intercept + slope * row.y)) ** 2;
-    const residualRms = Math.sqrt(residualSquared / rowEntries.length);
+    for (const row of fitRows) residualSquared += (row.x - (intercept + slope * row.y)) ** 2;
+    const residualRms = Math.sqrt(residualSquared / fitRows.length);
     const root = { x: intercept + slope * component.top, y: component.top };
     const tip = { x: intercept + slope * component.bottom, y: component.bottom };
     return {
       rows: rowEntries,
       slope,
       residualRms,
-      medianRowWidth: median(rowEntries.map(row => row.width)) || 1,
+      medianRowWidth: median(fitRows.map(row => row.width)) || 1,
+      axisFit: {
+        method: 'trimmed-outline-midpoints-linear-v1',
+        sampledRowCount: rowEntries.length,
+        fittedRowCount: fitRows.length,
+        trimmedRowsAtEachEnd: endpointTrim
+      },
       root,
       tip
+    };
+  }
+
+  function sampledBodyOutline(rows, roi, maximumSamples = 48) {
+    if (!Array.isArray(rows) || !rows.length) return null;
+    const count = Math.max(2, Math.trunc(maximumSamples) || 48);
+    const sampleIndices = [];
+    const desired = Math.min(count, rows.length);
+    for (let index = 0; index < desired; index++) {
+      const rowIndex = desired === 1
+        ? 0
+        : Math.round(index * (rows.length - 1) / (desired - 1));
+      if (sampleIndices[sampleIndices.length - 1] !== rowIndex) sampleIndices.push(rowIndex);
+    }
+    const sampledRows = sampleIndices.map(index => rows[index]);
+    const edgePoint = (x, y, offsetX = 0, offsetY = 0) => ({
+      x: round(x + offsetX),
+      y: round(y + offsetY)
+    });
+    const edges = (offsetX, offsetY) => ({
+      leftEdge: sampledRows.map(row => edgePoint(row.leftX, row.y, offsetX, offsetY)),
+      rightEdge: sampledRows.map(row => edgePoint(row.rightX, row.y, offsetX, offsetY))
+    });
+    return {
+      method: 'sampled-row-edge-envelope-v1',
+      detectedRowCount: rows.length,
+      sampleCount: sampledRows.length,
+      roi: edges(0, 0),
+      source: edges(roi.x, roi.y)
     };
   }
 
@@ -415,7 +526,7 @@
   }
 
   function candidateFromComponent(component, context) {
-    const fit = fitComponent(component);
+    const fit = fitComponent(component, context.strokeWidth);
     if (!fit) return null;
     const height = component.bottom - component.top + 1;
     const width = component.right - component.left + 1;
@@ -433,6 +544,7 @@
     const roofSupport = roofSupportFor(
       component,
       context.originalMask,
+      context.originalComponentLabels,
       context.runLengths,
       context.roi.width,
       context.roi.height,
@@ -447,6 +559,7 @@
     const root = coordinatePoint(fit.root, context.roi);
     const tip = coordinatePoint(fit.tip, context.roi);
     const bounds = coordinateBounds(component, context.roi);
+    const bodyOutline = sampledBodyOutline(fit.rows, context.roi);
     const signedAngle = round(angle, 4);
     return {
       id: null,
@@ -463,9 +576,12 @@
       strokeWidthPx: round(fit.medianRowWidth, 3),
       lengthPx: round(Math.hypot(fit.tip.x - fit.root.x, fit.tip.y - fit.root.y), 3),
       rowCoverage: round(rowCoverage, 4),
+      axisFit: fit.axisFit,
+      bodyOutline,
       roofSupport: roofSupport
         ? {
             found: true,
+            connectedToStem: roofSupport.connectedToStem === true,
             sourceY: context.roi.y + roofSupport.y,
             roiY: roofSupport.y,
             horizontalRunPx: roofSupport.runLength,
@@ -524,9 +640,15 @@
       };
     }
 
+    // A scan may cover one row or an entire manuscript.  Tying the minimum
+    // stem length to the ROI height makes the same letter detectable in a
+    // row-sized crop but impossible to detect in a page-sized scan.  Stem
+    // geometry is local, so its scale must follow the measured/calibrated
+    // stroke width instead of the amount of surrounding page that happened
+    // to be selected.
     const minimumStemLength = Math.max(
       6,
-      finiteNumber(options.minimumStemLengthPx, Math.max(strokeWidth * 4.5, roi.height * .18))
+      finiteNumber(options.minimumStemLengthPx, strokeWidth * 4)
     );
     const context = {
       roi,
@@ -548,7 +670,14 @@
         )
       )
     };
-    const components = connectedComponents(oriented.mask, roi.width, roi.height);
+    const originalInkTopology = connectedInkLabels(ink.mask, roi.width, roi.height);
+    context.originalComponentLabels = originalInkTopology.labels;
+    const components = connectedComponents(
+      oriented.mask,
+      roi.width,
+      roi.height,
+      originalInkTopology.labels
+    );
     const candidates = components
       .map(component => candidateFromComponent(component, context))
       .filter(Boolean)
@@ -574,6 +703,7 @@
         inkPixelCount: ink.inkPixelCount,
         orientedPixelCount: oriented.count,
         componentCount: components.length,
+        originalInkComponentCount: originalInkTopology.componentCount,
         grayMinimum: ink.minimum,
         grayMaximum: ink.maximum,
         minimumStemLengthPx: round(minimumStemLength, 3),

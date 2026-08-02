@@ -3,7 +3,7 @@
   "name": "מדידאות — מראה סופר",
   "short_name": "מדידאות",
   "description": "מדידה מקצועית לפי רגעים–אמן, עריכה וקטורית וקנבה נקייה להרכבת כתב",
-  "start_url": "./?v=20260801f",
+  "start_url": "./?v=20260802a",
   "scope": "./",
   "display": "standalone",
   "display_override": ["standalone", "fullscreen"],
