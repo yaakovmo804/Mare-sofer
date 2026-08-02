@@ -753,9 +753,10 @@ function settleDraftBeforeToolChange(nextTool) {
     return 'completed';
   }
 
-  if (['length', 'nib', 'gap', 'angle'].includes(draftType) &&
-      state.draft.points.length >= 2 &&
-      distance(state.draft.points[0], state.draft.points[1]) > 0.01) {
+  if (['length', 'nib', 'gap', 'angle', 'weightSample', 'parallelCheck'].includes(draftType) &&
+      state.draft.points.length >= (draftType === 'weightSample' ? 1 : draftType === 'parallelCheck' ? 4 : 2) &&
+      (draftType === 'weightSample' || distance(state.draft.points[0], state.draft.points[1]) > 0.01) &&
+      (draftType !== 'parallelCheck' || distance(state.draft.points[2], state.draft.points[3]) > 0.01)) {
     if (draftType === 'gap') {
       state.draft.formulaKey = state.formula.selectedVariable;
       state.draft.name = selectedVariableName();
@@ -801,9 +802,11 @@ function setTool(tool) {
     gap: `מרווחים: ${selectedVariableName()} — סמן שתי נקודות`,
     length: 'אורך חופשי: סמן שתי נקודות',
     angle: 'זווית: סמן שתי נקודות לאורך הקו',
+    weightSample: 'משקלים: גע במקום יציאת הירך מן הגג',
+    parallelCheck: 'מקבילות: סמן שתי נקודות על כל אחד משני גבולות הלובן בתוך אותה אות',
     kastel: 'קעסטעל: גרור מסגרת סביב האות',
     rowAlign: 'יישור השורה: גרור מסגרת סביב השורה ובדוק תחתיות של מושבים יציבים',
-    slantScan: 'נטיות ומקבילות: גרור מסגרת סביב שורה או אזור הכולל את הירכות',
+    slantScan: 'נטיות: גרור מסגרת סביב שורה או אזור הכולל את הירכות הימניות',
     thirds: 'חוק השלישים: גע בנקודה בתוך הקעסטעל למדידת מיקומה היחסי',
     ellipse: 'אליפסה: גרור מסגרת ליצירת אליפסה מדידה',
     circle: 'עיגול: גרור מסגרת ליצירת עיגול מדיד',
@@ -972,7 +975,7 @@ function deleteSelectedPoint() {
         : 'באזור כיול מזיזים את ארבע הפינות; אין למחוק פינה';
     return;
   }
-  const minimum = { area: 3, length: 2, angle: 2, nib: 2, gap: 2, thirds: 1 }[object.type] || 1;
+  const minimum = { area: 3, length: 2, angle: 2, nib: 2, gap: 2, thirds: 1, weightSample: 1, parallelCheck: 4 }[object.type] || 1;
   snapshot();
   if (object.points.length - 1 < minimum) {
     state.objects = state.objects.filter(item => item.id !== object.id);
@@ -1322,6 +1325,7 @@ for (const element of [ui.name, ui.color, ui.lineWidth, ui.fillAlpha, ui.fillEna
 function updateSelectedStyle(event) {
   const object = state.objects.find(item => item.id === state.selectedId);
   if (!object) return;
+  const fixedMetricId = MASTER_SYSTEM.fixedMetricIdFor?.(object) || null;
   object.name = ui.name.value.trim() || defaultName(object.type);
   object.color = ui.color.value;
   object.lineWidth = +ui.lineWidth.value;
@@ -1329,7 +1333,9 @@ function updateSelectedStyle(event) {
     object.fillAlpha = +ui.fillAlpha.value / 100;
     object.fillEnabled = ui.fillEnabled.checked;
   }
-  object.category = ui.category?.value || object.category || defaultCategory(object.type);
+  object.category = fixedMetricId
+    ? (MASTER_SYSTEM.metric(fixedMetricId)?.category || object.category)
+    : (ui.category?.value || object.category || defaultCategory(object.type));
   if (object.type === 'gap' && object.category === 'line-gap') {
     object.formulaKey = 'between-lines';
     state.formula.selectedVariable = 'between-lines';
@@ -1337,7 +1343,7 @@ function updateSelectedStyle(event) {
   }
   object.assessment = ui.assessment?.value || object.assessment || 'unclassified';
   object.note = ui.note?.value.trim() || '';
-  object.semanticMetricId = MASTER_SYSTEM.metricIdFor(event?.target === ui.category
+  object.semanticMetricId = fixedMetricId || MASTER_SYSTEM.metricIdFor(event?.target === ui.category
     ? { category: object.category, type: object.type }
     : {
         semanticMetricId: object.semanticMetricId,
@@ -1346,8 +1352,11 @@ function updateSelectedStyle(event) {
         type: object.type
       });
   enforceSemanticStyle(object);
+  if (fixedMetricId && ui.category) ui.category.value = object.category;
   ui.color.value = object.color;
-  object.auto = false;
+  // Metadata and presentation edits do not replace detector geometry.  Keep
+  // automatic inner-white boundaries attached to their sampled polyline;
+  // direct point/handle edits are the places that intentionally clear auto.
   markObjectModified(object);
   renderList();
   renderResults();

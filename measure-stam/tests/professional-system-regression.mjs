@@ -147,6 +147,131 @@ function loadExportObjectDrawer() {
   return { drawObjectToContext: context.drawObjectToContext, state };
 }
 
+function loadWeightDotDrawer() {
+  const source = read('app-1.js');
+  const start = source.indexOf('function weightSampleStep');
+  const end = source.indexOf('function drawObject', start);
+  assert.ok(start >= 0 && end > start, 'weight dot drawer must remain available');
+  const context = vm.createContext({ Math, MASTER_SYSTEM: loadMasterSystem() });
+  vm.runInContext(
+    `${source.slice(start, end)}\nthis.drawers = { drawWeightSampleDots, drawWeightSampleSelection };`,
+    context
+  );
+  return context.drawers;
+}
+
+function loadNewMetricExportHelpers() {
+  const source = read('app-4.js');
+  const start = source.indexOf('function measurementGeometry');
+  const end = source.indexOf('function createStableId', start);
+  assert.ok(start >= 0 && end > start, 'measurement export helpers must remain available');
+  const state = {
+    image: { width: 200, height: 100 },
+    formula: { nibPx: 8 },
+    objects: []
+  };
+  const context = vm.createContext({
+    Math,
+    state,
+    MASTER_SYSTEM: loadMasterSystem(),
+    structuredCloneSafe: value => JSON.parse(JSON.stringify(value)),
+    distance: (a, b) => Math.hypot(a.x - b.x, a.y - b.y)
+  });
+  vm.runInContext(
+    `${source.slice(start, end)}\nthis.helpers = { measurementGeometry, measurementMetrics };`,
+    context
+  );
+  return { ...context.helpers, state };
+}
+
+function loadNewMetricRestoreHelper() {
+  const source = read('app-4.js');
+  const start = source.indexOf('function normalizeLoadedObject');
+  const end = source.indexOf('const helpDialog', start);
+  assert.ok(start >= 0 && end > start, 'measurement restore helper must remain available');
+  const system = loadMasterSystem();
+  const context = vm.createContext({
+    Math,
+    Number,
+    Array,
+    Set,
+    Date,
+    MASTER_SYSTEM: system,
+    structuredCloneSafe: value => JSON.parse(JSON.stringify(value)),
+    distance: (a, b) => Math.hypot(a.x - b.x, a.y - b.y),
+    createStableId: prefix => `${prefix}_fixture`,
+    defaultCategory: type => type === 'weightSample' ? 'weight' : type === 'parallelCheck' ? 'parallel' : type === 'angle' ? 'angle' : 'other',
+    enforceSemanticStyle(object) {
+      const metricId = system.metricIdFor(object);
+      if (metricId) {
+        object.semanticMetricId = metricId;
+        object.color = system.colorFor({ semanticMetricId: metricId });
+      }
+      return object;
+    },
+    normalizeQuadPoints: points => points,
+    clamp: (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, value)),
+    ensureAreaSegments() {},
+    normalizeLetterTemplateObject() {}
+  });
+  vm.runInContext(`${source.slice(start, end)}\nthis.normalizeLoadedObject = normalizeLoadedObject;`, context);
+  return context.normalizeLoadedObject;
+}
+
+function loadNewFixedPointInputHarness(type, pendingMeasurement) {
+  const app2 = read('app-2.js');
+  const app3 = read('app-3.js');
+  const inputStart = app2.indexOf('function constrainMeasurementPoint');
+  const inputEnd = app2.indexOf('function handleRectPointer', inputStart);
+  const commitStart = app3.indexOf('function commitDraft');
+  const commitEnd = app3.indexOf('function replaceCalibrationOverlays', commitStart);
+  assert.ok(inputStart >= 0 && inputEnd > inputStart && commitStart >= 0 && commitEnd > commitStart,
+    'fixed-point input and commit lifecycle must remain available');
+  const state = {
+    draft: null,
+    draftHistory: [],
+    selectedPoint: null,
+    selectedSegment: null,
+    letterVectorSelection: null,
+    objects: [],
+    formula: { selectedVariable: 'common-gap' },
+    professionalSuite: { pendingMeasurement }
+  };
+  const calls = { snapshots: 0, renders: 0, selected: [], tools: [] };
+  const statusText = { textContent: '' };
+  const context = vm.createContext({
+    Math,
+    state,
+    statusText,
+    TOOL_COLORS: { weightSample: '#ca8a04', parallelCheck: '#6d28d9' },
+    ui: { angleRef: { value: 'vertical' } },
+    ensureCompatibleDraft: nextType => !state.draft || state.draft.type === nextType,
+    nearestPointIndex: () => -1,
+    imageToScreen: point => point,
+    distance: (a, b) => Math.hypot(a.x - b.x, a.y - b.y),
+    structuredCloneSafe: value => JSON.parse(JSON.stringify(value)),
+    makeObject(nextType, points, overrides) {
+      return { id: state.objects.length + 1, type: nextType, points: [...points], ...overrides };
+    },
+    snapshot() { calls.snapshots++; },
+    renderAll() { calls.renders++; },
+    selectObject(id) { state.selectedId = id; calls.selected.push(id); },
+    setTool(nextTool) { state.tool = nextTool; calls.tools.push(nextTool); },
+    syncFormulaFromObject() {},
+    ensureAreaSegments() {},
+    gapMeasurementSource: () => 'manual',
+    captureGapNormalization() {},
+    replaceCalibrationOverlays() {},
+    refreshBetweenLinesSummary() {},
+    selectedVariableName: () => 'מרווח'
+  });
+  vm.runInContext(
+    `${app3.slice(commitStart, commitEnd)}\n${app2.slice(inputStart, inputEnd)}\nthis.handleFixedPointTool = handleFixedPointTool;`,
+    context
+  );
+  return { handleFixedPointTool: context.handleFixedPointTool, state, calls, statusText, type };
+}
+
 function loadHitTestHarness(objects, selectedId = null) {
   const source = read('app-2.js');
   const start = source.indexOf('function hitTest(imagePoint)');
@@ -867,8 +992,27 @@ test('רגעים and אמן preserve the approved acronym structure', () => {
   assert.equal(aman.name, 'אמן');
   assert.deepEqual(
     Array.from(aman.entries, entry => [entry.letter, Array.from(entry.metricIds)]),
-    [['א', ['white-balance']], ['מ', ['optical-center', 'balconies']], ['ן', ['slants-parallels']]]
+    [['א', ['white-balance']], ['מ', ['optical-center', 'balconies']], ['ן', ['slants', 'parallels']]]
   );
+});
+
+test('weight steps preserve the approved 12:31–12:34 scale and Bet baseline', () => {
+  const system = loadMasterSystem();
+  assert.deepEqual(
+    Array.from(system.WEIGHT_STEPS, step => [
+      step.points, step.clockLabel, step.nibFractionApprox, step.betBaseline === true
+    ]),
+    [
+      [1, '12:31', 1 / 8, false],
+      [2, '12:32', 1 / 4, true],
+      [3, '12:33', 3 / 8, false],
+      [4, '12:34', 1 / 2, false]
+    ]
+  );
+  assert.equal(system.weightStep(0), null);
+  assert.equal(system.weightStep(5), null);
+  assert.equal(system.metric('weights').tool, 'weightSample');
+  assert.match(system.metric('weights').measurementDescription, /יציאת הירך מן הגג/);
 });
 
 test('every professional metric has one stable semantic color', () => {
@@ -936,6 +1080,173 @@ test('signed slants preserve direction instead of collapsing opposite angles', (
   const left = system.signedVerticalAngle({ x: 0, y: 0 }, { x: -10, y: 100 });
   assert.ok(right * left < 0, 'opposite slants must keep opposite signs');
   assert.ok(Math.abs(Math.abs(right) - Math.abs(left)) < 1e-9);
+  assert.equal(system.metricIdFor({ type: 'angle', category: 'angle' }), null,
+    'a generic point-to-point angle must not enter the professional slant report');
+  assert.equal(system.metricIdFor({ type: 'angle', category: 'slant', semanticMetricId: 'slants' }), 'slants');
+});
+
+test('parallelism compares two signed inner-white boundaries without inventing a verdict', () => {
+  const system = loadMasterSystem();
+  assert.equal(system.parallelDeviationDeg(6, -6), 12);
+  assert.equal(system.parallelDeviationDeg(-4.5, -4.5), 0);
+  assert.equal(system.parallelDeviationDeg(89, -89), 2);
+  assert.equal(system.parallelDeviationDeg(null, 2), null);
+  assert.equal(system.parallelSignedDifferenceDeg(6, -6), 12);
+  assert.equal(system.parallelSignedDifferenceDeg(-6, 6), -12);
+  assert.equal(system.parallelSignedDifferenceDeg(89, -89), -2);
+  assert.equal(system.parallelSignedDifferenceDeg(null, 2), null);
+  assert.notEqual(system.metric('slants').color, system.metric('parallels').color);
+  assert.equal(system.metric('parallels').tool, 'parallelCheck');
+  assert.match(system.metric('parallels').measurementDescription, /ללא קביעת תקין או חריג/);
+  assert.equal(system.metricIdFor({ type: 'parallelCheck', category: 'slant', semanticMetricId: 'slants' }), 'parallels');
+  assert.equal(system.metricIdFor({ type: 'weightSample', category: 'parallel', semanticMetricId: 'parallels' }), 'weights');
+  assert.equal(system.metricIdFor({ type: 'slantScan', category: 'parallel', semanticMetricId: 'parallels' }), 'slants');
+  assert.equal(system.fixedMetricIdFor({ type: 'angle', category: 'slant' }), null,
+    'a free angle tagged as slant must remain editable');
+  assert.equal(system.fixedMetricIdFor({ type: 'angle', category: 'slant', measurementBasis: 'inner-white-boundary' }), 'slants');
+});
+
+test('weight dots and data export preserve the selected class exactly', () => {
+  const { drawWeightSampleDots, drawWeightSampleSelection } = loadWeightDotDrawer();
+  for (let pointCount = 1; pointCount <= 4; pointCount++) {
+    const calls = { arcs: 0, fills: 0, strokes: 0 };
+    const context = {
+      save() {}, restore() {}, setLineDash() {}, beginPath() {},
+      arc() { calls.arcs++; }, fill() { calls.fills++; }, stroke() { calls.strokes++; }
+    };
+    drawWeightSampleDots(context, { x: 40, y: 50 }, {
+      weightPointCount: pointCount, color: '#ca8a04'
+    });
+    assert.deepEqual(calls, { arcs: pointCount, fills: pointCount, strokes: pointCount });
+  }
+  const selectionCalls = { ellipses: 0, fills: 0, strokes: 0 };
+  const selectionContext = {
+    save() {}, restore() {}, setLineDash() {}, beginPath() {},
+    ellipse() { selectionCalls.ellipses++; },
+    fill() { selectionCalls.fills++; },
+    stroke() { selectionCalls.strokes++; }
+  };
+  drawWeightSampleSelection(selectionContext, { x: 40, y: 50 }, {
+    weightPointCount: 1, color: '#ca8a04'
+  });
+  assert.deepEqual(selectionCalls, { ellipses: 1, fills: 0, strokes: 1 },
+    'selection must outline the sample without covering its dots');
+
+  const { measurementGeometry, measurementMetrics } = loadNewMetricExportHelpers();
+  const object = {
+    type: 'weightSample',
+    points: [{ x: 50, y: 25 }],
+    weightPointCount: 3,
+    weightLocationRole: 'stem-roof-exit'
+  };
+  const geometry = measurementGeometry(object);
+  const metrics = measurementMetrics(object);
+  assert.equal(geometry.type, 'point');
+  assert.deepEqual(JSON.parse(JSON.stringify(geometry.normalizedPoints)), [{ x: .25, y: .25 }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(metrics)), {
+    metricId: 'stem-roof-exit-weight.v1',
+    pointCount: 3,
+    clockLabel: '12:33',
+    nibFractionApprox: 3 / 8,
+    betBaseline: false,
+    locationRole: 'stem-roof-exit',
+    classificationSource: 'human'
+  });
+});
+
+test('parallel export retains both signed boundaries, their signed difference and unsigned separation', () => {
+  const { measurementGeometry, measurementMetrics } = loadNewMetricExportHelpers();
+  const object = {
+    type: 'parallelCheck',
+    points: [
+      { x: 0, y: 0 }, { x: 10, y: 100 },
+      { x: 30, y: 0 }, { x: 20, y: 100 }
+    ],
+    pairScope: 'same-letter-inner-white'
+  };
+  const geometry = measurementGeometry(object);
+  const metrics = measurementMetrics(object);
+  assert.equal(geometry.type, 'parallel-lines');
+  assert.equal(metrics.metricId, 'inner-white-boundary-parallelism.v1');
+  assert.ok(metrics.firstSignedAngleDeg * metrics.secondSignedAngleDeg < 0);
+  assert.ok(Math.abs(metrics.signedAngularDifferenceDeg + 11.421186274999286) < 1e-9);
+  assert.ok(Math.abs(metrics.angularDifferenceDeg - 11.421186274999286) < 1e-9);
+  assert.equal(metrics.pairScope, 'same-letter-inner-white');
+  assert.equal(metrics.classification, null);
+});
+
+test('project restore validates new geometries and separates old free angles from old center-axis slants', () => {
+  const normalizeLoadedObject = loadNewMetricRestoreHelper();
+  const weight = normalizeLoadedObject({
+    type: 'weightSample', points: [{ x: 12, y: 31 }], weightPointCount: 2
+  });
+  assert.equal(weight.semanticMetricId, 'weights');
+  assert.equal(weight.weightClass.clockLabel, '12:32');
+  assert.equal(weight.weightClass.nibFractionApprox, 1 / 4);
+  assert.equal(weight.weightClass.betBaseline, true);
+  assert.throws(() => normalizeLoadedObject({
+    type: 'weightSample', points: [{ x: 0, y: 0 }], weightPointCount: 5
+  }), /Invalid weight sample step/);
+
+  const parallel = normalizeLoadedObject({
+    type: 'parallelCheck',
+    points: [{ x: 0, y: 0 }, { x: 2, y: 20 }, { x: 8, y: 0 }, { x: 10, y: 20 }]
+  });
+  assert.equal(parallel.semanticMetricId, 'parallels');
+  assert.equal(parallel.pairScope, 'same-letter-inner-white');
+  assert.throws(() => normalizeLoadedObject({
+    type: 'parallelCheck',
+    points: [{ x: 0, y: 0 }, { x: 0, y: 0 }, { x: 8, y: 0 }, { x: 10, y: 20 }]
+  }), /must have length/);
+
+  const legacySlant = normalizeLoadedObject({
+    type: 'angle',
+    semanticMetricId: 'slants-parallels',
+    category: 'slant',
+    points: [{ x: 1, y: 2 }, { x: 4, y: 50 }]
+  });
+  assert.equal(legacySlant.semanticMetricId, 'slants');
+  assert.equal(legacySlant.measurementBasis, 'legacy-center-axis');
+  assert.equal(legacySlant.needsReanalysis, true);
+
+  const legacyFreeAngle = normalizeLoadedObject({
+    type: 'angle',
+    semanticMetricId: 'slants-parallels',
+    category: 'angle',
+    name: 'זווית',
+    points: [{ x: 1, y: 2 }, { x: 4, y: 50 }]
+  });
+  assert.equal(legacyFreeAngle.semanticMetricId, null);
+  assert.equal(legacyFreeAngle.category, 'angle');
+  assert.equal(legacyFreeAngle.measurementBasis, undefined);
+  assert.equal(legacyFreeAngle.needsReanalysis, undefined);
+});
+
+test('new weight and parallel input commit through the normal undo snapshot lifecycle', () => {
+  const weight = loadNewFixedPointInputHarness('weightSample', {
+    semanticMetricId: 'weights', category: 'weight', tool: 'weightSample',
+    weightPointCount: 4, weightLocationRole: 'stem-roof-exit'
+  });
+  weight.handleFixedPointTool('weightSample', { x: 31, y: 44 }, 1);
+  assert.equal(weight.calls.snapshots, 1);
+  assert.equal(weight.state.objects.length, 1);
+  assert.equal(weight.state.objects[0].weightPointCount, 4);
+  assert.equal(weight.state.objects[0].weightLocationRole, 'stem-roof-exit');
+  assert.equal(weight.state.professionalSuite.pendingMeasurement, null);
+  assert.equal(weight.state.tool, 'pan');
+
+  const parallel = loadNewFixedPointInputHarness('parallelCheck', {
+    semanticMetricId: 'parallels', category: 'parallel', tool: 'parallelCheck',
+    pairScope: 'same-letter-inner-white'
+  });
+  const points = [{ x: 0, y: 0 }, { x: 2, y: 20 }, { x: 10, y: 0 }, { x: 12, y: 20 }];
+  for (const point of points) parallel.handleFixedPointTool('parallelCheck', point, 4);
+  assert.equal(parallel.calls.snapshots, 1, 'one complete four-point record creates one undo step');
+  assert.equal(parallel.state.objects.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(parallel.state.objects[0].points)), points);
+  assert.equal(parallel.state.objects[0].pairScope, 'same-letter-inner-white');
+  assert.equal(parallel.state.professionalSuite.pendingMeasurement, null);
+  assert.equal(parallel.state.tool, 'pan');
 });
 
 test('signed angle shear lands exactly on positive, zero and crossing targets', () => {
@@ -1333,11 +1644,11 @@ test('the integrated shell exposes composition, vector levels, info and active g
     for (const tool of ['rowAlign', 'circle', 'ellipse']) {
       assert.match(html, new RegExp(`data-tool="${tool}"`));
     }
-    assert.match(html, /master-system\.js\?v=20260802a/);
-    assert.match(html, /professional-tools\.js\?v=20260802a/);
-    assert.match(html, /slant-analyzer\.js\?v=20260802a/);
+    assert.match(html, /master-system\.js\?v=20260802b/);
+    assert.match(html, /professional-tools\.js\?v=20260802b/);
+    assert.match(html, /slant-analyzer\.js\?v=20260802b/);
     assert.ok(
-      html.indexOf('slant-analyzer.js?v=20260802a') < html.indexOf('professional-tools.js?v=20260802a'),
+      html.indexOf('slant-analyzer.js?v=20260802b') < html.indexOf('professional-tools.js?v=20260802b'),
       'the analyzer must load before the professional integration'
     );
     assert.match(html, /id="compositionCanvas"[^>]*tabindex="0"/);
@@ -1347,6 +1658,8 @@ test('the integrated shell exposes composition, vector levels, info and active g
     assert.match(html, /data-vector-workflow="source-region"/);
     assert.match(html, /id="statusText"[^>]*aria-live="polite"/);
     assert.match(html, /id="metricInfoDialog"[^>]*aria-labelledby="metricInfoTitle"/);
+    assert.match(html, /<span class="tool-icon">ר״ת<\/span>/);
+    assert.doesNotMatch(html, /ר״א/);
   }
 });
 
@@ -1549,6 +1862,57 @@ test('project data persists the professional suite and accepts legacy schema 3',
   assert.match(source, /linkedKastelId/);
   assert.match(source, /sourceScanId/);
   assert.match(source, /slant-scan-roi\.v1/);
+  assert.match(source, /stem-roof-exit-weight\.v1/);
+  assert.match(source, /inner-white-boundary-slant\.v1/);
+  assert.match(source, /inner-white-boundary-parallelism\.v1/);
+  assert.match(source, /legacy-center-axis-slant\.v1/);
+  assert.match(source, /measurementBasis = 'legacy-center-axis'/);
+  assert.match(source, /needsReanalysis = true/);
+  assert.match(source, /type === 'weightSample'/);
+  assert.match(source, /type === 'parallelCheck'/);
+});
+
+test('canvas, result, export and restore all recognize weight and parallel records', () => {
+  const app1 = read('app-1.js');
+  const app2 = read('app-2.js');
+  const app3 = read('app-3.js');
+  const app4 = read('app-4.js');
+  const professional = read('professional-tools.js');
+  for (const type of ['weightSample', 'parallelCheck']) {
+    assert.match(app1, new RegExp(`type === '${type}'`));
+    assert.match(app2, new RegExp(`type === '${type}'`));
+    assert.match(app4, new RegExp(`type === '${type}'`));
+  }
+  assert.match(app3, /weightSample:[^\n]*יציאת הירך מן הגג/);
+  assert.match(app3, /parallelCheck:[^\n]*שני גבולות הלובן בתוך אותה אות/);
+  assert.match(professional, /MASTER_SYSTEM\.WEIGHT_STEPS/);
+  assert.match(professional, /step\.clockLabel/);
+  assert.match(professional, /same-letter-inner-white/);
+  assert.match(app4, /supportedGeometryTypes[^\n]*parallel-lines/);
+});
+
+test('metadata edits preserve automatic inner-white geometry', () => {
+  const source = read('app-3.js');
+  const start = source.indexOf('function updateSelectedStyle(event)');
+  const end = source.indexOf('ui.unit.addEventListener', start);
+  assert.ok(start >= 0 && end > start, 'the selected-style handler must remain available');
+  const handler = source.slice(start, end);
+  assert.doesNotMatch(handler, /object\.auto\s*=\s*false/,
+    'renaming, annotating or restyling a detection must not hide its sampled inner boundary');
+  assert.match(source, /object\.auto\s*=\s*false/,
+    'direct geometry edits must still detach a measurement from detector geometry');
+});
+
+test('fixed professional geometries keep their category, color and visible weight dots while selected', () => {
+  const app1 = read('app-1.js');
+  const app2 = read('app-2.js');
+  const app3 = read('app-3.js');
+  assert.match(app1, /object\.type === 'weightSample'[\s\S]*?drawWeightSampleSelection\(ctx, points\[0\], object\)/,
+    'selected weight samples use an outline instead of a covering point handle');
+  assert.match(app2, /fixedMetricIdFor\?\.\(selected\)[\s\S]*?ui\.category\.disabled = !selected \|\| !!fixedMetricId/,
+    'the category selector is locked for geometry-specific professional records');
+  assert.match(app3, /const fixedMetricId = MASTER_SYSTEM\.fixedMetricIdFor\?\.\(object\)/);
+  assert.match(app3, /object\.semanticMetricId = fixedMetricId \|\| MASTER_SYSTEM\.metricIdFor/);
 });
 
 test('professional information and deferred letter families are data, not hidden algorithms', () => {
@@ -1560,6 +1924,21 @@ test('professional information and deferred letter families are data, not hidden
   assert.equal(system.metric('optical-center').operationMode, 'information');
   assert.equal(system.metric('heights').operationMode, 'manual');
   assert.equal(system.metric('stems').operationMode, 'label-only');
+  const oldCombinedCopy = 'מדידה ישנה על ציר מרכז הדיו';
+  assert.equal(
+    system.mergeDescriptions({ 'slants-parallels': oldCombinedCopy }).slants,
+    system.metric('slants').description,
+    'old combined copy must not replace the new inner-white definition'
+  );
+  assert.equal(system.mergeDescriptions({ 'slants-parallels': oldCombinedCopy })['slants-parallels'], oldCombinedCopy,
+    'legacy custom copy is retained under an inert key for lossless re-save');
+  assert.equal(
+    system.mergeMeasurementNotes({ 'slants-parallels': oldCombinedCopy }).slants,
+    system.metric('slants').measurementDescription,
+    'old combined instructions must not replace the new inner-white method'
+  );
+  assert.equal(system.mergeMeasurementNotes({ 'slants-parallels': oldCombinedCopy })['slants-parallels'], oldCombinedCopy);
+  assert.equal(system.mergeDescriptions({ slants: 'נוסח מותאם חדש' }).slants, 'נוסח מותאם חדש');
   assert.deepEqual(
     Array.from(system.LETTER_FAMILIES, family => [family.id, Array.from(family.letters), family.status]),
     [
@@ -1637,6 +2016,9 @@ test('the integrated slant workflow creates exactly the attached-thigh angle obj
     id: 41,
     uid: 'real-page-scan',
     type: 'slantScan',
+    semanticMetricId: 'slants-parallels',
+    measurementBasis: 'legacy-center-axis',
+    needsReanalysis: true,
     points: [
       { x: 0, y: 0 }, { x: page.width, y: 0 },
       { x: page.width, y: page.height }, { x: 0, y: page.height }
@@ -1646,24 +2028,45 @@ test('the integrated slant workflow creates exactly the attached-thigh angle obj
   const result = harness.analyzeSlantScan(scan);
   const angles = harness.state.objects.filter(object => object.type === 'angle');
   const system = loadMasterSystem();
+  const expectedRightStems = IRREGULAR_SLANT_EXPECTATIONS.filter(expected => expected.id !== 'attached-left-slant');
 
   assert.equal(result.status, 'done');
+  assert.equal(scan.measurementBasis, 'inner-white-boundary');
+  assert.equal(scan.needsReanalysis, false);
   assert.deepEqual(
     angles.map(object => irregularFixtureRoleForRootX(object.points[0].x)),
-    IRREGULAR_SLANT_EXPECTATIONS.map(expected => expected.id),
-    'the integrated workflow must expose exactly the three connected full-height thighs'
+    expectedRightStems.map(expected => expected.id),
+    'the integrated workflow must expose only connected right-stem inner boundaries'
   );
-  assert.equal(result.candidateCount, IRREGULAR_SLANT_EXPECTATIONS.length,
-    `only the three connected thighs may become measurements; received ${result.candidateCount} (${result.diagnostics?.reason})`);
+  assert.equal(result.candidateCount, expectedRightStems.length,
+    `only connected right stems may become measurements; received ${result.candidateCount} (${result.diagnostics?.reason})`);
   assert.equal(angles.length, result.candidateCount);
   assert.ok(angles.every(object => object.sourceScanId === scan.id));
   assert.ok(angles.every(object => object.angleRef === 'vertical' && object.points.length === 2));
-  for (const [index, expected] of IRREGULAR_SLANT_EXPECTATIONS.entries()) {
+  assert.ok(angles.every(object => object.measurementBasis === 'inner-white-boundary'));
+  assert.ok(angles.every(object => object.structuralRole === 'right-thigh'));
+  for (const [index, expected] of expectedRightStems.entries()) {
     assert.ok(Math.abs(angles[index].points[0].x - expected.rootX) <= 6);
     assert.ok(Math.abs(angles[index].points[1].x - expected.tipX) <= 7);
-    assert.ok(Math.abs(system.signedVerticalAngle(...angles[index].points) - expected.angleDeg) <= .4);
+    assert.ok(Math.abs(system.signedVerticalAngle(...angles[index].points) - expected.angleDeg) <= 1.2);
     assert.equal(angles[index].candidateRoofSupport?.connectedToStem, true);
+    assert.ok(Number.isFinite(angles[index].candidateRoofSupport?.roiAttachmentX));
+    assert.ok(Number.isFinite(angles[index].candidateRoofSupport?.sourceAttachmentX));
+    assert.equal(
+      angles[index].candidateRoofSupport.sourceAttachmentX,
+      angles[index].candidateRoofSupport.roiAttachmentX,
+      'a full-frame scan must expose the same attachment in explicit ROI and source coordinates'
+    );
     assert.equal(angles[index].candidateAxisFit?.method, 'trimmed-outline-midpoints-linear-v1');
+    assert.equal(angles[index].candidateInnerBoundary?.measurementBasis, 'inner-white-boundary');
+    assert.equal(angles[index].candidateInnerBoundary?.side, 'left');
+    assert.ok(angles[index].candidateInnerBoundary?.sourcePolyline?.length >= 2);
+    assert.ok(angles[index].candidateCenterAxis?.root);
+    assert.notDeepEqual(
+      JSON.parse(JSON.stringify(angles[index].candidateCenterAxis.root)),
+      JSON.parse(JSON.stringify(angles[index].points[0])),
+      'the diagnostic center axis must stay separate from the professional inner-white boundary'
+    );
     const outline = angles[index].candidateBodyOutline;
     assert.equal(outline?.method, 'sampled-row-edge-envelope-v1');
     assert.equal(outline.sampleCount, outline.source.leftEdge.length);
@@ -1678,6 +2081,8 @@ test('the integrated slant workflow creates exactly the attached-thigh angle obj
     'the disconnected he leg must not create a visible angle object');
   assert.ok(angles.every(object => object.points[0].x < 330),
     'the nearby short vav must not create a visible angle object');
+  assert.ok(angles.every(object => Math.abs(object.points[0].x - 134) > 12),
+    'a left roof attachment must not be published as the right stem requested by נטיות');
   assert.match(harness.statusText.textContent, /זוהו/);
 });
 
@@ -1695,11 +2100,11 @@ test('the direct ירכות button creates a full-image scan and visible angle c
     { x: 0, y: 0 }, { x: page.width, y: 0 },
     { x: page.width, y: page.height }, { x: 0, y: page.height }
   ]);
-  assert.equal(angles.length, IRREGULAR_SLANT_EXPECTATIONS.length);
+  assert.equal(angles.length, IRREGULAR_SLANT_EXPECTATIONS.length - 1);
   assert.equal(harness.state.selectedId, angles[0].id);
   assert.equal(harness.state.tool, 'pan');
   assert.equal(harness.professionalSuite.activeGroup, 'aman');
-  assert.equal(harness.professionalSuite.activeMetricId, 'slants-parallels');
+  assert.equal(harness.professionalSuite.activeMetricId, 'slants');
   assert.equal(harness.panel.hidden, false);
   assert.equal(harness.calls.snapshots, 1);
   assert.ok(harness.calls.panels >= 1);
@@ -1867,7 +2272,7 @@ test('an unselected thirds probe exports its visible dot instead of an orphan la
   assert.deepEqual(calls, { arcs: 1, fills: 1 });
 });
 
-test('an automatic thigh angle exports its detected two-sided body outline before the center axis', () => {
+test('an automatic thigh angle exports its detected body and inner-white boundary', () => {
   const { drawObjectToContext } = loadExportObjectDrawer();
   const calls = { fills: 0, strokes: 0, lines: 0 };
   const context = {
@@ -1888,11 +2293,14 @@ test('an automatic thigh angle exports its detected two-sided body outline befor
         leftEdge: [{ x: 17, y: 20 }, { x: 20, y: 80 }],
         rightEdge: [{ x: 23, y: 20 }, { x: 28, y: 80 }]
       }
+    },
+    candidateInnerBoundary: {
+      sourcePolyline: [{ x: 16.5, y: 26 }, { x: 18.5, y: 52 }, { x: 20.5, y: 76 }]
     }
   });
   assert.equal(calls.fills, 1, 'the detected body envelope is filled once');
-  assert.ok(calls.strokes >= 2, 'the body envelope and center axis are both stroked');
-  assert.ok(calls.lines >= 4, 'both outline edges and the center axis are drawn');
+  assert.ok(calls.strokes >= 3, 'the body envelope, curved inner boundary and measurement chord are stroked');
+  assert.ok(calls.lines >= 6, 'both outline edges, the inner boundary and its measurement chord are drawn');
 });
 
 test('a hidden full-image slant scan frame is omitted from export unless the scan itself is selected', () => {
@@ -1956,9 +2364,10 @@ test('touch targets and professional cards disclose their actual interaction mod
   assert.match(styles, /master-metric-grid\{[^}]*minmax\(220px,1fr\)/);
   assert.match(styles, /professional-reference-info\{[^}]*minmax\(132px,1fr\)/);
   assert.match(styles, /standalone-hint button\{[^}]*min-inline-size:44px/);
-  assert.match(system.metric('slants-parallels').measurementDescription, /סריקה של כל התמונה/);
-  assert.match(system.metric('slants-parallels').measurementDescription, /תחום ממוקד/);
-  assert.match(html, /id="autoSlantToolBtn"[^>]*>[\s\S]*?זיהוי ירכות וזוויתן/);
+  assert.match(system.metric('slants').measurementDescription, /סריקה של כל התמונה/);
+  assert.match(system.metric('slants').measurementDescription, /תחום ממוקד/);
+  assert.match(system.metric('parallels').measurementDescription, /אותה אות/);
+  assert.match(html, /id="autoSlantToolBtn"[^>]*>[\s\S]*?זיהוי נטיית ירך ימין/);
   assert.match(professional, /autoSlantToolBtn[^\n]*runFullImageSlantScan/);
   for (const id of ['roofs', 'seats']) {
     assert.equal(system.metric(id).operationMode, 'label-only');

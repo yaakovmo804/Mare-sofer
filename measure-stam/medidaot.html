@@ -13,7 +13,7 @@
   <link rel="manifest" href="manifest-medidaot.webmanifest" />
   <link rel="apple-touch-icon" sizes="180x180" href="assets/medidaot-apple-touch-180.png" />
   <link rel="icon" type="image/png" sizes="32x32" href="assets/medidaot-favicon-32.png" />
-  <link rel="stylesheet" href="styles.css?v=20260802a" />
+  <link rel="stylesheet" href="styles.css?v=20260802b" />
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -44,7 +44,7 @@
       <aside class="toolbar panel" aria-label="כלי עבודה">
         <section class="tool-section professional-launch">
           <h2>השיטה המקצועית</h2>
-          <button id="professionalMenuBtn" class="tool master-tool" type="button"><span class="tool-icon">ר״א</span><span>רגעים / אמן</span></button>
+          <button id="professionalMenuBtn" class="tool master-tool" type="button"><span class="tool-icon">ר״ת</span><span>רגעים / אמן</span></button>
         </section>
         <section class="tool-section">
           <h2>ניווט ועריכה</h2>
@@ -72,7 +72,7 @@
         <section class="tool-section">
           <h2>מדידות גאומטריות</h2>
           <button class="tool" data-tool="length"><span class="tool-icon">⌁</span><span>אורך חופשי</span></button>
-          <button id="autoSlantToolBtn" class="tool" type="button"><span class="tool-icon">↘</span><span>זיהוי ירכות וזוויתן</span></button>
+          <button id="autoSlantToolBtn" class="tool" type="button"><span class="tool-icon">↘</span><span>זיהוי נטיית ירך ימין</span></button>
           <button class="tool" data-tool="angle"><span class="tool-icon">∠</span><span>זווית מנקודה לנקודה</span></button>
           <button class="tool" data-tool="kastel"><span class="tool-icon">◇</span><span>קעסטעל</span></button>
           <button id="thirdsToggleBtn" class="tool" type="button"><span class="tool-icon">⅓</span><span>חוק השלישים</span></button>
@@ -246,7 +246,8 @@
               <option value="line-gap">מרווח בין השיטין</option>
               <option value="thirds">חוק השלישים</option>
               <option value="angle">זוויות</option>
-              <option value="slant">נטיות ומקבילות</option>
+              <option value="slant">נטיות</option>
+              <option value="parallel">מקבילות</option>
               <option value="geometry">עיגולים ואליפסות</option>
               <option value="reference-template">תיוג בלבד — תבנית אות</option>
               <option value="other">תיוג בלבד — אחר</option>
@@ -390,7 +391,7 @@
       <p><b>עיגול מקטע:</b> גע ביהלום שבין שתי נקודות וגרור אותו, או בחר מקטע ולחץ „עיגול המקטע”.</p>
       <p><b>לוח צורת האותיות:</b> כל אות מונחת בגודלה היחסי המקורי מן הלוח, בלי השוואת גבהים. אפשר להזיז ולמתוח אותה. מקור ה־Bézier נשאר עריך; שינוי עובי הקולמוס הוא תצוגה לא־הרסנית בתוך מסגרת קבועה ואינו מחליף את מסלול המקור. מצב עריכת עוגנים מציג את נקודות המסלול ואת ידיות ה־Bézier.</p>
       <p><b>דרגות הווקטור והקנבה:</b> באות מצולמת „מבנה” מציג תחנות מתאר אמיתיות בחיבור, בשני צדי ההצטמצמות, בהתעגלות ובסיום הירך; „איברים” בוחר ירך כתת־מסלול עצמאי עם שתי נקודות חיבור לגג, בלי חלוקה שרירותית ובלי עוגנים משותפים לירך סמוכה; „עקומות” מציג עוגנים; „מלא” מציג גם ידיות Bézier. אפשר להקיף ירך, להזיז או לסובב רק את תת־המסלול שלה בלי לשנות את מסלול הבסיס. „העבר לקנבה” יוצר תמיד עותק נקי ונפרד.</p>
-      <p><b>רגעים / אמן:</b> לכל מדד צבע קבוע והסבר שניתן לעריכה. יישור השורה דורש סיווג מלא של מועמדי ב׳, כ׳ ונ׳ רגילה לפני יצירת קו; ן׳ וי׳ אינן קובעות אותו. „זיהוי ירכות וזוויתן” סורק את כל התמונה, מסמן את גוף הירך ואת צירה ומציג זווית וכיוון; ב„נטיות ומקבילות” אפשר גם לסרוק תחום ממוקד ולסווג כל מועמד כד׳, ה׳, ת׳ או „לא לכלול”. מדידה ידנית נשארת זמינה.</p>
+      <p><b>רגעים / אמן:</b> לכל מדד צבע קבוע והסבר שניתן לעריכה. „משקלים” דוגם את מקום יציאת הירך מן הגג בדרגות 1–4: ‏12:31 עד 12:34; שתי נקודות הן בסיס האות ב׳. „נטיות” סורק ירכות ימניות ומודד את גבול הלובן הפנימי, ולא את ציר מרכז הדיו. „מקבילות” היא בדיקה נפרדת בצבע נפרד: מסמנים שני גבולות לובן בתוך אותה אות ומקבלים את הפרש הזוויות, ללא סף תקין או חריג.</p>
       <p><b>אות מצולמת לווקטור:</b> לפני הסימון בחר „עותק וקטורי” או „עיוות מקומי במקור”. במצב מקור הדיו באזור מוחלף בשכבת וקטור לא־הרסנית; מחיקה או „איפוס למקור” מחזירות את הצילום. הווקטור החלק נשמר כמסלולי Bézier ולא כזיגזג של פיקסלים.</p>
       <p><b>מחיקת נקודה:</b> גע בנקודה כדי לבחור אותה, ולאחר מכן לחץ „מחיקת נקודה”. במצב בחירה ניתן גם לגרור נקודה למקום מדויק.</p>
       <p><b>מגע:</b> כפתורים, תפריטים, בחירות, סרגלים והגלילה פועלים גם ב־Apple Pencil וגם באצבע — אין מצב שצריך להחליף ידנית. בשדה שמקבל טקסט או מספר העט אינו יוצר מיקוד, Scribble או מקלדת; את תוכן השדה מזינים באצבע ובמקלדת.</p>
@@ -419,18 +420,18 @@
 
     <button id="helpBtn" class="floating-help" aria-label="עזרה">?</button>
   </div>
-  <script src="master-system.js?v=20260802a"></script>
-  <script src="letter-assets.js?v=20260802a"></script>
-  <script src="letter-vector-engine.js?v=20260802a"></script>
-  <script src="app-1.js?v=20260802a"></script>
-  <script src="region-vector.js?v=20260802a"></script>
-  <script src="letter-tools.js?v=20260802a"></script>
-  <script src="app-2.js?v=20260802a"></script>
-  <script src="app-3.js?v=20260802a"></script>
-  <script src="app-4.js?v=20260802a"></script>
-  <script src="slant-analyzer.js?v=20260802a"></script>
-  <script src="professional-tools.js?v=20260802a"></script>
-  <script src="auto-measure.js?v=20260802a"></script>
-  <script src="stability-patch.js?v=20260802a"></script>
+  <script src="master-system.js?v=20260802b"></script>
+  <script src="letter-assets.js?v=20260802b"></script>
+  <script src="letter-vector-engine.js?v=20260802b"></script>
+  <script src="app-1.js?v=20260802b"></script>
+  <script src="region-vector.js?v=20260802b"></script>
+  <script src="letter-tools.js?v=20260802b"></script>
+  <script src="app-2.js?v=20260802b"></script>
+  <script src="app-3.js?v=20260802b"></script>
+  <script src="app-4.js?v=20260802b"></script>
+  <script src="slant-analyzer.js?v=20260802b"></script>
+  <script src="professional-tools.js?v=20260802b"></script>
+  <script src="auto-measure.js?v=20260802b"></script>
+  <script src="stability-patch.js?v=20260802b"></script>
 </body>
 </html>

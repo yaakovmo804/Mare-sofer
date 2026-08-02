@@ -1477,6 +1477,10 @@ function exportResultLabelPoint(object) {
   if (['length', 'nib', 'gap', 'angle', 'slantScan'].includes(object.type) && points.length >= 2) {
     return { point: midpoint(points[0], points[1]), placement: 'above' };
   }
+  if (object.type === 'weightSample') return { point: points[0], placement: 'above' };
+  if (object.type === 'parallelCheck' && points.length >= 4) {
+    return { point: midpoint(midpoint(points[0], points[1]), midpoint(points[2], points[3])), placement: 'above' };
+  }
   if (object.type === 'thirds' && state.objects.some(item => item.id === object.kastelId)) {
     return { point: points[0], placement: 'above' };
   }
@@ -1499,6 +1503,22 @@ function drawDetectedStemBodyToContext(context, object) {
   for (const point of outline.rightEdge.slice().reverse()) context.lineTo(point.x, point.y);
   context.closePath();
   context.fill();
+  context.stroke();
+  context.restore();
+}
+
+function drawDetectedInnerBoundaryToContext(context, object) {
+  if (object?.auto !== true) return;
+  const polyline = object.candidateInnerBoundary?.sourcePolyline;
+  if (!Array.isArray(polyline) || polyline.length < 2) return;
+  context.save();
+  context.setLineDash([]);
+  context.lineWidth = Math.max(1.5, (object.lineWidth || 4) * .72);
+  context.strokeStyle = object.color;
+  context.globalAlpha = .96;
+  context.beginPath();
+  context.moveTo(polyline[0].x, polyline[0].y);
+  for (const point of polyline.slice(1)) context.lineTo(point.x, point.y);
   context.stroke();
   context.restore();
 }
@@ -1690,8 +1710,16 @@ function drawObjectToContext(context, object) {
         }
       }
     }
+  } else if (object.type === 'weightSample') {
+    drawWeightSampleDots(context, points[0], object, exportOverlayUnit());
+  } else if (object.type === 'parallelCheck' && points.length >= 4) {
+    drawExportLine(context, points[0], points[1]);
+    drawExportLine(context, points[2], points[3]);
   } else if (['length', 'nib', 'gap', 'angle'].includes(object.type) && points.length >= 2) {
-    if (object.type === 'angle') drawDetectedStemBodyToContext(context, object);
+    if (object.type === 'angle') {
+      drawDetectedStemBodyToContext(context, object);
+      drawDetectedInnerBoundaryToContext(context, object);
+    }
     if (object.type === 'gap' && object.gapDetection?.manualCorrected !== true) {
       const boundaries = [
         object.gapDetection.upperBoundary,
@@ -1913,7 +1941,7 @@ async function serializeProjectV3() {
       title: captured.projectMeta.title || 'פרויקט מדידאות',
       createdAt: captured.projectMeta.createdAt,
       updatedAt: now,
-      appVersion: '2026.08.02a',
+      appVersion: '2026.08.02b',
       locale: 'he-IL'
     },
     source: {
@@ -2043,6 +2071,8 @@ function measurementGeometry(object) {
     return { ...common, type: 'polygon', closed: true };
   }
   if (object.type === 'thirds') return { ...common, type: 'point' };
+  if (object.type === 'weightSample') return { ...common, type: 'point' };
+  if (object.type === 'parallelCheck') return { ...common, type: 'parallel-lines' };
   if (object.type === 'angle') return { ...common, type: 'polyline' };
   return { ...common, type: 'line-string' };
 }
@@ -2127,6 +2157,32 @@ function measurementMetrics(object) {
       diagnostics: structuredCloneSafe(object.slantAnalysis?.diagnostics || null)
     };
   }
+  if (object.type === 'weightSample') {
+    const step = MASTER_SYSTEM.weightStep(object.weightPointCount ?? object.weightClass?.points);
+    return {
+      metricId: 'stem-roof-exit-weight.v1',
+      pointCount: step?.points ?? null,
+      clockLabel: step?.clockLabel ?? null,
+      nibFractionApprox: step?.nibFractionApprox ?? null,
+      betBaseline: step?.betBaseline === true,
+      locationRole: object.weightLocationRole || 'stem-roof-exit',
+      classificationSource: 'human'
+    };
+  }
+  if (object.type === 'parallelCheck' && object.points.length >= 4) {
+    const firstSignedAngleDeg = MASTER_SYSTEM.signedVerticalAngle(object.points[0], object.points[1]);
+    const secondSignedAngleDeg = MASTER_SYSTEM.signedVerticalAngle(object.points[2], object.points[3]);
+    return {
+      metricId: 'inner-white-boundary-parallelism.v1',
+      firstSignedAngleDeg,
+      secondSignedAngleDeg,
+      signedAngularDifferenceDeg: MASTER_SYSTEM.parallelSignedDifferenceDeg(firstSignedAngleDeg, secondSignedAngleDeg),
+      angularDifferenceDeg: MASTER_SYSTEM.parallelDeviationDeg(firstSignedAngleDeg, secondSignedAngleDeg),
+      angleConvention: 'signed-deviation-from-vertical',
+      pairScope: object.pairScope || 'same-letter-inner-white',
+      classification: null
+    };
+  }
   if (['length', 'nib', 'gap'].includes(object.type) && object.points.length >= 2) {
     const lengthPx = object.type === 'gap' ? measurementLengthPx(object) : distance(object.points[0], object.points[1]);
     const hasCapturedGapCalibration = object.type === 'gap' && object.normalization &&
@@ -2155,14 +2211,21 @@ function measurementMetrics(object) {
     };
   }
   if (object.type === 'angle') {
-    const signedAngleDeg = object.semanticMetricId === 'slants-parallels' && object.points.length >= 2
+    const signedAngleDeg = MASTER_SYSTEM.metricIdFor(object) === 'slants' && object.points.length >= 2
       ? MASTER_SYSTEM.signedVerticalAngle(object.points[0], object.points[1])
       : null;
     return {
-      metricId: 'axis-deviation-angle.v1',
+      metricId: object.measurementBasis === 'inner-white-boundary'
+        ? 'inner-white-boundary-slant.v1'
+        : object.measurementBasis === 'legacy-center-axis'
+          ? 'legacy-center-axis-slant.v1'
+          : 'manual-angle.v1',
       angleDeg: objectAngle(object),
       signedAngleDeg,
-      angleConvention: signedAngleDeg == null ? 'absolute-axis-deviation' : 'signed-deviation-from-vertical'
+      angleConvention: signedAngleDeg == null ? 'absolute-axis-deviation' : 'signed-deviation-from-vertical',
+      measurementBasis: object.measurementBasis || 'manual-line',
+      innerBoundarySide: object.innerBoundarySide || null,
+      needsReanalysis: object.needsReanalysis === true
     };
   }
   if (object.type === 'kastel' && object.points.length === 4) {
@@ -2480,11 +2543,11 @@ function normalizeLoadedObject(object) {
   const normalized = structuredCloneSafe(object);
   const allowedTypes = new Set([
     'area', 'length', 'angle', 'kastel', 'thirds', 'nib', 'nibRegion', 'gap',
-    'letterTemplate', 'rowAlign', 'slantScan', 'ellipse', 'circle'
+    'letterTemplate', 'rowAlign', 'slantScan', 'weightSample', 'parallelCheck', 'ellipse', 'circle'
   ]);
   if (!allowedTypes.has(normalized.type)) throw new Error('Unsupported measurement type');
   if (normalized.geometry?.nodes) throw new Error('Unsupported rich path geometry');
-  const supportedGeometryTypes = new Set(['quadratic-path', 'polygon', 'point', 'polyline', 'line-string']);
+  const supportedGeometryTypes = new Set(['quadratic-path', 'polygon', 'point', 'polyline', 'line-string', 'parallel-lines']);
   if (normalized.geometry?.type && !supportedGeometryTypes.has(normalized.geometry.type)) {
     throw new Error('Unsupported measurement geometry type');
   }
@@ -2503,16 +2566,56 @@ function normalizeLoadedObject(object) {
   }
   const minimumPoints = {
     area: 3, length: 2, angle: 2, kastel: 4, thirds: 1, nib: 2,
-    nibRegion: 4, gap: 2, letterTemplate: 4, rowAlign: 4, slantScan: 4, ellipse: 4, circle: 4
+    nibRegion: 4, gap: 2, letterTemplate: 4, rowAlign: 4, slantScan: 4,
+    weightSample: 1, parallelCheck: 4, ellipse: 4, circle: 4
   };
   if (normalized.points.length < minimumPoints[normalized.type]) throw new Error('Incomplete measurement geometry');
   if (['kastel', 'nibRegion', 'letterTemplate', 'rowAlign', 'slantScan', 'ellipse', 'circle'].includes(normalized.type) && normalized.points.length !== 4) {
     throw new Error('Rectangular measurements require four corners');
   }
+  if (normalized.type === 'weightSample' && normalized.points.length !== 1) throw new Error('Weight samples require one point');
+  if (normalized.type === 'parallelCheck' && normalized.points.length !== 4) throw new Error('Parallel checks require two complete lines');
+  if (normalized.type === 'parallelCheck' &&
+      (distance(normalized.points[0], normalized.points[1]) <= .01 || distance(normalized.points[2], normalized.points[3]) <= .01)) {
+    throw new Error('Parallel check lines must have length');
+  }
   normalized.uid = normalized.uid || (typeof normalized.id === 'string' ? normalized.id : createStableId('measurement'));
   normalized.semanticMetricId = normalized.semanticMetricId || normalized.semantic?.metricId || null;
+  const legacyCombinedSlant = normalized.semanticMetricId === 'slants-parallels';
+  const legacyProfessionalSlant = legacyCombinedSlant && (
+    normalized.type === 'slantScan' ||
+    (normalized.type === 'angle' && (
+      normalized.category === 'slant' || normalized.semantic?.categoryId === 'slant' ||
+      normalized.auto === true || normalized.sourceScanId != null || normalized.sourceScanUid
+    ))
+  );
+  if (legacyProfessionalSlant && !normalized.measurementBasis) {
+    normalized.measurementBasis = 'legacy-center-axis';
+    normalized.needsReanalysis = true;
+  } else if (legacyCombinedSlant && normalized.type === 'angle') {
+    // Version 20260802a assigned the former combined metric to every generic
+    // angle. Keep a free point-to-point angle free instead of migrating it
+    // into the professional slant report.
+    normalized.semanticMetricId = null;
+  }
   normalized.category = normalized.category || normalized.semantic?.categoryId || defaultCategory(normalized.type, normalized.formulaKey);
   enforceSemanticStyle(normalized);
+  if (normalized.type === 'weightSample') {
+    const step = MASTER_SYSTEM.weightStep(normalized.weightPointCount ?? normalized.weightClass?.points);
+    if (!step) throw new Error('Invalid weight sample step');
+    normalized.weightPointCount = step.points;
+    normalized.weightLocationRole = normalized.weightLocationRole || 'stem-roof-exit';
+    normalized.weightClass = {
+      points: step.points,
+      clockLabel: step.clockLabel,
+      nibFractionApprox: step.nibFractionApprox,
+      fractionLabel: step.fractionLabel,
+      betBaseline: step.betBaseline === true,
+      locationRole: normalized.weightLocationRole,
+      source: normalized.weightClass?.source || 'human'
+    };
+  }
+  if (normalized.type === 'parallelCheck') normalized.pairScope = normalized.pairScope || 'same-letter-inner-white';
   const humanJudgment = Array.isArray(normalized.judgments)
     ? normalized.judgments.find(item => item?.source === 'human')
     : null;

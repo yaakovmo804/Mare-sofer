@@ -6,8 +6,8 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
-const TEST_VERSION = '20260802a';
-const TEST_CACHE_DATE = '2026-08-02a';
+const TEST_VERSION = '20260802b';
+const TEST_CACHE_DATE = '2026-08-02b';
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const appDirectory = path.resolve(testDirectory, '..');
 
@@ -2156,7 +2156,7 @@ test('HTML, manifests, and service worker reference one complete release asset s
     assert.match(manifest.start_url, new RegExp(`(?:\\?|&)v=${TEST_VERSION}(?:&|$)`));
   }
 
-  assert.match(readAppFile('app-4.js'), /appVersion:\s*'2026\.08\.02a'/);
+  assert.match(readAppFile('app-4.js'), /appVersion:\s*'2026\.08\.02b'/);
 
   const serviceWorker = readAppFile('sw.js');
   const cacheNameMatch = serviceWorker.match(/const CACHE_NAME = '([^']+)'/);
