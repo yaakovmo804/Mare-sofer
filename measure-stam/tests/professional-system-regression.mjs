@@ -7,6 +7,12 @@ import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
+import {
+  IRREGULAR_SLANT_EXPECTATIONS,
+  grayRasterCanvas,
+  irregularFixtureRoleForRootX,
+  paddedIrregularSlantFixture
+} from './slant-fixtures.mjs';
 
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const appDirectory = path.resolve(testDirectory, '..');
@@ -125,7 +131,7 @@ function loadRowAlignmentDrawer() {
 
 function loadExportObjectDrawer() {
   const source = read('app-4.js');
-  const start = source.indexOf('function drawObjectToContext');
+  const start = source.indexOf('function drawDetectedStemBodyToContext');
   const end = source.indexOf('function downloadBlob', start);
   assert.ok(start >= 0 && end > start, 'export object drawer must remain available');
   const state = { selectedId: null, image: { width: 300, height: 300 }, objects: [] };
@@ -139,6 +145,29 @@ function loadExportObjectDrawer() {
   });
   vm.runInContext(`${source.slice(start, end)}\nthis.drawObjectToContext = drawObjectToContext;`, context);
   return { drawObjectToContext: context.drawObjectToContext, state };
+}
+
+function loadHitTestHarness(objects, selectedId = null) {
+  const source = read('app-2.js');
+  const start = source.indexOf('function hitTest(imagePoint)');
+  const end = source.indexOf('function ensureCompatibleDraft', start);
+  assert.ok(start >= 0 && end > start, 'canvas hit testing must remain available');
+  const state = { objects, selectedId, view: { scale: 1 } };
+  const context = vm.createContext({
+    state,
+    isLetterTemplate: () => false,
+    nearestLetterHandle: () => null,
+    nearestLetterVectorHandle: () => null,
+    pointInLetterTemplate: () => false,
+    nearestPointIndex: () => -1,
+    selectedAreaEditHit: () => null,
+    flattenedAreaPoints: object => object.points,
+    pointInPolygon: () => true,
+    pointLineDistance: () => Infinity,
+    distance: () => Infinity
+  });
+  vm.runInContext(`${source.slice(start, end)}\nthis.hitTest = hitTest;`, context);
+  return { hitTest: context.hitTest, state };
 }
 
 function loadLetterOrganHelpers() {
@@ -219,6 +248,82 @@ function loadSlantSpatialMatchingHelpers() {
   });
   vm.runInContext(`${source.slice(start, end)}\nthis.slantCandidateSpatialScore = slantCandidateSpatialScore; this.matchPreviousSlantCandidate = matchPreviousSlantCandidate;`, context);
   return context;
+}
+
+function loadSlantScanHarness(image, nibPx, scan) {
+  const source = read('professional-tools.js');
+  const fullScanStart = source.indexOf('function runFullImageSlantScan');
+  const fullScanEnd = source.indexOf('function activateProfessionalMetric', fullScanStart);
+  const start = source.indexOf('function slantCandidateIsLinkedToScan');
+  const end = source.indexOf('function drawSlantScanObject', start);
+  assert.ok(fullScanStart >= 0 && fullScanEnd > fullScanStart, 'direct full-image slant workflow must remain available');
+  assert.ok(start >= 0 && end > start, 'complete slant scan workflow must remain available');
+  const system = loadMasterSystem();
+  const analyzer = require('../slant-analyzer.js');
+  const panel = { hidden: true };
+  const statusText = { textContent: '' };
+  const state = {
+    image,
+    formula: { nibPx },
+    objects: scan ? [scan] : [],
+    nextId: 100,
+    draft: null,
+    selectedId: null
+  };
+  const professionalSuite = {};
+  const calls = { snapshots: 0, panels: 0 };
+  const context = vm.createContext({
+    console,
+    Math,
+    Number,
+    Set,
+    Map,
+    Date,
+    Infinity,
+    state,
+    professionalSuite,
+    MASTER_SYSTEM: system,
+    MEDIDAOT_SLANT_ANALYZER: analyzer,
+    document: {
+      createElement(tagName) {
+        assert.equal(tagName, 'canvas');
+        return createCanvas(1, 1);
+      }
+    },
+    $: id => id === 'professionalSuitePanel' ? panel : null,
+    clamp: (value, minimum, maximum) => Math.max(minimum, Math.min(maximum, value)),
+    midpoint: (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }),
+    distance: (a, b) => Math.hypot(a.x - b.x, a.y - b.y),
+    structuredCloneSafe: value => JSON.parse(JSON.stringify(value)),
+    enforceSemanticStyle() {},
+    markObjectModified() {},
+    renderAll() {},
+    renderProfessionalPanel() { calls.panels++; },
+    switchWorkspaceMode() {},
+    cancelDraft() { state.draft = null; },
+    setTool(tool) { state.tool = tool; },
+    snapshot() { calls.snapshots++; },
+    statusText,
+    makeObject(type, points, extra = {}) {
+      const id = state.nextId++;
+      return { id, uid: `fixture-object-${id}`, type, points, ...extra };
+    }
+  });
+  context.globalThis = context;
+  vm.runInContext(
+    `${source.slice(fullScanStart, fullScanEnd)}\n${source.slice(start, end)}\n` +
+      'this.analyzeSlantScan = analyzeSlantScan; this.runFullImageSlantScan = runFullImageSlantScan;',
+    context
+  );
+  return {
+    analyzeSlantScan: context.analyzeSlantScan,
+    runFullImageSlantScan: context.runFullImageSlantScan,
+    state,
+    professionalSuite,
+    panel,
+    statusText,
+    calls
+  };
 }
 
 function loadSemanticReconcileHelper(handles) {
@@ -1228,11 +1333,11 @@ test('the integrated shell exposes composition, vector levels, info and active g
     for (const tool of ['rowAlign', 'circle', 'ellipse']) {
       assert.match(html, new RegExp(`data-tool="${tool}"`));
     }
-    assert.match(html, /master-system\.js\?v=20260801f/);
-    assert.match(html, /professional-tools\.js\?v=20260801f/);
-    assert.match(html, /slant-analyzer\.js\?v=20260801f/);
+    assert.match(html, /master-system\.js\?v=20260802a/);
+    assert.match(html, /professional-tools\.js\?v=20260802a/);
+    assert.match(html, /slant-analyzer\.js\?v=20260802a/);
     assert.ok(
-      html.indexOf('slant-analyzer.js?v=20260801f') < html.indexOf('professional-tools.js?v=20260801f'),
+      html.indexOf('slant-analyzer.js?v=20260802a') < html.indexOf('professional-tools.js?v=20260802a'),
       'the analyzer must load before the professional integration'
     );
     assert.match(html, /id="compositionCanvas"[^>]*tabindex="0"/);
@@ -1526,6 +1631,80 @@ test('automatic slant scans stay linked to human-classified signed angle measure
   assert.match(serviceWorker, /\.\/slant-analyzer\.js/);
 });
 
+test('the integrated slant workflow creates exactly the attached-thigh angle objects from a page-sized scan', () => {
+  const page = grayRasterCanvas(paddedIrregularSlantFixture());
+  const scan = {
+    id: 41,
+    uid: 'real-page-scan',
+    type: 'slantScan',
+    points: [
+      { x: 0, y: 0 }, { x: page.width, y: 0 },
+      { x: page.width, y: page.height }, { x: 0, y: page.height }
+    ]
+  };
+  const harness = loadSlantScanHarness(page, 8, scan);
+  const result = harness.analyzeSlantScan(scan);
+  const angles = harness.state.objects.filter(object => object.type === 'angle');
+  const system = loadMasterSystem();
+
+  assert.equal(result.status, 'done');
+  assert.deepEqual(
+    angles.map(object => irregularFixtureRoleForRootX(object.points[0].x)),
+    IRREGULAR_SLANT_EXPECTATIONS.map(expected => expected.id),
+    'the integrated workflow must expose exactly the three connected full-height thighs'
+  );
+  assert.equal(result.candidateCount, IRREGULAR_SLANT_EXPECTATIONS.length,
+    `only the three connected thighs may become measurements; received ${result.candidateCount} (${result.diagnostics?.reason})`);
+  assert.equal(angles.length, result.candidateCount);
+  assert.ok(angles.every(object => object.sourceScanId === scan.id));
+  assert.ok(angles.every(object => object.angleRef === 'vertical' && object.points.length === 2));
+  for (const [index, expected] of IRREGULAR_SLANT_EXPECTATIONS.entries()) {
+    assert.ok(Math.abs(angles[index].points[0].x - expected.rootX) <= 6);
+    assert.ok(Math.abs(angles[index].points[1].x - expected.tipX) <= 7);
+    assert.ok(Math.abs(system.signedVerticalAngle(...angles[index].points) - expected.angleDeg) <= .4);
+    assert.equal(angles[index].candidateRoofSupport?.connectedToStem, true);
+    assert.equal(angles[index].candidateAxisFit?.method, 'trimmed-outline-midpoints-linear-v1');
+    const outline = angles[index].candidateBodyOutline;
+    assert.equal(outline?.method, 'sampled-row-edge-envelope-v1');
+    assert.equal(outline.sampleCount, outline.source.leftEdge.length);
+    assert.equal(outline.sampleCount, outline.source.rightEdge.length);
+    for (let row = 0; row < outline.sampleCount; row++) {
+      assert.equal(outline.source.leftEdge[row].y, outline.source.rightEdge[row].y);
+      assert.ok(outline.source.leftEdge[row].x <= outline.source.rightEdge[row].x);
+      if (row) assert.ok(outline.source.leftEdge[row].y >= outline.source.leftEdge[row - 1].y);
+    }
+  }
+  assert.ok(angles.every(object => Math.abs(object.points[0].x - 184) > 15),
+    'the disconnected he leg must not create a visible angle object');
+  assert.ok(angles.every(object => object.points[0].x < 330),
+    'the nearby short vav must not create a visible angle object');
+  assert.match(harness.statusText.textContent, /זוהו/);
+});
+
+test('the direct ירכות button creates a full-image scan and visible angle candidates without drawing an ROI', () => {
+  const page = grayRasterCanvas(paddedIrregularSlantFixture());
+  const harness = loadSlantScanHarness(page, 8, null);
+  const result = harness.runFullImageSlantScan();
+  const scans = harness.state.objects.filter(object => object.type === 'slantScan');
+  const angles = harness.state.objects.filter(object => object.type === 'angle');
+
+  assert.equal(result.status, 'done');
+  assert.equal(scans.length, 1);
+  assert.equal(scans[0].fullImageAuto, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(scans[0].points)), [
+    { x: 0, y: 0 }, { x: page.width, y: 0 },
+    { x: page.width, y: page.height }, { x: 0, y: page.height }
+  ]);
+  assert.equal(angles.length, IRREGULAR_SLANT_EXPECTATIONS.length);
+  assert.equal(harness.state.selectedId, angles[0].id);
+  assert.equal(harness.state.tool, 'pan');
+  assert.equal(harness.professionalSuite.activeGroup, 'aman');
+  assert.equal(harness.professionalSuite.activeMetricId, 'slants-parallels');
+  assert.equal(harness.panel.hidden, false);
+  assert.equal(harness.calls.snapshots, 1);
+  assert.ok(harness.calls.panels >= 1);
+});
+
 test('slant classifications survive small ROI changes without crossing to a neighboring thigh', () => {
   const { matchPreviousSlantCandidate } = loadSlantSpatialMatchingHelpers();
   const first = {
@@ -1588,6 +1767,8 @@ test('compound information and row candidates describe the action that is actual
   assert.match(professional, /openMetricInfo\(metric\.id\)/);
   assert.match(professional, /אחרת תיבחר רק ירך שזוהתה כאיבר מתאר/);
   assert.match(app2, /מועמדים ממתינים לסיווג/);
+  assert.doesNotMatch(app2, /סטייה חתומה מן האנך/);
+  assert.match(app2, /else if \(object\.type === 'angle'\) \{\s*const model = measurementResultModel\(object\);/);
 });
 
 test('composition is isolated, undoable and exported without diagnostic overlays', () => {
@@ -1686,8 +1867,88 @@ test('an unselected thirds probe exports its visible dot instead of an orphan la
   assert.deepEqual(calls, { arcs: 1, fills: 1 });
 });
 
+test('an automatic thigh angle exports its detected two-sided body outline before the center axis', () => {
+  const { drawObjectToContext } = loadExportObjectDrawer();
+  const calls = { fills: 0, strokes: 0, lines: 0 };
+  const context = {
+    save() {}, restore() {}, beginPath() {}, closePath() {}, setLineDash() {},
+    moveTo() {}, lineTo() { calls.lines++; },
+    fill() { calls.fills++; }, stroke() { calls.strokes++; }
+  };
+  drawObjectToContext(context, {
+    id: 12,
+    type: 'angle',
+    auto: true,
+    points: [{ x: 20, y: 20 }, { x: 24, y: 80 }],
+    color: '#d97706',
+    lineWidth: 3,
+    display: { resultLabelVisible: false },
+    candidateBodyOutline: {
+      source: {
+        leftEdge: [{ x: 17, y: 20 }, { x: 20, y: 80 }],
+        rightEdge: [{ x: 23, y: 20 }, { x: 28, y: 80 }]
+      }
+    }
+  });
+  assert.equal(calls.fills, 1, 'the detected body envelope is filled once');
+  assert.ok(calls.strokes >= 2, 'the body envelope and center axis are both stroked');
+  assert.ok(calls.lines >= 4, 'both outline edges and the center axis are drawn');
+});
+
+test('a hidden full-image slant scan frame is omitted from export unless the scan itself is selected', () => {
+  const { drawObjectToContext, state } = loadExportObjectDrawer();
+  const calls = { paths: 0, strokes: 0 };
+  const context = {
+    save() {}, restore() {}, setLineDash() {}, moveTo() {}, lineTo() {}, closePath() {},
+    beginPath() { calls.paths++; },
+    stroke() { calls.strokes++; }
+  };
+  const scan = {
+    id: 44,
+    type: 'slantScan',
+    fullImageAuto: true,
+    points: [
+      { x: 0, y: 0 }, { x: 300, y: 0 },
+      { x: 300, y: 300 }, { x: 0, y: 300 }
+    ],
+    color: '#d97706',
+    lineWidth: 3,
+    display: { resultLabelVisible: false }
+  };
+
+  state.selectedId = 12;
+  drawObjectToContext(context, scan);
+  assert.deepEqual(calls, { paths: 0, strokes: 0 }, 'the invisible page-sized scan frame must not leak into PNG export');
+
+  state.selectedId = scan.id;
+  drawObjectToContext(context, scan);
+  assert.deepEqual(calls, { paths: 1, strokes: 1 }, 'a deliberately selected scan frame remains exportable');
+});
+
+test('a hidden full-image slant scan cannot capture a Pencil or mouse pan hit', () => {
+  const scan = {
+    id: 44,
+    type: 'slantScan',
+    fullImageAuto: true,
+    points: [
+      { x: 0, y: 0 }, { x: 300, y: 0 },
+      { x: 300, y: 300 }, { x: 0, y: 300 }
+    ]
+  };
+  const harness = loadHitTestHarness([scan], 12);
+
+  assert.equal(harness.hitTest({ x: 150, y: 150 }), null,
+    'an invisible page-sized diagnostic ROI must fall through so the pan tool can start');
+
+  harness.state.selectedId = scan.id;
+  assert.equal(harness.hitTest({ x: 150, y: 150 })?.object?.id, scan.id,
+    'a scan explicitly selected from the object list remains editable');
+});
+
 test('touch targets and professional cards disclose their actual interaction mode', () => {
   const styles = read('styles.css');
+  const html = read('medidaot.html');
+  const professional = read('professional-tools.js');
   const system = loadMasterSystem();
   assert.match(styles, /metric-info[^}]*min-width:44px[^}]*min-height:44px/);
   assert.match(styles, /button,[^}]*min-block-size:44px/);
@@ -1695,11 +1956,17 @@ test('touch targets and professional cards disclose their actual interaction mod
   assert.match(styles, /master-metric-grid\{[^}]*minmax\(220px,1fr\)/);
   assert.match(styles, /professional-reference-info\{[^}]*minmax\(132px,1fr\)/);
   assert.match(styles, /standalone-hint button\{[^}]*min-inline-size:44px/);
-  assert.match(system.metric('slants-parallels').measurementDescription, /תחום סריקה/);
-  for (const id of ['roofs', 'seats', 'stems']) {
+  assert.match(system.metric('slants-parallels').measurementDescription, /סריקה של כל התמונה/);
+  assert.match(system.metric('slants-parallels').measurementDescription, /תחום ממוקד/);
+  assert.match(html, /id="autoSlantToolBtn"[^>]*>[\s\S]*?זיהוי ירכות וזוויתן/);
+  assert.match(professional, /autoSlantToolBtn[^\n]*runFullImageSlantScan/);
+  for (const id of ['roofs', 'seats']) {
     assert.equal(system.metric(id).operationMode, 'label-only');
     assert.match(system.metric(id).measurementDescription, /הכרטיס אינו מפעיל כלי/);
   }
+  assert.equal(system.metric('stems').operationMode, 'label-only');
+  assert.match(system.metric('stems').measurementDescription, /תיוג ידני/);
+  assert.match(system.metric('stems').measurementDescription, /זיהוי אוטומטי/);
 });
 
 test('asynchronous source loads are generation-guarded and row deviations use current calibration', () => {

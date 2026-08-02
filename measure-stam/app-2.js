@@ -130,13 +130,15 @@ function measurementResultModel(object) {
     const signed = object.semanticMetricId === 'slants-parallels'
       ? MASTER_SYSTEM.signedVerticalAngle(object.points[0], object.points[1])
       : null;
+    const magnitude = signed == null ? null : Math.abs(signed) < .05 ? 0 : Math.abs(signed);
+    const direction = magnitude === 0 ? 'אנכית' : signed < 0 ? 'ימינה' : 'שמאלה';
     const primaryText = signed == null
       ? `${fmt(objectAngle(object), 1)}°`
-      : `${signed > 0 ? '+' : ''}${fmt(Math.abs(signed) < .05 ? 0 : signed, 1)}°`;
+      : `${fmt(magnitude, 1)}° ${direction}`;
     return {
       canvasText: primaryText,
       primaryText,
-      secondaryText: `ייחוס: ${angleReferenceLabel(object.angleRef || ui.angleRef.value)}`
+      secondaryText: `${object.auto ? 'ציר ירך מזוהה · ' : ''}ייחוס: ${angleReferenceLabel(object.angleRef || ui.angleRef.value)}`
     };
   }
 
@@ -356,13 +358,9 @@ function renderResults() {
         : `זוהה אוטומטית מתחתית השורה העליונה ועד ראש השורה הבאה${Number.isFinite(object.gapDetection.confidence) ? ` · ביטחון ${fmt(object.gapDetection.confidence * 100, 0)}%` : ''}.`}</p>`;
     }
   } else if (object.type === 'angle') {
-    const signed = object.semanticMetricId === 'slants-parallels' && object.points.length >= 2
-      ? MASTER_SYSTEM.signedVerticalAngle(object.points[0], object.points[1])
-      : null;
-    const angleText = signed == null
-      ? `${fmt(objectAngle(object), 1)}°`
-      : `${signed > 0 ? '+' : ''}${fmt(Math.abs(signed) < .05 ? 0 : signed, 1)}°`;
-    html += `<p class="result-emphasis">${angleText}</p><p>ייחוס: ${signed == null ? angleReferenceLabel(object.angleRef || ui.angleRef.value) : 'סטייה חתומה מן האנך'}</p>`;
+    const model = measurementResultModel(object);
+    html += `<p class="result-emphasis">${escapeHtml(model.primaryText)}</p>`;
+    if (model.secondaryText) html += `<p>${escapeHtml(model.secondaryText)}</p>`;
   } else if (object.type === 'kastel') {
     const widthPx = (distance(object.points[0], object.points[1]) + distance(object.points[3], object.points[2])) / 2;
     const heightPx = (distance(object.points[0], object.points[3]) + distance(object.points[1], object.points[2])) / 2;
@@ -829,6 +827,7 @@ function hitTest(imagePoint) {
   const threshold = 10 / state.view.scale;
   for (let i = state.objects.length - 1; i >= 0; i--) {
     const object = state.objects[i];
+    if (object.type === 'slantScan' && object.fullImageAuto === true && state.selectedId !== object.id) continue;
     if (isLetterTemplate(object)) {
       if (pointInLetterTemplate(imagePoint, object)) {
         return { object, handle: null, segment: null, letterHandle: null };
