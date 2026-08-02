@@ -23,13 +23,24 @@ globalThis.MEDIDAOT_MASTER_SYSTEM = (() => {
     Object.freeze({
       id: 'aman',
       name: 'אמן',
-      summary: 'איזון לובן · מרכז אופטי ומרפסות · נטיות ומקבילות',
+      summary: 'איזון לובן · מרכז אופטי ומרפסות · נטיות · מקבילות',
       entries: Object.freeze([
         Object.freeze({ letter: 'א', metricIds: Object.freeze(['white-balance']) }),
         Object.freeze({ letter: 'מ', metricIds: Object.freeze(['optical-center', 'balconies']) }),
-        Object.freeze({ letter: 'ן', metricIds: Object.freeze(['slants-parallels']) })
+        Object.freeze({ letter: 'ן', metricIds: Object.freeze(['slants', 'parallels']) })
       ])
     })
+  ]);
+
+  // The weight scale records a professional classification at the point
+  // where a thigh leaves its roof.  Two points (12:32) are the Bet baseline
+  // and represent approximately a quarter nib; four points are approximately
+  // half a nib.  It is intentionally not inferred from a free pixel length.
+  const WEIGHT_STEPS = Object.freeze([
+    Object.freeze({ points: 1, clockLabel: '12:31', nibFractionApprox: 1 / 8, fractionLabel: '⅛' }),
+    Object.freeze({ points: 2, clockLabel: '12:32', nibFractionApprox: 1 / 4, fractionLabel: '¼', betBaseline: true }),
+    Object.freeze({ points: 3, clockLabel: '12:33', nibFractionApprox: 3 / 8, fractionLabel: '⅜' }),
+    Object.freeze({ points: 4, clockLabel: '12:34', nibFractionApprox: 1 / 2, fractionLabel: '½' })
   ]);
 
   const METRICS = Object.freeze([
@@ -58,10 +69,10 @@ globalThis.MEDIDAOT_MASTER_SYSTEM = (() => {
       tool: 'rowAlign', category: 'straightness', operationMode: 'assisted', operationLabel: 'סריקה + סיווג אנושי'
     }),
     Object.freeze({
-      id: 'weights', name: 'משקלים', group: 'regaim', color: '#dc2626',
-      description: 'בדיקת עובי מקומי ושינויי משקל באיברי האות. אין לאזן מבנה שגוי באמצעות השמנה בלבד.',
-      measurementDescription: 'מסמנים את העובי המקומי בשתי נקודות. המשקל נשמר כנתון נפרד ואינו משמש לפיצוי אוטומטי על מבנה או עיקום.',
-      tool: 'gap', category: 'weight', formulaKey: 'root-weight', operationMode: 'manual', operationLabel: 'עובי מקומי ידני · לא מפת משקל'
+      id: 'weights', name: 'משקלים', group: 'regaim', color: '#ca8a04',
+      description: 'דיגום הדומיננטיות במקום יציאת הירך מן הגג בדרגות 1–4: 12:31 עד 12:34. שתי נקודות הן בסיס האות ב׳.',
+      measurementDescription: 'בוחרים דרגה ונוגעים בנקודת יציאת הירך מן הגג. הסימון נשמר כ־1–4 נקודות; שתי נקודות הן בקירוב רבע קולמוס וארבע נקודות בקירוב חצי קולמוס.',
+      tool: 'weightSample', category: 'weight', operationMode: 'manual', operationLabel: 'נקודת יציאה מן הגג · דרגות 1–4'
     }),
     Object.freeze({
       id: 'gaps', name: 'מרווחים', group: 'regaim', color: '#0891b2',
@@ -88,10 +99,16 @@ globalThis.MEDIDAOT_MASTER_SYSTEM = (() => {
       tool: 'gap', category: 'balcony', formulaKey: 'balcony-width', operationMode: 'manual', operationLabel: 'שתי נקודות + השוואת חציונים'
     }),
     Object.freeze({
-      id: 'slants-parallels', name: 'נטיות ומקבילות', group: 'aman', color: '#d97706',
-      description: 'זיהוי גוף הירך המחובר לגג, מדידת צירה והשוואת הזוויות והמקבילות בין מופעי ד׳, ה׳ ות׳.',
-      measurementDescription: 'לחיצה מפעילה סריקה של כל התמונה. האפליקציה מסמנת את שתי שפות גוף הירך, מתאימה ציר מרכז ומציגה זווית וכיוון. אפשר לסרוק גם תחום ממוקד ולסווג כל מועמד כד׳, ה׳, ת׳ או „לא לכלול”.',
-      tool: 'angle', category: 'slant', operationMode: 'assisted', operationLabel: 'זיהוי אוטומטי מלא + סיווג אנושי'
+      id: 'slants', name: 'נטיות', group: 'aman', color: '#0284c7',
+      description: 'מדידת נטיית הירך הימנית על גבול הלובן הפנימי, ולא על ציר מרכז הדיו.',
+      measurementDescription: 'סריקה של כל התמונה מאתרת ירך ימנית המחוברת לגג ומודדת את הקו השקוף שעל שפת הלובן הפנימי. אפשר גם לסרוק תחום ממוקד ולסווג כל מועמד כד׳, ה׳, ת׳ או „לא לכלול”.',
+      tool: 'angle', category: 'slant', operationMode: 'assisted', operationLabel: 'קו לובן פנימי · סריקה + סיווג אנושי'
+    }),
+    Object.freeze({
+      id: 'parallels', name: 'מקבילות', group: 'aman', color: '#6d28d9',
+      description: 'בדיקת ההקבלה בין שני גבולות הלובן הפנימי בתוך אותה אות.',
+      measurementDescription: 'מסמנים בתוך אותה אות שני קווים שקופים: שתי נקודות לאורך הגבול הראשון ושתי נקודות לאורך הגבול שמולו. האפליקציה מציגה את שתי הזוויות ואת ההפרש ביניהן, ללא קביעת תקין או חריג.',
+      tool: 'parallelCheck', category: 'parallel', operationMode: 'guided', operationLabel: 'ארבע נקודות באותה אות · הפרש זוויות'
     }),
     Object.freeze({
       id: 'thirds', name: 'חוק השלישים', group: 'reference', color: '#16a34a',
@@ -126,7 +143,7 @@ globalThis.MEDIDAOT_MASTER_SYSTEM = (() => {
     Object.freeze({
       id: 'stems', name: 'ירכות ודפנות', group: 'reference', color: '#65a30d',
       description: 'סימון ירך או דופן לצורך בדיקת מבנה, נטייה ומקבילות.',
-      measurementDescription: 'זהו תיוג ידני לסימון קיים. לזיהוי אוטומטי של גוף הירך וזוויתו משתמשים ב„זיהוי ירכות וזוויתן” או במדד „נטיות ומקבילות”.',
+      measurementDescription: 'זהו תיוג ידני לסימון קיים. לזיהוי אוטומטי של ירך ימין וגבול הלובן הפנימי שלה משתמשים ב„זיהוי נטיית ירך ימין” או במדד „נטיות”. בדיקת „מקבילות” נשמרת כמדד נפרד.',
       tool: null, category: 'stem', operationMode: 'label-only', operationLabel: 'תיוג ידני · הזיהוי נמצא בנטיות'
     }),
     Object.freeze({
@@ -161,11 +178,12 @@ globalThis.MEDIDAOT_MASTER_SYSTEM = (() => {
   ]);
 
   const BY_ID = new Map(METRICS.map(metric => [metric.id, metric]));
+  const METRIC_ALIASES = Object.freeze({ 'slants-parallels': 'slants' });
   const CATEGORY_TO_METRIC = Object.freeze({
     width: 'widths', height: 'heights', nib: 'nib', straightness: 'straightness',
     weight: 'weights', root: 'weights', 'white-space': 'white-balance',
-    'optical-center': 'optical-center', balcony: 'balconies', slant: 'slants-parallels',
-    angle: 'slants-parallels', thirds: 'thirds', geometry: 'circle-ellipse',
+    'optical-center': 'optical-center', balcony: 'balconies', slant: 'slants',
+    parallel: 'parallels', thirds: 'thirds', geometry: 'circle-ellipse',
     roof: 'roofs', seat: 'seats', stem: 'stems',
     'reference-template': 'reference-template', other: 'other',
     'letter-gap': 'gaps', 'word-gap': 'gaps', 'line-gap': 'gaps'
@@ -177,16 +195,33 @@ globalThis.MEDIDAOT_MASTER_SYSTEM = (() => {
     'between-heads': 'gaps', 'shin-teeth': 'gaps', 'bet-seat-line': 'straightness'
   });
 
-  function metric(id) { return BY_ID.get(id) || null; }
-  function metricIdFor({ semanticMetricId, formulaKey, category, type } = {}) {
-    if (BY_ID.has(semanticMetricId)) return semanticMetricId;
+  function canonicalMetricId(id) { return METRIC_ALIASES[id] || id || null; }
+  function metric(id) { return BY_ID.get(canonicalMetricId(id)) || null; }
+  function fixedMetricIdFor({ type, measurementBasis, auto, sourceScanId, sourceScanUid } = {}) {
+    if (type === 'weightSample') return 'weights';
+    if (type === 'parallelCheck') return 'parallels';
+    if (type === 'slantScan') return 'slants';
+    if (type === 'angle' && (
+      measurementBasis === 'inner-white-boundary' ||
+      measurementBasis === 'legacy-center-axis' ||
+      auto === true || sourceScanId != null || sourceScanUid
+    )) return 'slants';
+    return null;
+  }
+  function metricIdFor(input = {}) {
+    const { semanticMetricId, formulaKey, category, type } = input;
+    const fixedMetricId = fixedMetricIdFor(input);
+    if (fixedMetricId) return fixedMetricId;
+    const canonicalSemanticId = canonicalMetricId(semanticMetricId);
+    if (BY_ID.has(canonicalSemanticId)) return canonicalSemanticId;
     if (FORMULA_TO_METRIC[formulaKey]) return FORMULA_TO_METRIC[formulaKey];
     if (CATEGORY_TO_METRIC[category]) return CATEGORY_TO_METRIC[category];
     if (type === 'rowAlign') return 'straightness';
     if (type === 'ellipse' || type === 'circle') return 'circle-ellipse';
     if (type === 'nib' || type === 'nibRegion') return 'nib';
     if (type === 'area') return 'white-balance';
-    if (type === 'angle') return 'slants-parallels';
+    if (type === 'parallelCheck') return 'parallels';
+    if (type === 'weightSample') return 'weights';
     if (type === 'thirds' || type === 'kastel') return 'thirds';
     if (type === 'gap') return 'gaps';
     if (type === 'length') return 'widths';
@@ -204,14 +239,20 @@ globalThis.MEDIDAOT_MASTER_SYSTEM = (() => {
   function mergeDescriptions(saved = {}) {
     const defaults = defaultDescriptions();
     for (const [id, value] of Object.entries(saved || {})) {
-      if (typeof value === 'string' && value.trim()) defaults[id] = value.trim();
+      // A description for the former combined slants/parallels metric cannot
+      // safely describe either new measurement. Keep it under its inert legacy
+      // key so re-saving does not destroy user copy, but never apply it to a
+      // current card.
+      if (BY_ID.has(id) && typeof value === 'string' && value.trim()) defaults[id] = value.trim();
+      else if (METRIC_ALIASES[id] && typeof value === 'string' && value.trim()) defaults[id] = value.trim();
     }
     return defaults;
   }
   function mergeMeasurementNotes(saved = {}) {
     const defaults = defaultMeasurementNotes();
     for (const [id, value] of Object.entries(saved || {})) {
-      if (typeof value === 'string' && value.trim()) defaults[id] = value.trim();
+      if (BY_ID.has(id) && typeof value === 'string' && value.trim()) defaults[id] = value.trim();
+      else if (METRIC_ALIASES[id] && typeof value === 'string' && value.trim()) defaults[id] = value.trim();
     }
     return defaults;
   }
@@ -259,6 +300,22 @@ globalThis.MEDIDAOT_MASTER_SYSTEM = (() => {
     while (value < -90) value += 180;
     return value;
   }
+  function parallelSignedDifferenceDeg(firstAngle, secondAngle) {
+    if (firstAngle == null || secondAngle == null || firstAngle === '' || secondAngle === '' ||
+        !Number.isFinite(+firstAngle) || !Number.isFinite(+secondAngle)) return null;
+    let difference = (+firstAngle - +secondAngle) % 180;
+    if (difference > 90) difference -= 180;
+    if (difference < -90) difference += 180;
+    return difference;
+  }
+  function parallelDeviationDeg(firstAngle, secondAngle) {
+    const difference = parallelSignedDifferenceDeg(firstAngle, secondAngle);
+    return difference == null ? null : Math.abs(difference);
+  }
+  function weightStep(points) {
+    const normalized = Number(points);
+    return WEIGHT_STEPS.find(step => step.points === normalized) || null;
+  }
   function shearPointToAngle(point, pivotY, currentDeg, targetDeg) {
     const current = Math.tan((+currentDeg || 0) * Math.PI / 180);
     const target = Math.tan((+targetDeg || 0) * Math.PI / 180);
@@ -266,9 +323,11 @@ globalThis.MEDIDAOT_MASTER_SYSTEM = (() => {
   }
 
   return Object.freeze({
-    version: '1.1.0', GROUPS, METRICS, LETTER_FAMILIES, CATEGORY_TO_METRIC, FORMULA_TO_METRIC,
-    metric, metricIdFor, colorFor, defaultDescriptions, defaultMeasurementNotes,
+    version: '1.2.0', GROUPS, METRICS, LETTER_FAMILIES, WEIGHT_STEPS,
+    CATEGORY_TO_METRIC, FORMULA_TO_METRIC, METRIC_ALIASES,
+    canonicalMetricId, metric, fixedMetricIdFor, metricIdFor, colorFor, defaultDescriptions, defaultMeasurementNotes,
     mergeDescriptions, mergeMeasurementNotes, median,
-    rowAlignmentFromCandidates, compareBalconies, signedVerticalAngle, shearPointToAngle
+    rowAlignmentFromCandidates, compareBalconies, signedVerticalAngle,
+    parallelSignedDifferenceDeg, parallelDeviationDeg, weightStep, shearPointToAngle
   });
 })();

@@ -13,7 +13,7 @@
   if (typeof module === 'object' && module.exports) module.exports = api;
   if (root) root.MEDIDAOT_SLANT_ANALYZER = api;
 })(typeof globalThis === 'object' ? globalThis : this, function createSlantAnalyzer() {
-  const VERSION = '1.1.0';
+  const VERSION = '1.2.0';
   const ALLOWED_LETTER_CLASSIFICATIONS = Object.freeze(['ד', 'ה', 'ת', 'exclude']);
 
   function clamp(value, minimum, maximum) {
@@ -366,7 +366,8 @@
     width,
     height,
     strokeWidth,
-    roofMinimumRun
+    roofMinimumRun,
+    stemRootX = null
   ) {
     const sourceComponentId = component.sourceComponentId;
     if (!sourceComponentId || !originalComponentLabels) return null;
@@ -386,9 +387,42 @@
         // the same 8-connected component of the original ink as the proposed
         // stem, proving an actual ink path between them.
         if (originalComponentLabels[index] !== sourceComponentId) continue;
+        let runStartX = x;
+        let runEndX = x;
+        while (runStartX > 0 && originalMask[row + runStartX - 1] &&
+               originalComponentLabels[row + runStartX - 1] === sourceComponentId) runStartX--;
+        while (runEndX + 1 < width && originalMask[row + runEndX + 1] &&
+               originalComponentLabels[row + runEndX + 1] === sourceComponentId) runEndX++;
+        // Classify the roof attachment from the stem where it actually meets
+        // the roof.  The center of the full component bounding box drifts with
+        // a long physical slant and can turn a clear right attachment into an
+        // ambiguous or left one.
+        const attachmentX = Number.isFinite(stemRootX)
+          ? clamp(stemRootX, runStartX, runEndX)
+          : (component.left + component.right) / 2;
+        const leftExtensionPx = Math.max(0, attachmentX - runStartX);
+        const rightExtensionPx = Math.max(0, runEndX - attachmentX);
+        const extensionDifferencePx = Math.abs(leftExtensionPx - rightExtensionPx);
+        const attachmentSide = extensionDifferencePx < Math.max(1, strokeWidth)
+          ? null
+          : leftExtensionPx > rightExtensionPx ? 'right' : 'left';
+        const sideConfidence = clamp(extensionDifferencePx / Math.max(1, strokeWidth * 4), 0, 1);
         const distanceFromRoot = Math.abs(component.top - y);
         if (!best || runLength > best.runLength || (runLength === best.runLength && distanceFromRoot < best.distancePx)) {
-          best = { y, runLength, distancePx: distanceFromRoot, connectedToStem: true };
+          best = {
+            y,
+            runLength,
+            runStartX,
+            runEndX,
+            attachmentX,
+            attachmentSide,
+            leftExtensionPx,
+            rightExtensionPx,
+            sideConfidence,
+            needsHumanSideConfirmation: attachmentSide == null,
+            distancePx: distanceFromRoot,
+            connectedToStem: true
+          };
         }
       }
     }
@@ -433,6 +467,7 @@
     const tip = { x: intercept + slope * component.bottom, y: component.bottom };
     return {
       rows: rowEntries,
+      fitRows,
       slope,
       residualRms,
       medianRowWidth: median(fitRows.map(row => row.width)) || 1,
@@ -444,6 +479,65 @@
       },
       root,
       tip
+    };
+  }
+
+  function innerWhiteBoundary(fit, roofSupport, context, maximumSamples = 48) {
+    if (!fit?.rows?.length || !roofSupport) return null;
+    if (!['left', 'right'].includes(roofSupport.attachmentSide)) return null;
+    const side = roofSupport.attachmentSide === 'left' ? 'right' : 'left';
+    const edgeKey = side === 'left' ? 'leftX' : 'rightX';
+    const edgeOffset = side === 'left' ? -.5 : .5;
+    const inwardStep = side === 'left' ? -1 : 1;
+    const trim = Math.max(0, fit.axisFit?.trimmedRowsAtEachEnd || 0);
+    const lowerLimit = roofSupport.y;
+    const rowsWithOpenWhite = fit.rows.filter(row => {
+      if (row.y <= lowerLimit) return false;
+      const adjacentX = Math.round(row[edgeKey]) + inwardStep;
+      if (adjacentX < 0 || adjacentX >= context.roi.width) return false;
+      return context.originalMask[row.y * context.roi.width + adjacentX] === 0;
+    });
+    // A geometric edge is not yet an inner-white boundary until the pixel on
+    // its white-facing side is actually open.  Failing here is preferable to
+    // publishing an ink edge (or the old center axis) under the professional
+    // inner-white label.
+    if (rowsWithOpenWhite.length < 2) return null;
+    const usableRows = rowsWithOpenWhite.slice(0, Math.max(2, rowsWithOpenWhite.length - trim));
+    if (!usableRows || usableRows.length < 2) return null;
+    const boundaryPoint = row => ({ x: row[edgeKey] + edgeOffset, y: row.y });
+    const localRoot = boundaryPoint(usableRows[0]);
+    const localTip = boundaryPoint(usableRows[usableRows.length - 1]);
+    const desired = Math.min(Math.max(2, Math.trunc(maximumSamples) || 48), usableRows.length);
+    const sampledRows = [];
+    for (let index = 0; index < desired; index++) {
+      const rowIndex = desired === 1 ? 0 : Math.round(index * (usableRows.length - 1) / (desired - 1));
+      const row = usableRows[rowIndex];
+      if (sampledRows[sampledRows.length - 1] !== row) sampledRows.push(row);
+    }
+    const roiPolyline = sampledRows.map(row => {
+      const point = boundaryPoint(row);
+      return { x: round(point.x), y: round(point.y) };
+    });
+    const sourcePolyline = roiPolyline.map(point => ({
+      x: round(point.x + context.roi.x),
+      y: round(point.y + context.roi.y)
+    }));
+    const root = coordinatePoint(localRoot, context.roi);
+    const tip = coordinatePoint(localTip, context.roi);
+    return {
+      method: 'inner-white-boundary-chord-v1',
+      side,
+      attachmentSide: roofSupport.attachmentSide,
+      sideConfidence: roofSupport.sideConfidence,
+      sideSource: 'roof-extension-v1',
+      basis: 'ink-white-transition',
+      root,
+      tip,
+      roiPolyline,
+      sourcePolyline,
+      detectedRowCount: usableRows.length,
+      sampleCount: roiPolyline.length,
+      signedVerticalAngleDeg: round(signedVerticalAngle(root.source, tip.source), 4)
     };
   }
 
@@ -541,6 +635,8 @@
     const angle = signedVerticalAngle(fit.root, fit.tip);
     if (Math.abs(angle) > context.maximumAngleDeg) return null;
 
+    const rootRows = fit.rows.filter(row => row.y <= component.top + Math.max(1, context.strokeWidth * .75));
+    const stemRootX = median(rootRows.map(row => row.x)) ?? fit.root.x;
     const roofSupport = roofSupportFor(
       component,
       context.originalMask,
@@ -549,18 +645,25 @@
       context.roi.width,
       context.roi.height,
       context.strokeWidth,
-      context.roofMinimumRun
+      context.roofMinimumRun,
+      stemRootX
     );
     component.roofSupport = roofSupport;
     if (context.requireRoof && !roofSupport) return null;
+    if (context.requiredRoofAttachmentSide && roofSupport?.attachmentSide !== context.requiredRoofAttachmentSide) return null;
+
+    const boundary = innerWhiteBoundary(fit, roofSupport, context);
+    if (!boundary) return null;
 
     const confidence = confidenceFor(component, fit, context);
     if (confidence < context.minimumConfidence) return null;
-    const root = coordinatePoint(fit.root, context.roi);
-    const tip = coordinatePoint(fit.tip, context.roi);
+    const axisRoot = coordinatePoint(fit.root, context.roi);
+    const axisTip = coordinatePoint(fit.tip, context.roi);
+    const root = boundary.root;
+    const tip = boundary.tip;
     const bounds = coordinateBounds(component, context.roi);
     const bodyOutline = sampledBodyOutline(fit.rows, context.roi);
-    const signedAngle = round(angle, 4);
+    const signedAngle = boundary.signedVerticalAngleDeg;
     return {
       id: null,
       root: root.source,
@@ -568,22 +671,42 @@
       roiRoot: root.roi,
       roiTip: tip.roi,
       endpoints: { root, tip, topRoot: root, bottomTip: tip },
+      axis: {
+        root: axisRoot.source,
+        tip: axisTip.source,
+        roiRoot: axisRoot.roi,
+        roiTip: axisTip.roi,
+        signedVerticalAngleDeg: round(angle, 4)
+      },
       signedAngleDeg: signedAngle,
       signedVerticalAngleDeg: signedAngle,
       angleConvention: 'signed-deviation-from-vertical',
       confidence: round(confidence, 4),
       bounds,
       strokeWidthPx: round(fit.medianRowWidth, 3),
-      lengthPx: round(Math.hypot(fit.tip.x - fit.root.x, fit.tip.y - fit.root.y), 3),
+      lengthPx: round(Math.hypot(tip.roi.x - root.roi.x, tip.roi.y - root.roi.y), 3),
       rowCoverage: round(rowCoverage, 4),
       axisFit: fit.axisFit,
+      innerBoundary: boundary,
       bodyOutline,
+      sourceComponentId: component.sourceComponentId || null,
       roofSupport: roofSupport
         ? {
             found: true,
             connectedToStem: roofSupport.connectedToStem === true,
             sourceY: context.roi.y + roofSupport.y,
             roiY: roofSupport.y,
+            sourceRunStartX: context.roi.x + roofSupport.runStartX,
+            sourceRunEndX: context.roi.x + roofSupport.runEndX,
+            roiRunStartX: roofSupport.runStartX,
+            roiRunEndX: roofSupport.runEndX,
+            attachmentSide: roofSupport.attachmentSide,
+            leftExtensionPx: round(roofSupport.leftExtensionPx, 3),
+            rightExtensionPx: round(roofSupport.rightExtensionPx, 3),
+            sideConfidence: round(roofSupport.sideConfidence, 4),
+            sourceAttachmentX: round(context.roi.x + roofSupport.attachmentX, 3),
+            roiAttachmentX: round(roofSupport.attachmentX, 3),
+            needsHumanSideConfirmation: roofSupport.needsHumanSideConfirmation === true,
             horizontalRunPx: roofSupport.runLength,
             distanceFromRootPx: round(roofSupport.distancePx, 3)
           }
@@ -598,8 +721,8 @@
 
   function stableCandidateId(candidate) {
     const bounds = candidate.bounds.source;
-    const rootX = Math.round(candidate.root.x * 10);
-    const tipX = Math.round(candidate.tip.x * 10);
+    const rootX = Math.round((candidate.axis?.root?.x ?? candidate.root.x) * 10);
+    const tipX = Math.round((candidate.axis?.tip?.x ?? candidate.tip.x) * 10);
     return `stem-${bounds.left}-${bounds.top}-${bounds.right}-${bounds.bottom}-${rootX}-${tipX}`;
   }
 
@@ -662,6 +785,9 @@
       maximumAngleDeg: clamp(finiteNumber(options.maximumAngleDeg, 38), 1, 89),
       minimumConfidence: clamp(finiteNumber(options.minimumConfidence, .42), 0, 1),
       requireRoof: options.requireRoof !== false,
+      requiredRoofAttachmentSide: ['left', 'right'].includes(options.requiredRoofAttachmentSide)
+        ? options.requiredRoofAttachmentSide
+        : null,
       roofMinimumRun: Math.max(
         4,
         finiteNumber(

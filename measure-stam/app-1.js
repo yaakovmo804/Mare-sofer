@@ -21,8 +21,8 @@ const BUILTIN_VARIABLES = [
   { id: 'shin-teeth', name: 'מרווח בין שיני שי״ן', builtin: true },
   { id: 'bet-seat-line', name: 'תחתית מושב ב׳–שורה/שרטוט', builtin: true },
   { id: 'roof-length', name: 'אורך הגג', builtin: true },
-  { id: 'root-weight', name: 'משקל השורש', builtin: true },
-  { id: 'max-weight', name: 'נקודת שיא העובי', builtin: true },
+  { id: 'root-weight', name: 'משקל השורש — מדידה ישנה', builtin: true, legacyOnly: true },
+  { id: 'max-weight', name: 'נקודת שיא העובי — מדידה ישנה', builtin: true, legacyOnly: true },
   { id: 'balcony-width', name: 'רוחב מרפסת', builtin: true }
 ];
 
@@ -32,10 +32,12 @@ const TOOL_COLORS = {
   nibRegion: MASTER_SYSTEM.colorFor({ semanticMetricId: 'nib' }),
   gap: MASTER_SYSTEM.colorFor({ semanticMetricId: 'gaps' }),
   length: MASTER_SYSTEM.colorFor({ semanticMetricId: 'widths' }),
-  angle: MASTER_SYSTEM.colorFor({ semanticMetricId: 'slants-parallels' }),
+  angle: '#d97706',
+  weightSample: MASTER_SYSTEM.colorFor({ semanticMetricId: 'weights' }),
+  parallelCheck: MASTER_SYSTEM.colorFor({ semanticMetricId: 'parallels' }),
   kastel: MASTER_SYSTEM.colorFor({ semanticMetricId: 'reference-template' }), thirds: MASTER_SYSTEM.colorFor({ semanticMetricId: 'thirds' }),
   rowAlign: MASTER_SYSTEM.colorFor({ semanticMetricId: 'straightness' }),
-  slantScan: MASTER_SYSTEM.colorFor({ semanticMetricId: 'slants-parallels' }),
+  slantScan: MASTER_SYSTEM.colorFor({ semanticMetricId: 'slants' }),
   ellipse: MASTER_SYSTEM.colorFor({ semanticMetricId: 'circle-ellipse' }),
   circle: MASTER_SYSTEM.colorFor({ semanticMetricId: 'circle-ellipse' })
 };
@@ -43,7 +45,7 @@ const KASTEL_GUIDE_COLORS = {
   thirds: MASTER_SYSTEM.colorFor({ semanticMetricId: 'thirds' }),
   roof: MASTER_SYSTEM.colorFor({ semanticMetricId: 'roofs' }),
   seat: MASTER_SYSTEM.colorFor({ semanticMetricId: 'seats' }),
-  seatTrend: MASTER_SYSTEM.colorFor({ semanticMetricId: 'slants-parallels' })
+  seatTrend: MASTER_SYSTEM.colorFor({ semanticMetricId: 'slants' })
 };
 
 const SEMANTIC_CATEGORIES = [
@@ -63,7 +65,8 @@ const SEMANTIC_CATEGORIES = [
   { id: 'word-gap', name: 'מרווח בין מילים' },
   { id: 'line-gap', name: 'מרווח בין השיטין' },
   { id: 'thirds', name: 'חוק השלישים' },
-  { id: 'slant', name: 'נטיות ומקבילות' },
+  { id: 'slant', name: 'נטיות' },
+  { id: 'parallel', name: 'מקבילות' },
   { id: 'angle', name: 'זוויות' },
   { id: 'geometry', name: 'עיגולים ואליפסות' },
   { id: 'reference-template', name: 'תבנית אות' },
@@ -547,7 +550,9 @@ function mergeProfessionalSuite(saved = {}) {
   const composition = saved.composition || {};
   return {
     activeGroup: saved.activeGroup === 'aman' ? 'aman' : 'regaim',
-    activeMetricId: MASTER_SYSTEM.metric(saved.activeMetricId) ? saved.activeMetricId : null,
+    activeMetricId: MASTER_SYSTEM.metric(saved.activeMetricId)
+      ? (MASTER_SYSTEM.canonicalMetricId?.(saved.activeMetricId) || saved.activeMetricId)
+      : null,
     descriptions: MASTER_SYSTEM.mergeDescriptions(saved.descriptions),
     measurementNotes: MASTER_SYSTEM.mergeMeasurementNotes(saved.measurementNotes),
     // A pending tool choice is transient UI state, never project data.
@@ -637,7 +642,9 @@ function mergeFormula(saved) {
     betweenLinesPx: Number.isFinite(+saved.betweenLinesPx) && +saved.betweenLinesPx > 0 ? +saved.betweenLinesPx : null,
     calibration: saved.calibration || null,
     nibSamples,
-    selectedVariable: variables.some(v => v.id === saved.selectedVariable) ? saved.selectedVariable : 'common-gap',
+    selectedVariable: variables.some(v => v.id === saved.selectedVariable && v.legacyOnly !== true)
+      ? saved.selectedVariable
+      : 'common-gap',
     variables,
     analysis: {
       status: 'idle',
@@ -657,7 +664,7 @@ function defaultName(type) {
     area: 'שטח ואיזון לובן', length: 'אורך', angle: 'זווית', kastel: 'קעסטעל',
     thirds: 'חוק השלישים — בדיקת מיקום', nib: 'עובי קולמוס', nibRegion: 'אזור כיול קולמוס',
     gap: selectedVariableName(), letterTemplate: 'תבנית אות', rowAlign: 'יישור השורה',
-    slantScan: 'סריקת ירכות ונטיות',
+    slantScan: 'סריקת נטיית ירך ימין', weightSample: 'דגימת משקל', parallelCheck: 'בדיקת מקבילות',
     ellipse: 'אליפסה', circle: 'עיגול'
   };
   return names[type] || 'מדידה';
@@ -666,7 +673,7 @@ function typeLabel(type) {
   const names = {
     area: 'שטח', length: 'אורך', angle: 'זווית', kastel: 'קעסטעל', thirds: 'חוק השלישים',
     nib: 'קולמוס', nibRegion: 'אזור כיול', gap: 'מרווח', letterTemplate: 'תבנית אות',
-    rowAlign: 'יישור שורה', slantScan: 'סריקת ירכות', ellipse: 'אליפסה', circle: 'עיגול'
+    rowAlign: 'יישור שורה', slantScan: 'סריקת נטיות', weightSample: 'משקל', parallelCheck: 'מקבילות', ellipse: 'אליפסה', circle: 'עיגול'
   };
   return names[type] || 'מדידה';
 }
@@ -687,7 +694,7 @@ function styleFromUI() {
 }
 function makeObject(type, points, overrides = {}) {
   const style = styleFromUI();
-  const lineOnly = ['length', 'angle', 'nib', 'gap', 'thirds'].includes(type);
+  const lineOnly = ['length', 'angle', 'nib', 'gap', 'thirds', 'weightSample', 'parallelCheck'].includes(type);
   const category = overrides.category || defaultCategory(type, overrides.formulaKey);
   const semanticMetricId = MASTER_SYSTEM.metricIdFor({
     semanticMetricId: overrides.semanticMetricId,
@@ -727,6 +734,23 @@ function makeObject(type, points, overrides = {}) {
       ...(overrides.display || {})
     }
   };
+  if (type === 'weightSample') {
+    const step = MASTER_SYSTEM.weightStep(object.weightPointCount);
+    if (step) {
+      object.weightPointCount = step.points;
+      object.weightLocationRole = object.weightLocationRole || 'stem-roof-exit';
+      object.weightClass = {
+        points: step.points,
+        clockLabel: step.clockLabel,
+        nibFractionApprox: step.nibFractionApprox,
+        fractionLabel: step.fractionLabel,
+        betBaseline: step.betBaseline === true,
+        locationRole: object.weightLocationRole,
+        source: 'human'
+      };
+    }
+  }
+  if (type === 'parallelCheck') object.pairScope = object.pairScope || 'same-letter-inner-white';
   return enforceSemanticStyle(object);
 }
 
@@ -736,6 +760,8 @@ function defaultCategory(type, formulaKey = state.formula.selectedVariable) {
   if (type === 'letterTemplate') return 'reference-template';
   if (type === 'rowAlign') return 'straightness';
   if (type === 'slantScan') return 'slant';
+  if (type === 'weightSample') return 'weight';
+  if (type === 'parallelCheck') return 'parallel';
   if (type === 'ellipse' || type === 'circle') return 'geometry';
   if (type === 'kastel' || type === 'thirds') return 'thirds';
   if (type === 'angle') return 'angle';
@@ -766,6 +792,7 @@ function semanticColorForObject(object, fallback = '#64748b') {
 function enforceSemanticStyle(object) {
   if (!object) return object;
   if (object.type === 'letterTemplate' || object.role === 'vector-source-frame') return object;
+  const fixedMetricId = MASTER_SYSTEM.fixedMetricIdFor?.(object) || null;
   const semanticMetricId = MASTER_SYSTEM.metricIdFor({
     semanticMetricId: object.semanticMetricId,
     formulaKey: object.formulaKey,
@@ -775,6 +802,7 @@ function enforceSemanticStyle(object) {
   if (semanticMetricId) {
     object.semanticMetricId = semanticMetricId;
     object.color = MASTER_SYSTEM.colorFor({ semanticMetricId });
+    if (fixedMetricId) object.category = MASTER_SYSTEM.metric(fixedMetricId)?.category || object.category;
   }
   return object;
 }
@@ -985,6 +1013,64 @@ function drawDetectedStemBody(object) {
   ctx.restore();
 }
 
+function drawDetectedInnerBoundary(object) {
+  if (object?.auto !== true) return;
+  const polyline = object.candidateInnerBoundary?.sourcePolyline;
+  if (!Array.isArray(polyline) || polyline.length < 2) return;
+  const points = polyline.map(imageToScreen);
+  ctx.save();
+  ctx.setLineDash([]);
+  ctx.strokeStyle = object.color;
+  ctx.lineWidth = Math.max(2, (object.lineWidth || 4) * .72);
+  ctx.globalAlpha = .96;
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  for (const point of points.slice(1)) ctx.lineTo(point.x, point.y);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function weightSampleStep(object) {
+  return MASTER_SYSTEM.weightStep(object?.weightPointCount ?? object?.weightClass?.points);
+}
+
+function drawWeightSampleDots(context, anchor, object, unit = 1) {
+  const step = weightSampleStep(object);
+  if (!step) return;
+  const radius = 4.4 * unit;
+  const spacing = 11 * unit;
+  const start = -(step.points - 1) * spacing / 2;
+  context.save();
+  context.setLineDash([]);
+  context.fillStyle = object.color;
+  context.strokeStyle = '#fff';
+  context.lineWidth = Math.max(1.4 * unit, 1);
+  for (let index = 0; index < step.points; index++) {
+    context.beginPath();
+    context.arc(anchor.x + start + index * spacing, anchor.y, radius, 0, Math.PI * 2);
+    context.fill();
+    context.stroke();
+  }
+  context.restore();
+}
+
+function drawWeightSampleSelection(context, anchor, object, unit = 1) {
+  const step = weightSampleStep(object);
+  if (!step) return;
+  const dotRadius = 4.4 * unit;
+  const spacing = 11 * unit;
+  const horizontalRadius = (step.points - 1) * spacing / 2 + dotRadius + 4 * unit;
+  const verticalRadius = dotRadius + 4 * unit;
+  context.save();
+  context.setLineDash([3 * unit, 3 * unit]);
+  context.strokeStyle = object.color;
+  context.lineWidth = Math.max(1.5 * unit, 1);
+  context.beginPath();
+  context.ellipse(anchor.x, anchor.y, horizontalRadius, verticalRadius, 0, 0, Math.PI * 2);
+  context.stroke();
+  context.restore();
+}
+
 function drawObject(object, selected, draft) {
   enforceSemanticStyle(object);
   const points = object.points.map(imageToScreen);
@@ -1074,6 +1160,22 @@ function drawObject(object, selected, draft) {
     if (object.fillEnabled) ctx.fill();
     ctx.stroke();
     if (!draft && resultLabelVisible) label({ x: (left + right) / 2, y: bottom }, measurementResultModel(object).canvasText, object.color, 'below');
+  } else if (object.type === 'weightSample') {
+    drawWeightSampleDots(ctx, points[0], object);
+    if (resultLabelVisible) label(points[0], measurementResultModel(object).canvasText, object.color, 'above');
+  } else if (object.type === 'parallelCheck') {
+    if (points.length >= 2) {
+      drawLine(points[0], points[1]);
+      drawEndCaps(points[0], points[1], object.color);
+    }
+    if (points.length >= 4) {
+      drawLine(points[2], points[3]);
+      drawEndCaps(points[2], points[3], object.color);
+      if (resultLabelVisible) {
+        const center = midpoint(midpoint(points[0], points[1]), midpoint(points[2], points[3]));
+        label(center, measurementResultModel(object).canvasText, object.color);
+      }
+    }
   } else if (['length', 'nib', 'gap'].includes(object.type)) {
     if (points.length > 1) {
       if (object.type === 'gap') drawGapDetectionBoundaries(object);
@@ -1087,6 +1189,7 @@ function drawObject(object, selected, draft) {
   } else if (object.type === 'angle') {
     if (points.length > 1) {
       drawDetectedStemBody(object);
+      drawDetectedInnerBoundary(object);
       drawLine(points[0], points[1]);
       drawEndCaps(points[0], points[1], object.color);
       if (resultLabelVisible) label(midpoint(points[0], points[1]), measurementResultModel(object).canvasText, object.color);
@@ -1100,12 +1203,18 @@ function drawObject(object, selected, draft) {
   }
 
   if (selected || draft) {
-    points.forEach((point, index) => {
-      const pointSelected = state.selectedPoint &&
-        ((draft && state.selectedPoint.target === 'draft' && state.selectedPoint.index === index) ||
-         (!draft && state.selectedPoint.target === 'object' && state.selectedPoint.id === object.id && state.selectedPoint.index === index));
-      drawHandle(point, object.color, pointSelected);
-    });
+    if (object.type === 'weightSample') {
+      // A normal 7px editing handle would cover the 4.4px weight dot. Use an
+      // outline around the whole sample so every classified dot stays visible.
+      drawWeightSampleSelection(ctx, points[0], object);
+    } else {
+      points.forEach((point, index) => {
+        const pointSelected = state.selectedPoint &&
+          ((draft && state.selectedPoint.target === 'draft' && state.selectedPoint.index === index) ||
+           (!draft && state.selectedPoint.target === 'object' && state.selectedPoint.id === object.id && state.selectedPoint.index === index));
+        drawHandle(point, object.color, pointSelected);
+      });
+    }
     if (object.type === 'area' && points.length >= 2) {
       ensureAreaSegments(object);
       for (let index = 0; index < areaSegmentCount(object); index++) {

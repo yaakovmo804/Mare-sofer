@@ -91,10 +91,17 @@ function assertIrregularFixtureCandidates(result) {
       `candidate root ${candidate.root.x} is not the expected attached thigh near x=${expected.rootX}`);
     assert.ok(Math.abs(candidate.tip.x - expected.tipX) <= 7,
       `candidate tip ${candidate.tip.x} is not the expected attached thigh near x=${expected.tipX}`);
-    assert.ok(Math.abs(candidate.signedVerticalAngleDeg - expected.angleDeg) <= .4,
-      `expected ${expected.angleDeg}°, received ${candidate.signedVerticalAngleDeg}°`);
+    assert.ok(Math.abs(candidate.axis.signedVerticalAngleDeg - expected.angleDeg) <= .4,
+      `expected center-axis detector near ${expected.angleDeg}°, received ${candidate.axis.signedVerticalAngleDeg}°`);
+    assert.ok(Math.abs(analyzer.signedVerticalAngle(candidate.root, candidate.tip) - candidate.signedVerticalAngleDeg) < 1e-3,
+      'the published angle must come from the inner-white boundary endpoints');
     assert.equal(candidate.roofSupport.connectedToStem, true);
     assert.equal(candidate.axisFit?.method, 'trimmed-outline-midpoints-linear-v1');
+    assert.equal(candidate.innerBoundary?.method, 'inner-white-boundary-chord-v1');
+    assert.equal(candidate.innerBoundary?.basis, 'ink-white-transition');
+    assert.equal(candidate.innerBoundary?.attachmentSide, candidate.roofSupport.attachmentSide);
+    assert.ok(['left', 'right'].includes(candidate.innerBoundary?.side));
+    assert.ok(candidate.innerBoundary.roiPolyline.length >= 2);
     assert.ok(candidate.axisFit.fittedRowCount < candidate.axisFit.sampledRowCount,
       'terminal and junction rows must be trimmed before fitting the thigh axis');
     const outline = candidate.bodyOutline;
@@ -172,6 +179,71 @@ test('accepts a compact binary raster and keeps endpoint-order-independent signe
   assert.ok(Math.abs(forward - candidate.signedVerticalAngleDeg) < 1e-3);
   assert.equal(candidate.signedAngleDeg, candidate.signedVerticalAngleDeg);
   assert.equal(candidate.angleConvention, 'signed-deviation-from-vertical');
+});
+
+test('a right-stem scan publishes only the inner white boundary and rejects left roof attachments', () => {
+  const result = analyzer.analyze(irregularSlantRowFixture(), null, { requiredRoofAttachmentSide: 'right' });
+  assert.deepEqual(
+    result.candidates.map(candidate => irregularFixtureRoleForRootX(candidate.root.x)),
+    ['attached-right-slant', 'attached-near-vertical']
+  );
+  for (const candidate of result.candidates) {
+    assert.equal(candidate.roofSupport.attachmentSide, 'right');
+    assert.equal(candidate.innerBoundary.side, 'left');
+    assert.equal(candidate.innerBoundary.sideSource, 'roof-extension-v1');
+    assert.ok(candidate.innerBoundary.sideConfidence > .5);
+    assert.ok(candidate.innerBoundary.root.roi.y > candidate.roofSupport.roiY,
+      'the professional line must begin only after white space opens beneath the roof');
+  }
+});
+
+test('roof side is classified at the physical root instead of the full slanted bounding box center', () => {
+  const raster = grayRaster(130, 120);
+  rectangle(raster, 20, 12, 80, 10);
+  slantedStem(raster, 94, 14, 32, 104, 10);
+  const result = analyzer.analyze(raster, null, {
+    requiredRoofAttachmentSide: 'right',
+    strokeWidthPx: 10,
+    maximumAngleDeg: 38,
+    maximumWidthToHeight: 1
+  });
+  assert.equal(result.candidates.length, 1,
+    'a long slant must not drag its roof-attachment classifier toward the component box center');
+  const candidate = result.candidates[0];
+  assert.equal(candidate.roofSupport.attachmentSide, 'right');
+  assert.ok(candidate.roofSupport.roiAttachmentX > 85);
+  assert.equal(candidate.roofSupport.sourceAttachmentX, candidate.roofSupport.roiAttachmentX);
+  assert.equal(candidate.innerBoundary.side, 'left');
+});
+
+test('changing stem width moves the inner-white angle without moving the diagnostic center axis', () => {
+  const raster = grayRaster(130, 110);
+  rectangle(raster, 12, 16, 88, 7);
+  for (let y = 19; y <= 96; y++) {
+    const progress = (y - 19) / (96 - 19);
+    const thickness = 6 + Math.round(progress * 10);
+    const centerX = 91;
+    const left = Math.round(centerX - (thickness - 1) / 2);
+    rectangle(raster, left, y, thickness, 1);
+  }
+  const result = analyzer.analyze(raster, null, { requiredRoofAttachmentSide: 'right', strokeWidthPx: 8 });
+  assert.equal(result.candidates.length, 1);
+  const candidate = result.candidates[0];
+  assert.ok(Math.abs(candidate.axis.signedVerticalAngleDeg) < 1,
+    `diagnostic center axis should stay vertical, received ${candidate.axis.signedVerticalAngleDeg}°`);
+  assert.ok(Math.abs(candidate.signedVerticalAngleDeg) > 3,
+    `inner edge should record the physical widening, received ${candidate.signedVerticalAngleDeg}°`);
+  assert.notEqual(candidate.root.x, candidate.axis.root.x);
+  assert.equal(candidate.innerBoundary.side, 'left');
+});
+
+test('an ambiguous centered roof attachment does not fall back to a center-axis measurement', () => {
+  const raster = grayRaster(120, 100);
+  rectangle(raster, 20, 16, 80, 7);
+  slantedStem(raster, 60, 18, 60, 88, 7);
+  const result = analyzer.analyze(raster, null, { strokeWidthPx: 7 });
+  assert.equal(result.candidates.length, 0);
+  assert.equal(result.diagnostics.reason, 'no-candidates');
 });
 
 test('accepts an ImageData-like RGBA raster with the same deterministic geometry', () => {
