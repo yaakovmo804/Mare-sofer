@@ -1,9 +1,10 @@
-const CACHE = 'tov-mareh-ipad-v4-real-controls';
+const CACHE = 'tov-mareh-ipad-v5-engine-21';
 const FILES = [
   './',
   './index.html',
   './styles.css?v=20260804-real-controls',
   './app.js?v=20260804-real-controls',
+  './engine-v21.js',
   './manifest.webmanifest',
   './assets/tov-mareh-icon.svg'
 ];
@@ -22,12 +23,37 @@ self.addEventListener('activate', (event) => {
   self.clients.claim();
 });
 
+async function combinedAppResponse(request) {
+  try {
+    const [appResponse, engineResponse] = await Promise.all([
+      fetch(request, { cache: 'no-store' }),
+      fetch('./engine-v21.js', { cache: 'no-store' })
+    ]);
+    if (!appResponse.ok || !engineResponse.ok) throw new Error('engine fetch failed');
+    const combined = `${await appResponse.text()}\n\n${await engineResponse.text()}`;
+    return new Response(combined, {
+      headers: {
+        'Content-Type': 'application/javascript; charset=utf-8',
+        'Cache-Control': 'no-store'
+      }
+    });
+  } catch (error) {
+    return caches.match(request);
+  }
+}
+
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
 
+  const url = new URL(event.request.url);
+  if (url.pathname.endsWith('/tov-mareh/app.js')) {
+    event.respondWith(combinedAppResponse(event.request));
+    return;
+  }
+
   if (event.request.mode === 'navigate') {
     event.respondWith(
-      fetch(event.request)
+      fetch(event.request, { cache: 'no-store' })
         .then((response) => {
           const copy = response.clone();
           caches.open(CACHE).then((cache) => cache.put('./index.html', copy));
