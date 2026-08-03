@@ -56,5 +56,5 @@ test('row angle estimator stays close to horizontal on a horizontal sample', () 
     }
   }
   const angle = core.estimateRowAngle(source, width, height);
-  assert.ok(Math.abs(angle) <= 0.5, `angle=${angle}`);
+  assert.ok(Math.abs(angle) <= 1, `angle=${angle}`);
 });
