@@ -1,10 +1,11 @@
-const CACHE = 'tov-mareh-ipad-v5-engine-21';
+const CACHE = 'tov-mareh-ipad-v6-engine-40';
 const FILES = [
   './',
   './index.html',
   './styles.css?v=20260804-real-controls',
   './app.js?v=20260804-real-controls',
   './engine-v21.js',
+  './live-preview-v4.js',
   './manifest.webmanifest',
   './assets/tov-mareh-icon.svg'
 ];
@@ -25,12 +26,19 @@ self.addEventListener('activate', (event) => {
 
 async function combinedAppResponse(request) {
   try {
-    const [appResponse, engineResponse] = await Promise.all([
+    const [appResponse, engineResponse, previewResponse] = await Promise.all([
       fetch(request, { cache: 'no-store' }),
-      fetch('./engine-v21.js', { cache: 'no-store' })
+      fetch('./engine-v21.js', { cache: 'no-store' }),
+      fetch('./live-preview-v4.js', { cache: 'no-store' })
     ]);
-    if (!appResponse.ok || !engineResponse.ok) throw new Error('engine fetch failed');
-    const combined = `${await appResponse.text()}\n\n${await engineResponse.text()}`;
+    if (!appResponse.ok || !engineResponse.ok || !previewResponse.ok) {
+      throw new Error('engine fetch failed');
+    }
+    const combined = [
+      await appResponse.text(),
+      await engineResponse.text(),
+      await previewResponse.text()
+    ].join('\n\n');
     return new Response(combined, {
       headers: {
         'Content-Type': 'application/javascript; charset=utf-8',
@@ -65,7 +73,7 @@ self.addEventListener('fetch', (event) => {
   }
 
   event.respondWith(
-    fetch(event.request)
+    fetch(event.request, { cache: 'no-store' })
       .then((response) => {
         if (response && response.ok) {
           const copy = response.clone();
