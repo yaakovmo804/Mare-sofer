@@ -252,12 +252,16 @@ function drawBase() {
     canvas.height = height;
   });
 
-  bctx.fillStyle = '#f5f1e8';
-  bctx.fillRect(0, 0, width, height);
-  bctx.save();
-  bctx.translate(width / 2, height / 2);
-  bctx.rotate(settings.rotation * Math.PI / 180);
-  bctx.drawImage(
+  const scratch = document.createElement('canvas');
+  scratch.width = width;
+  scratch.height = height;
+  const sctx = scratch.getContext('2d', { willReadFrequently: true });
+  sctx.fillStyle = '#f5f1e8';
+  sctx.fillRect(0, 0, width, height);
+  sctx.save();
+  sctx.translate(width / 2, height / 2);
+  sctx.rotate(settings.rotation * Math.PI / 180);
+  sctx.drawImage(
     img,
     img.width * margin,
     img.height * margin,
@@ -268,27 +272,55 @@ function drawBase() {
     width,
     height
   );
-  bctx.restore();
+  sctx.restore();
+
+  bctx.clearRect(0, 0, width, height);
+  const perspective = settings.perspective / 100;
+  if (Math.abs(perspective) < 0.001) {
+    bctx.drawImage(scratch, 0, 0);
+  } else {
+    const source = sctx.getImageData(0, 0, width, height);
+    const target = bctx.createImageData(width, height);
+    const inset = Math.abs(perspective) * width * 0.18;
+    for (let y = 0; y < height; y++) {
+      const t = y / Math.max(1, height - 1);
+      const left = perspective > 0 ? inset * (1 - t) : inset * t;
+      const right = perspective > 0 ? width - inset * (1 - t) : width - inset * t;
+      for (let x = 0; x < width; x++) {
+        const u = x / Math.max(1, width - 1);
+        const sourceX = left + u * (right - left);
+        sampleBilinear(source.data, width, height, sourceX, y, target.data, (y * width + x) * 4);
+      }
+    }
+    bctx.putImageData(target, 0, 0);
+  }
 
   actx.clearRect(0, 0, width, height);
   actx.drawImage(before, 0, 0);
   updateDivider();
 
-  if (state.autoFit) {
-    fitImageToStage();
-  } else {
-    setZoom(state.zoom);
-  }
+  if (state.autoFit) fitImageToStage();
+  else setZoom(state.zoom);
 }
 
 function processLocal(multiplier = 1) {
   const width = before.width;
   const height = before.height;
-  const source = bctx.getImageData(0, 0, width, height);
-  const output = actx.createImageData(width, height);
-  const data = source.data;
-  const out = output.data;
+  const original = bctx.getImageData(0, 0, width, height);
   const settings = state.settings;
+
+  const denoiseRadius = Math.round((settings.denoise / 100) * 3);
+  const source = denoiseRadius > 0
+    ? edgePreservingDenoise(original, width, height, denoiseRadius, settings.denoise / 100)
+    : original;
+  const illumination = boxBlur(original, width, height, Math.max(3, Math.round(7 + settings.deglare / 9)));
+  const output = actx.createImageData(width, height);
+  const maskImage = actx.createImageData(width, height);
+  const data = source.data;
+  const originalData = original.data;
+  const illumData = illumination.data;
+  const out = output.data;
+  const maskOut = maskImage.data;
 
   const sharp = settings.sharpness / 100 * multiplier;
   const black = settings.black / 100 * multiplier;
@@ -297,46 +329,69 @@ function processLocal(multiplier = 1) {
   const depth = settings.depth / 100;
   const warmth = settings.warmth / 100;
   const texture = settings.texture / 100;
-  const brightness = (settings.brightness - 50) * 1.5;
+  const brightness = (settings.brightness - 50) * 1.8;
   const deglare = settings.deglare / 100;
+  const lock = settings.lock / 100;
+  const threshold = 178 - black * 23;
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const index = (y * width + x) * 4;
-      const luminance = 0.299 * data[index] + 0.587 * data[index + 1] + 0.114 * data[index + 2];
-      const edge = edgeAt(data, width, height, x, y);
-      const ink = clamp((176 - luminance + deglare * Math.max(0, luminance - 220) * 0.55) / 116, 0, 1);
-      const mask = Math.pow(ink, 0.82 + uniformity * 0.12);
-      const grain = (Math.sin(x * 0.021 + y * 0.017) + Math.cos(x * 0.007 - y * 0.012)) * texture * 2.5;
-      const paperR = clamp(246 + warmth * 9 + brightness + grain, 215, 255);
-      const paperG = clamp(241 + warmth * 3 + brightness + grain * 0.75, 208, 253);
-      const paperB = clamp(230 - warmth * 10 + brightness + grain * 0.55, 195, 249);
-      const target = 9 + (1 - black) * 12;
-      const mixed = clamp(mask * (1 + black * 0.48), 0, 1);
+      const luminance = luminanceAt(data, index);
+      const originalLuminance = luminanceAt(originalData, index);
+      const localLight = luminanceAt(illumData, index);
+      const edge = edgeAt(originalData, width, height, x, y);
 
-      let red = lerp(paperR, target, mixed);
-      let green = lerp(paperG, target, mixed);
-      let blue = lerp(paperB, target, mixed);
+      const corrected = luminance - (localLight - 225) * deglare * 0.82;
+      const glareRecovery = clamp((originalLuminance - 214) / 38, 0, 1) * deglare * edge * 0.62;
+      let rawInk = clamp((threshold - corrected) / 112 + glareRecovery, 0, 1);
 
-      if (mask > 0.02) {
-        const core = (1 - edge * 0.8) * mask;
-        const shine = gloss * core * 0.14;
-        const mass = depth * core * 0.5;
-        red = clamp(red + shine * 255 - mass * 18, 0, 255);
-        green = clamp(green + shine * 246 - mass * 17, 0, 255);
-        blue = clamp(blue + shine * 232 - mass * 16, 0, 255);
+      const confidenceFloor = 0.025 + lock * 0.055;
+      if (rawInk < confidenceFloor) rawInk = 0;
+      const mask = Math.pow(rawInk, 0.92 + lock * 0.18 - uniformity * 0.22);
+      const core = clamp(mask * (1 - edge * 0.72), 0, 1);
+
+      const fibre = (
+        Math.sin(x * 0.013 + y * 0.004) * 0.48 +
+        Math.sin(x * 0.004 - y * 0.017) * 0.34 +
+        Math.cos((x + y) * 0.006) * 0.18
+      ) * texture * 5.2;
+      const pore = (hashNoise(x, y) - 0.5) * texture * 2.0;
+      const paperR = clamp(244 + warmth * 13 + brightness + fibre + pore, 210, 255);
+      const paperG = clamp(239 + warmth * 4 + brightness + fibre * 0.78 + pore, 203, 253);
+      const paperB = clamp(228 - warmth * 14 + brightness + fibre * 0.52 + pore, 188, 249);
+
+      const targetBlack = 5 + (1 - black) * 20;
+      const fill = clamp(mask * (0.88 + black * 0.62), 0, 1);
+      const fillCorrection = uniformity * core * (corrected - targetBlack) * 0.34;
+
+      let red = lerp(paperR, targetBlack, fill) - fillCorrection;
+      let green = lerp(paperG, targetBlack, fill) - fillCorrection;
+      let blue = lerp(paperB, targetBlack, fill) - fillCorrection;
+
+      if (mask > 0.015) {
+        const band = 0.5 + 0.5 * Math.sin((x * 0.009) + (y * 0.003));
+        const shineShape = core * (0.62 + band * 0.38) * (1 - edge * 0.7);
+        const highlight = gloss * shineShape * 34;
+        const mass = depth * core * 22;
+        red = red - mass + highlight;
+        green = green - mass * 0.95 + highlight * 0.92;
+        blue = blue - mass * 0.9 + highlight * 0.82;
       }
 
-      out[index] = red;
-      out[index + 1] = green;
-      out[index + 2] = blue;
+      out[index] = clamp(red, 0, 255);
+      out[index + 1] = clamp(green, 0, 255);
+      out[index + 2] = clamp(blue, 0, 255);
       out[index + 3] = 255;
+      const maskByte = Math.round(mask * 255);
+      maskOut[index] = maskOut[index + 1] = maskOut[index + 2] = maskByte;
+      maskOut[index + 3] = 255;
     }
   }
 
   actx.putImageData(output, 0, 0);
-  if (sharp > 0) unsharp(sharp);
-  $('deltaLabel').textContent = estimateDelta(source, output).toFixed(1) + '%';
+  if (sharp > 0) maskedUnsharp(sharp, maskImage.data);
+  $('deltaLabel').textContent = estimateDelta(original, actx.getImageData(0, 0, width, height)).toFixed(1) + '%';
 }
 
 async function renderAi(token) {
@@ -382,46 +437,159 @@ async function renderAi(token) {
 
 function edgeAt(data, width, height, x, y) {
   if (x < 1 || y < 1 || x >= width - 1 || y >= height - 1) return 1;
-  const luminanceAt = (index) => 0.299 * data[index] + 0.587 * data[index + 1] + 0.114 * data[index + 2];
+  const luminanceAtLocal = (index) => 0.299 * data[index] + 0.587 * data[index + 1] + 0.114 * data[index + 2];
   const index = (y * width + x) * 4;
   return clamp(
     (
-      Math.abs(luminanceAt(index + 4) - luminanceAt(index - 4)) +
-      Math.abs(luminanceAt(index + width * 4) - luminanceAt(index - width * 4))
+      Math.abs(luminanceAtLocal(index + 4) - luminanceAtLocal(index - 4)) +
+      Math.abs(luminanceAtLocal(index + width * 4) - luminanceAtLocal(index - width * 4))
     ) / 180,
     0,
     1
   );
 }
 
-function unsharp(amount) {
+function maskedUnsharp(amount, mask) {
   const width = after.width;
   const height = after.height;
   const image = actx.getImageData(0, 0, width, height);
   const data = image.data;
-  const copy = new Uint8ClampedArray(data);
+  const blurred = boxBlur(image, width, height, 1).data;
 
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      const index = (y * width + x) * 4;
-      for (let channel = 0; channel < 3; channel++) {
-        const blur = (
-          copy[index + channel] +
-          copy[index - 4 + channel] +
-          copy[index + 4 + channel] +
-          copy[index - width * 4 + channel] +
-          copy[index + width * 4 + channel]
-        ) / 5;
-        data[index + channel] = clamp(
-          copy[index + channel] + (copy[index + channel] - blur) * amount,
-          0,
-          255
-        );
-      }
+  for (let index = 0; index < data.length; index += 4) {
+    const inkWeight = mask[index] / 255;
+    const strength = amount * (0.32 + inkWeight * 0.9);
+    for (let channel = 0; channel < 3; channel++) {
+      data[index + channel] = clamp(
+        data[index + channel] + (data[index + channel] - blurred[index + channel]) * strength,
+        0,
+        255
+      );
+    }
+  }
+  actx.putImageData(image, 0, 0);
+}
+
+function boxBlur(image, width, height, radius) {
+  radius = Math.max(0, Math.round(radius));
+  if (radius === 0) return new ImageData(new Uint8ClampedArray(image.data), width, height);
+
+  const source = image.data;
+  const horizontal = new Float32Array(source.length);
+  const output = new ImageData(width, height);
+  const out = output.data;
+  const windowSize = radius * 2 + 1;
+
+  for (let y = 0; y < height; y++) {
+    let red = 0, green = 0, blue = 0;
+    for (let x = -radius; x <= radius; x++) {
+      const sx = clamp(x, 0, width - 1);
+      const i = (y * width + sx) * 4;
+      red += source[i]; green += source[i + 1]; blue += source[i + 2];
+    }
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      horizontal[i] = red / windowSize;
+      horizontal[i + 1] = green / windowSize;
+      horizontal[i + 2] = blue / windowSize;
+      horizontal[i + 3] = 255;
+      const removeX = clamp(x - radius, 0, width - 1);
+      const addX = clamp(x + radius + 1, 0, width - 1);
+      const remove = (y * width + removeX) * 4;
+      const add = (y * width + addX) * 4;
+      red += source[add] - source[remove];
+      green += source[add + 1] - source[remove + 1];
+      blue += source[add + 2] - source[remove + 2];
     }
   }
 
-  actx.putImageData(image, 0, 0);
+  for (let x = 0; x < width; x++) {
+    let red = 0, green = 0, blue = 0;
+    for (let y = -radius; y <= radius; y++) {
+      const sy = clamp(y, 0, height - 1);
+      const i = (sy * width + x) * 4;
+      red += horizontal[i]; green += horizontal[i + 1]; blue += horizontal[i + 2];
+    }
+    for (let y = 0; y < height; y++) {
+      const i = (y * width + x) * 4;
+      out[i] = red / windowSize;
+      out[i + 1] = green / windowSize;
+      out[i + 2] = blue / windowSize;
+      out[i + 3] = 255;
+      const removeY = clamp(y - radius, 0, height - 1);
+      const addY = clamp(y + radius + 1, 0, height - 1);
+      const remove = (removeY * width + x) * 4;
+      const add = (addY * width + x) * 4;
+      red += horizontal[add] - horizontal[remove];
+      green += horizontal[add + 1] - horizontal[remove + 1];
+      blue += horizontal[add + 2] - horizontal[remove + 2];
+    }
+  }
+  return output;
+}
+
+function edgePreservingDenoise(image, width, height, radius, amount) {
+  const source = image.data;
+  const result = new ImageData(width, height);
+  const out = result.data;
+  const range = 18 + amount * 52;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const index = (y * width + x) * 4;
+      const center = luminanceAt(source, index);
+      let weightSum = 0;
+      let red = 0, green = 0, blue = 0;
+      for (let dy = -radius; dy <= radius; dy++) {
+        const sy = clamp(y + dy, 0, height - 1);
+        for (let dx = -radius; dx <= radius; dx++) {
+          const sx = clamp(x + dx, 0, width - 1);
+          const sample = (sy * width + sx) * 4;
+          const difference = Math.abs(luminanceAt(source, sample) - center);
+          const spatial = 1 / (1 + dx * dx + dy * dy);
+          const tonal = Math.exp(-(difference * difference) / (2 * range * range));
+          const weight = spatial * tonal;
+          red += source[sample] * weight;
+          green += source[sample + 1] * weight;
+          blue += source[sample + 2] * weight;
+          weightSum += weight;
+        }
+      }
+      out[index] = red / weightSum;
+      out[index + 1] = green / weightSum;
+      out[index + 2] = blue / weightSum;
+      out[index + 3] = 255;
+    }
+  }
+  return result;
+}
+
+function sampleBilinear(source, width, height, x, y, target, targetIndex) {
+  x = clamp(x, 0, width - 1);
+  y = clamp(y, 0, height - 1);
+  const x0 = Math.floor(x), y0 = Math.floor(y);
+  const x1 = Math.min(width - 1, x0 + 1), y1 = Math.min(height - 1, y0 + 1);
+  const tx = x - x0, ty = y - y0;
+  const indices = [
+    (y0 * width + x0) * 4,
+    (y0 * width + x1) * 4,
+    (y1 * width + x0) * 4,
+    (y1 * width + x1) * 4
+  ];
+  for (let channel = 0; channel < 4; channel++) {
+    const top = lerp(source[indices[0] + channel], source[indices[1] + channel], tx);
+    const bottom = lerp(source[indices[2] + channel], source[indices[3] + channel], tx);
+    target[targetIndex + channel] = lerp(top, bottom, ty);
+  }
+}
+
+function luminanceAt(data, index) {
+  return 0.299 * data[index] + 0.587 * data[index + 1] + 0.114 * data[index + 2];
+}
+
+function hashNoise(x, y) {
+  const value = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+  return value - Math.floor(value);
 }
 
 function estimateDelta(source, result) {
