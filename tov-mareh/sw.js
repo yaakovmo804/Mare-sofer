@@ -1,9 +1,9 @@
-const CACHE = 'tov-mareh-ipad-v3-loading-fit';
+const CACHE = 'tov-mareh-ipad-v4-real-controls';
 const FILES = [
   './',
   './index.html',
-  './styles.css?v=20260804-loading-fit',
-  './app.js?v=20260804-loading-fit',
+  './styles.css?v=20260804-real-controls',
+  './app.js?v=20260804-real-controls',
   './manifest.webmanifest',
   './assets/tov-mareh-icon.svg'
 ];
