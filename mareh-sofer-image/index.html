@@ -6,18 +6,19 @@
   <meta name="theme-color" content="#17130f" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="apple-mobile-web-app-title" content="מראה סופר" />
-  <title>מראה סופר — שיפור תמונה</title>
+  <meta name="apple-mobile-web-app-title" content="טוב מראה" />
+  <title>מראה סופר — טוב מראה</title>
   <link rel="manifest" href="manifest.webmanifest" />
-  <link rel="stylesheet" href="app.css?v=20260803b" />
+  <link rel="stylesheet" href="app.css?v=20260803c" />
+  <link rel="stylesheet" href="engine-ui.css?v=20260803c" />
 </head>
 <body>
   <main class="app-shell">
     <header class="topbar">
       <div>
         <p class="eyebrow">מראה סופר</p>
-        <h1>שחזור וליטוש תמונת כתב</h1>
-        <p class="subtitle">האפליקציה פועלת באופן עצמאי. צורת האות נשארת נעולה; הצילום, הדיו והקלף בלבד משתנים.</p>
+        <div class="product-title"><h1>טוב מראה</h1><span class="subapp">שיפור וליטוש תמונת הכתב</span></div>
+        <p class="subtitle">שני מנועים באותה סביבת עבודה: מנוע מקומי מדויק ולא־מקוון, ומנוע AI לשחזור חומרי עמוק.</p>
       </div>
       <div class="top-actions">
         <label class="button primary">העלאת תמונה<input id="imageInput" type="file" accept="image/*" hidden /></label>
@@ -33,11 +34,31 @@
 
     <section class="workspace">
       <aside class="controls panel" aria-label="הגדרות שיפור">
-        <section>
-          <div class="section-heading">
-            <div><h2>מצב מהיר</h2><p>בחירה אחת ומחוון עוצמה.</p></div>
-            <span class="fidelity-badge">נאמנות מוחלטת</span>
+        <section class="engine-panel">
+          <div class="engine-heading">
+            <div><h2>בחירת מנוע</h2><p>הבחירה משפיעה על דרך העיבוד, לא על צורת האות.</p></div>
+            <span class="engine-badge">שני מנועים</span>
           </div>
+          <div class="engine-switch" role="group" aria-label="בחירת מנוע עיבוד">
+            <button class="engine-card active" type="button" data-engine-mode="local" aria-pressed="true">
+              <span class="engine-symbol">▣</span><strong>מקומי</strong><span>מהיר • ללא רשת • נאמנות מרבית</span>
+            </button>
+            <button class="engine-card" type="button" data-engine-mode="ai" aria-pressed="false">
+              <span class="engine-symbol">✦</span><strong>AI חומרי</strong><span>דיו וקלף עמוקים • דורש שרת</span>
+            </button>
+            <button class="engine-card" type="button" data-engine-mode="compare" aria-pressed="false">
+              <span class="engine-symbol">◫</span><strong>השוואה</strong><span>מקומי מול AI על אותו מקור</span>
+            </button>
+          </div>
+          <p id="engineStatus" class="engine-status">מנוע מקומי פעיל — עובד גם ללא רשת</p>
+          <div id="localEngineNote" class="engine-note">המנוע המקומי מיועד לניקוי, חידוד, יישור, השחרה מבוקרת ושיפור קלף — ללא שינוי מבני באותיות.</div>
+          <div id="aiEngineNote" class="engine-note" hidden>מנוע ה־AI יקבל את המקור, מסכת האות הנעולה והגדרות החומר. בשלב זה הממשק מוכן, אך השרת טרם חובר.</div>
+          <div id="compareEngineNote" class="engine-note" hidden>לאחר חיבור השרת יוצגו שתי תוצאות זו לצד זו, עם מחוון השוואה ומדדי נאמנות.</div>
+          <button id="aiEnhanceBtn" class="button ai-action" type="button" disabled>הפעלת שחזור AI</button>
+        </section>
+
+        <section>
+          <div class="section-heading"><div><h2>מצב מהיר</h2><p>בחירה אחת ומחוון עוצמה.</p></div><span class="fidelity-badge">נאמנות מוחלטת</span></div>
           <div class="preset-grid" id="presetGrid">
             <button type="button" data-preset="faithful" class="preset active">נקי ונאמן</button>
             <button type="button" data-preset="liveInk" class="preset">דיו שחור חי</button>
@@ -82,9 +103,9 @@
 
       <section class="preview panel" aria-label="תצוגת לפני ואחרי">
         <div id="emptyState" class="empty-state">
-          <div class="empty-mark">מ</div>
+          <div class="empty-mark">ט</div>
           <h2>העלה צילום של אות, מילה או שורה</h2>
-          <p>העיבוד הראשוני נעשה מקומית במכשיר ואינו משנה את קווי המתאר.</p>
+          <p>המנוע המקומי מוכן מיד. מנוע ה־AI יתחבר דרך שכבת שרת נפרדת בלי לחשוף מפתחות במכשיר.</p>
         </div>
         <div id="previewStage" class="preview-stage" hidden>
           <canvas id="beforeCanvas"></canvas>
@@ -99,12 +120,12 @@
     </section>
   </main>
 
-  <script src="image-core.js?v=20260803b"></script>
-  <script src="app.js?v=20260803b"></script>
+  <script src="image-core.js?v=20260803c"></script>
+  <script src="app.js?v=20260803c"></script>
+  <script src="engine-controller.js?v=20260803c"></script>
   <script>
-    if ('serviceWorker' in navigator) {
-      window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
-    }
+    window.dispatchEvent(new CustomEvent('tov-mareh:ready', { detail: { appId: 'tov-mareh', version: '0.2.0' } }));
+    if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
   </script>
 </body>
 </html>
