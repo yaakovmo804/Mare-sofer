@@ -8,6 +8,23 @@
 globalThis.MEDIDAOT_REGION_VECTOR = (() => {
   const clamp = (value, minimum, maximum) => Math.max(minimum, Math.min(maximum, value));
   const pointKey = point => `${point.x},${point.y}`;
+  const FEATURE_ANGLE_CONVENTION = 'signed-deviation-from-vertical';
+
+  function signedVerticalFeatureAngle(root, tip) {
+    const master = globalThis.MEDIDAOT_MASTER_SYSTEM;
+    if (typeof master?.signedVerticalAngle === 'function') {
+      return master.signedVerticalAngle(root, tip);
+    }
+    if (!root || !tip) return 0;
+    let value = Math.atan2(tip.x - root.x, root.y - tip.y) * 180 / Math.PI;
+    while (value > 90) value -= 180;
+    while (value < -90) value += 180;
+    return value;
+  }
+
+  function roundedFeatureAngle(root, tip) {
+    return Math.round(signedVerticalFeatureAngle(root, tip) * 1000) / 1000;
+  }
 
   function pointInPolygon(point, polygon) {
     let inside = false;
@@ -673,7 +690,7 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
       point: roundFeaturePoint(center),
       root,
       tip,
-      angleDeg: Math.round(Math.atan2(tip.x - root.x, tip.y - root.y) * 180000 / Math.PI) / 1000,
+      angleDeg: roundedFeatureAngle(root, tip),
       confidence: axisConfidence,
       componentIndex,
       fallback: true
@@ -888,7 +905,7 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
         point: root,
         root,
         tip,
-        angleDeg: Math.round(Math.atan2(tip.x - root.x, tip.y - root.y) * 180000 / Math.PI) / 1000,
+        angleDeg: roundedFeatureAngle(root, tip),
         confidence,
         componentIndex,
         widthPx: Math.round(stem.width * 1000) / 1000,
@@ -1402,7 +1419,7 @@ globalThis.MEDIDAOT_REGION_VECTOR = (() => {
       organs,
       handleCounts: { anchors, controls, total: anchors + controls },
       featureCoordinateSpace: 'vector-local',
-      featureAngleConvention: 'signed-clockwise-from-vertical',
+      featureAngleConvention: FEATURE_ANGLE_CONVENTION,
       features: boundFeatures,
       trace: {
         ...metadata,

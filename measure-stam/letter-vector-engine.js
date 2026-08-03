@@ -17,6 +17,33 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
   const WEIGHT_MIN = 0.55;
   const WEIGHT_MAX = 1.45;
   const EPSILON = 1e-8;
+  const FEATURE_ANGLE_CONVENTION = 'signed-deviation-from-vertical';
+
+  function signedVerticalFeatureAngle(root, tip) {
+    const master = globalThis.MEDIDAOT_MASTER_SYSTEM;
+    if (typeof master?.signedVerticalAngle === 'function') {
+      return master.signedVerticalAngle(root, tip);
+    }
+    if (!root || !tip) return 0;
+    let value = Math.atan2(tip.x - root.x, root.y - tip.y) * 180 / Math.PI;
+    while (value > 90) value -= 180;
+    while (value < -90) value += 180;
+    return value;
+  }
+
+  function normalizeVectorFeatureAngles(vector) {
+    if (!vector || !Array.isArray(vector.features)) return vector;
+    let angleFeatureCount = 0;
+    for (const feature of vector.features) {
+      if (!feature?.root || !feature?.tip) continue;
+      if (!['stem-axis', 'component-axis'].includes(feature.type) &&
+          !Number.isFinite(+feature.angleDeg)) continue;
+      feature.angleDeg = signedVerticalFeatureAngle(feature.root, feature.tip);
+      angleFeatureCount++;
+    }
+    if (angleFeatureCount) vector.featureAngleConvention = FEATURE_ANGLE_CONVENTION;
+    return vector;
+  }
 
   const SOURCE_BOARD = Object.freeze({
     schemaVersion: 1,
@@ -793,7 +820,7 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
       type: 'stem-axis',
       label: 'ציר הטיית הירך',
       point: { ...root },
-      angleDeg: Math.atan2(tip.x - root.x, tip.y - root.y) * 180 / Math.PI,
+      angleDeg: signedVerticalFeatureAngle(root, tip),
       anchorIds: organHandleIds.slice()
     };
     organ.stemId = axisFeature.id;
@@ -818,6 +845,7 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
       landmarkIds: landmarkData.landmarks.map(feature => feature.id)
     };
     candidate.features.push(axisFeature, junctionFeature, organFeature, ...landmarkData.landmarks);
+    normalizeVectorFeatureAngles(candidate);
     if (candidate.trace && typeof candidate.trace === 'object') {
       candidate.trace.organCount = candidate.organs.length;
       candidate.trace.manualOrganCount = (candidate.trace.manualOrganCount || 0) + 1;
@@ -1239,6 +1267,7 @@ globalThis.MEDIDAOT_VECTOR_ENGINE = (() => {
     for (const key of ['featureCoordinateSpace', 'featureAngleConvention']) {
       if (typeof vector[key] === 'string' && vector[key]) cloned[key] = vector[key];
     }
+    normalizeVectorFeatureAngles(cloned);
     const sourceSchema = Math.max(1, Math.trunc(finiteNumber(options.migrationSource ?? vector.schemaVersion, 1)));
     if (sourceSchema < VECTOR_SCHEMA_VERSION) {
       cloned.migration = {

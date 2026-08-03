@@ -6,8 +6,8 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
-const TEST_VERSION = '20260802b';
-const TEST_CACHE_DATE = '2026-08-02b';
+const TEST_VERSION = '20260803a';
+const TEST_CACHE_DATE = '2026-08-03a';
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const appDirectory = path.resolve(testDirectory, '..');
 
@@ -45,6 +45,7 @@ function createEngineContext(additionalGlobals = {}) {
   context.globalThis = context;
   for (const filename of [
     'letter-assets.js',
+    'master-system.js',
     'letter-vector-engine.js',
     'auto-measure.js'
   ]) {
@@ -421,6 +422,17 @@ function makeSparseBodyRows({
   return canvas.source;
 }
 
+function makeRoofOnlyRowsWithLoneDescender() {
+  const canvas = createSyntheticCanvas(400, 260);
+  for (const y of [20, 95, 170]) {
+    for (const x of [25, 210]) canvas.rectangle(x, y, 140, 6);
+  }
+  canvas.rectangle(80, 20, 20, 50);
+  canvas.rectangle(25, 95, 3, 24);
+  canvas.rectangle(25, 170, 3, 24);
+  return canvas.source;
+}
+
 function makeWideDescenderRows(width = 48) {
   const canvas = createSyntheticCanvas(400, 260);
   for (const y of [20, 96, 172]) {
@@ -463,6 +475,40 @@ function makeTaggedRowsWithDescender() {
   }
   canvas.rectangle(190, 55, 5, 28);
   return canvas.source;
+}
+
+function makePhotographedInterlineAcceptanceRows() {
+  const canvas = createSyntheticCanvas(460, 270);
+  const nib = 10;
+  const rowTops = [24, 99, 174];
+  const letterXs = [24, 112, 200, 288, 376];
+
+  for (const rowTop of rowTops) {
+    for (let letterIndex = 0; letterIndex < letterXs.length; letterIndex++) {
+      const x = letterXs[letterIndex];
+      const localSlope = letterIndex % 2 ? 1 : -1;
+      canvas.slopedBar(x, rowTop, 64, nib, localSlope);
+      canvas.rectangle(x + 4, rowTop, nib, 40);
+      canvas.slopedBar(x + 4, rowTop + 30, 56, nib, localSlope);
+
+      for (const tagOffset of [18, 38]) {
+        canvas.rectangle(x + tagOffset, rowTop - 9, 3, 9);
+      }
+    }
+  }
+
+  // Two broad, connected descenders are deliberately wider than an ordinary
+  // stem. They must not pull the stable row boundary down into the clearance.
+  canvas.rectangle(72, rowTops[0] + 30, 22, 27);
+  canvas.rectangle(332, rowTops[1] + 30, 24, 26);
+
+  // Small photographed grains and one faint scratch should be removed as
+  // non-structural noise before the interline boundary is selected.
+  for (const [x, y] of [[16, 74], [180, 84], [260, 150], [448, 162]]) {
+    canvas.rectangle(x, y, 2, 2, 48);
+  }
+  canvas.slopedBar(150, 86, 13, 2, 2, 92);
+  return { source: canvas.source, nib, rowTops, expectedGapPx: 34 };
 }
 
 function makeBlankImage(width = 160, height = 120) {
@@ -736,10 +782,19 @@ test('semantic vector metadata clones independently and a stem tilts around its 
       trace: { semanticMethod: 'component-projection-v1' }
     }
   };
+  const sourcePaths = JSON.stringify(object.letterVector.paths);
+  const expectedAngle = context.MEDIDAOT_MASTER_SYSTEM.signedVerticalAngle(
+    object.letterVector.features[0].root,
+    object.letterVector.features[0].tip
+  );
   const clone = vector.cloneVectorData(object);
   assert.equal(clone.schemaVersion, 3, 'legacy schema 2 metadata must clone into the current schema');
   assert.equal(clone.featureCoordinateSpace, 'vector-local');
-  assert.equal(clone.featureAngleConvention, 'signed-clockwise-from-vertical');
+  assert.equal(clone.featureAngleConvention, 'signed-deviation-from-vertical');
+  closeTo(clone.features[0].angleDeg, expectedAngle, 1e-9,
+    'loaded semantic angles must use the master signed vertical convention');
+  assert.equal(JSON.stringify(clone.paths), sourcePaths,
+    'angle normalization must not alter the photographed contour');
   assert.equal(clone.features[0].type, 'stem-axis');
   assert.equal(clone.trace.semanticMethod, 'component-projection-v1');
   clone.features[0].root.x = -999;
@@ -1087,6 +1142,16 @@ test('saved schema v1 and v2 vectors migrate canonically to v3 without changing 
     });
   });
   assert.equal(migrated[1].features[0].id, 'legacy-stem', 'v2 semantic metadata must survive migration');
+  assert.equal(migrated[1].featureAngleConvention, 'signed-deviation-from-vertical');
+  closeTo(
+    migrated[1].features[0].angleDeg,
+    context.MEDIDAOT_MASTER_SYSTEM.signedVerticalAngle(
+      migrated[1].features[0].root,
+      migrated[1].features[0].tip
+    ),
+    1e-9,
+    'v2 migration must derive its semantic angle through the master convention'
+  );
   assert.equal(legacyVectors[0].schemaVersion, 1, 'migration must not mutate the loaded snapshot');
   assert.equal(legacyVectors[1].schemaVersion, 2, 'migration must not mutate the loaded snapshot');
 });
@@ -1426,6 +1491,68 @@ test('automatic CV detects nib thickness and bottom-to-next-roof interline gaps'
   closeTo(selfCalibrating.medianPx, 54, 0.5);
 });
 
+test('photographed interline acceptance uses stable row boundaries at 3.4 nibs', () => {
+  const fixture = makePhotographedInterlineAcceptanceRows();
+  const result = autoMeasure.analyzeInterline(fixture.source, { nibPx: fixture.nib });
+
+  assertThreeRowsAndTwoGaps(result, 'photographed 34px interline fixture');
+  closeTo(result.medianPx, fixture.expectedGapPx, 1, 'accepted interline pixels');
+  closeTo(result.medianNib, 3.4, .1, 'accepted interline nib ratio');
+
+  const prepared = autoMeasure.helpers.prepareRaster(fixture.source);
+  for (const gap of result.gaps) {
+    closeTo(gap.valuePx, fixture.expectedGapPx, 1, 'each photographed interline gap');
+    closeTo(
+      gap.points[1].y - gap.points[0].y,
+      gap.valuePx,
+      1e-9,
+      'gap endpoints must span the measured clearance'
+    );
+    closeTo(
+      gap.boundaries.lowerReferenceRoofTopY - gap.boundaries.upperBottomInkY,
+      gap.valuePx,
+      1e-9,
+      'gap must run from stable bottom ink to the next stable roof'
+    );
+    assert.equal(gap.boundaries.zeroMargin, true);
+    const evidence = gap.boundaries.raster;
+    assert.ok(evidence, 'accepted gaps must retain raster boundary evidence');
+    assert.equal(
+      prepared.binary[evidence.upperInkY * prepared.width + evidence.x],
+      1,
+      'the stable upper boundary must touch real ink'
+    );
+    assert.equal(
+      prepared.binary[evidence.lowerRoofY * prepared.width + evidence.x],
+      1,
+      'the stable lower roof must touch real ink'
+    );
+    assert.equal(
+      prepared.binary[evidence.upperBoundaryY * prepared.width + evidence.x],
+      0,
+      'the clearance must start immediately after upper-row ink'
+    );
+  }
+
+  const signature = JSON.stringify(result.gaps.map(gap => ({
+    valuePx: gap.valuePx,
+    points: gap.points,
+    raster: gap.boundaries.raster
+  })));
+  for (let repetition = 0; repetition < 5; repetition++) {
+    const repeated = autoMeasure.analyzeInterline(fixture.source, { nibPx: fixture.nib });
+    assert.equal(
+      JSON.stringify(repeated.gaps.map(gap => ({
+        valuePx: gap.valuePx,
+        points: gap.points,
+        raster: gap.boundaries.raster
+      }))),
+      signature,
+      'photographed interline placement must be deterministic'
+    );
+  }
+});
+
 test('tiny ink inside a larger component bounding box stays removed', () => {
   const width = 24;
   const height = 24;
@@ -1592,6 +1719,28 @@ test('two genuine sparse-body rows use connected stem evidence, not body quantil
       closeTo(result.gaps[0].valuePx, 36, 1);
     }
   }
+});
+
+test('one connected descender cannot override a roof-only row consensus', () => {
+  const source = makeRoofOnlyRowsWithLoneDescender();
+  const result = autoMeasure.analyzeInterline(source, { nibPx: 6 });
+
+  assertThreeRowsAndTwoGaps(result, 'roof-only rows with one connected descender');
+  assert.equal(result.diagnostics.independentBodyEvidenceCount, 3,
+    'body evidence in other rows must not validate an unrelated descender depth');
+  assert.equal(result.rows[0].bottomY, 70,
+    'the fixture must retain the misleading component bottom that caused the regression');
+  closeTo(result.gaps[0].valuePx, 69, 1e-9,
+    'the stable roof bottom, not the isolated descender, must define the first clearance');
+  assert.equal(result.gaps[0].boundaries.support.boundaryConsensus, 'all-stable-runs');
+  assert.equal(result.gaps[0].boundaries.raster.upperInkY, 25,
+    'the first upper endpoint must remain on the six-pixel roof');
+  closeTo(result.gaps[1].valuePx, 51, 1e-9,
+    'the repeated three-pixel stems must continue to define their real body bottom');
+  assert.equal(
+    result.gaps[1].boundaries.support.boundaryConsensus,
+    'repeated-or-majority-body'
+  );
 });
 
 test('repeated detached roof/seat phases group by line period across offsets and slopes', () => {
@@ -2156,7 +2305,7 @@ test('HTML, manifests, and service worker reference one complete release asset s
     assert.match(manifest.start_url, new RegExp(`(?:\\?|&)v=${TEST_VERSION}(?:&|$)`));
   }
 
-  assert.match(readAppFile('app-4.js'), /appVersion:\s*'2026\.08\.02b'/);
+  assert.match(readAppFile('app-4.js'), /appVersion:\s*'2026\.08\.03a'/);
 
   const serviceWorker = readAppFile('sw.js');
   const cacheNameMatch = serviceWorker.match(/const CACHE_NAME = '([^']+)'/);

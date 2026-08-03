@@ -457,6 +457,36 @@ function letterVectorEngine() {
   return globalThis.MEDIDAOT_VECTOR_ENGINE || null;
 }
 
+const VECTOR_FEATURE_ANGLE_CONVENTION = 'signed-deviation-from-vertical';
+
+function vectorFeatureSignedVerticalAngle(root, tip) {
+  const master = typeof MASTER_SYSTEM !== 'undefined'
+    ? MASTER_SYSTEM
+    : globalThis.MEDIDAOT_MASTER_SYSTEM;
+  if (typeof master?.signedVerticalAngle === 'function') {
+    return master.signedVerticalAngle(root, tip);
+  }
+  if (!root || !tip) return 0;
+  let value = Math.atan2(tip.x - root.x, root.y - tip.y) * 180 / Math.PI;
+  while (value > 90) value -= 180;
+  while (value < -90) value += 180;
+  return value;
+}
+
+function synchronizeVectorFeatureAngles(vector) {
+  if (!vector || !Array.isArray(vector.features)) return vector;
+  let angleFeatureCount = 0;
+  for (const feature of vector.features) {
+    if (!feature?.root || !feature?.tip) continue;
+    if (!['stem-axis', 'component-axis'].includes(feature.type) &&
+        !Number.isFinite(+feature.angleDeg)) continue;
+    feature.angleDeg = vectorFeatureSignedVerticalAngle(feature.root, feature.tip);
+    angleFeatureCount++;
+  }
+  if (angleFeatureCount) vector.featureAngleConvention = VECTOR_FEATURE_ANGLE_CONVENTION;
+  return vector;
+}
+
 function isLetterTemplate(object) {
   return object?.type === 'letterTemplate';
 }
@@ -936,6 +966,7 @@ function normalizeLetterTemplateObject(object) {
       (+object.letterVector.schemaVersion || 1) < vectorEngine.vectorSchemaVersion) {
     object.letterVector = vectorEngine.migrateVectorData(object.letterVector);
   }
+  synchronizeVectorFeatureAngles(object.letterVector);
   const photographed = isPhotographedVector(object);
   const tradition = photographed
     ? 'custom'
@@ -2084,7 +2115,7 @@ function refreshBoundVectorFeaturePoints(object, organId = null) {
     axis.root = { ...root };
     axis.point = { ...root };
     axis.tip = { ...tip };
-    axis.angleDeg = Math.atan2(tip.x - root.x, tip.y - root.y) * 180 / Math.PI;
+    axis.angleDeg = vectorFeatureSignedVerticalAngle(root, tip);
     axis.geometryStatus = 'current';
     for (const linked of features.filter(feature => feature.stemId === axis.id)) {
       if (linked.type === 'roof-stem-junction') {
@@ -2102,6 +2133,7 @@ function refreshBoundVectorFeaturePoints(object, organId = null) {
       delete linked.staleRevision;
     }
   }
+  synchronizeVectorFeatureAngles(object.letterVector);
 }
 
 function updateSemanticFeatureAfterHandleMove(object, selection, change = {}) {
@@ -2127,7 +2159,7 @@ function updateSemanticFeatureAfterHandleMove(object, selection, change = {}) {
         stem.root = moveLocalPoint(stem.root);
         stem.point = { ...stem.root };
         if (stem.tip) {
-          stem.angleDeg = Math.atan2(stem.tip.x - stem.root.x, stem.tip.y - stem.root.y) * 180 / Math.PI;
+          stem.angleDeg = vectorFeatureSignedVerticalAngle(stem.root, stem.tip);
           feature.tip = { ...stem.tip };
         }
         stem.geometryStatus = 'current';
@@ -2155,7 +2187,7 @@ function updateSemanticFeatureAfterHandleMove(object, selection, change = {}) {
       if (stem) {
         stem.root = { ...targetLocal };
         stem.point = { ...targetLocal };
-        if (stem.tip) stem.angleDeg = Math.atan2(stem.tip.x - stem.root.x, stem.tip.y - stem.root.y) * 180 / Math.PI;
+        if (stem.tip) stem.angleDeg = vectorFeatureSignedVerticalAngle(stem.root, stem.tip);
       }
     }
   }
@@ -2164,6 +2196,7 @@ function updateSemanticFeatureAfterHandleMove(object, selection, change = {}) {
   delete feature.staleReason;
   delete feature.staleRevision;
   if (feature.organId) refreshBoundVectorFeaturePoints(object, feature.organId);
+  else synchronizeVectorFeatureAngles(object.letterVector);
 }
 
 function reconcileSemanticVectorFeatures(object) {
@@ -2288,7 +2321,7 @@ function reconcileSemanticVectorFeatures(object) {
     feature.root = pointOnFittedAxis(rootLongitudinal);
     feature.tip = pointOnFittedAxis(tipLongitudinal);
     feature.point = { ...feature.root };
-    feature.angleDeg = Math.atan2(feature.tip.x - feature.root.x, feature.tip.y - feature.root.y) * 180 / Math.PI;
+    feature.angleDeg = vectorFeatureSignedVerticalAngle(feature.root, feature.tip);
     feature.geometryStatus = 'current';
     delete feature.stale;
     delete feature.staleReason;
@@ -2378,6 +2411,7 @@ function reconcileSemanticVectorFeatures(object) {
     delete feature.staleReason;
     delete feature.staleRevision;
   }
+  synchronizeVectorFeatureAngles(object.letterVector);
 }
 
 function syncLetterControls(object = selectedLetterTemplate()) {
@@ -2640,7 +2674,7 @@ function applySelectedLetterAxisTilt(targetAngle) {
     feature.root = engine.imageToLocal(object, selectedFeature.rootImage, { asset: letterAsset(object) });
     feature.point = { ...feature.root };
     feature.tip = engine.imageToLocal(object, nextTipImage, { asset: letterAsset(object) });
-    feature.angleDeg = target;
+    feature.angleDeg = vectorFeatureSignedVerticalAngle(feature.root, feature.tip);
     feature.geometryStatus = 'current';
     delete feature.stale;
     delete feature.staleReason;
@@ -2652,6 +2686,7 @@ function applySelectedLetterAxisTilt(targetAngle) {
     linked.point = feature ? { ...feature.root } : linked.point;
     linked.tip = feature ? { ...feature.tip } : linked.tip;
   }
+  synchronizeVectorFeatureAngles(object.letterVector);
   refreshBoundVectorFeaturePoints(object, feature?.organId || selectedFeature.organId);
   object.correctionHandleIds = ids;
   object.auto = false;

@@ -1941,7 +1941,7 @@ async function serializeProjectV3() {
       title: captured.projectMeta.title || 'פרויקט מדידאות',
       createdAt: captured.projectMeta.createdAt,
       updatedAt: now,
-      appVersion: '2026.08.02b',
+      appVersion: '2026.08.03a',
       locale: 'he-IL'
     },
     source: {
