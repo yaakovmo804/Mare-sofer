@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#17130f" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="מראה סופר" />
+  <title>מראה סופר — שיפור תמונה</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="stylesheet" href="app.css?v=20260803b" />
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">מראה סופר</p>
+        <h1>שחזור וליטוש תמונת כתב</h1>
+        <p class="subtitle">האפליקציה פועלת באופן עצמאי. צורת האות נשארת נעולה; הצילום, הדיו והקלף בלבד משתנים.</p>
+      </div>
+      <div class="top-actions">
+        <label class="button primary">העלאת תמונה<input id="imageInput" type="file" accept="image/*" hidden /></label>
+        <button id="exportBtn" class="button" type="button" disabled>ייצוא PNG</button>
+        <button id="resetBtn" class="button" type="button" disabled>איפוס</button>
+      </div>
+    </header>
+
+    <div id="installHint" class="install-hint" hidden>
+      <span>להתקנה באייפד: פתח ב־Safari ← שיתוף ← הוספה למסך הבית.</span>
+      <button id="dismissInstallHint" type="button" aria-label="סגירה">×</button>
+    </div>
+
+    <section class="workspace">
+      <aside class="controls panel" aria-label="הגדרות שיפור">
+        <section>
+          <div class="section-heading">
+            <div><h2>מצב מהיר</h2><p>בחירה אחת ומחוון עוצמה.</p></div>
+            <span class="fidelity-badge">נאמנות מוחלטת</span>
+          </div>
+          <div class="preset-grid" id="presetGrid">
+            <button type="button" data-preset="faithful" class="preset active">נקי ונאמן</button>
+            <button type="button" data-preset="liveInk" class="preset">דיו שחור חי</button>
+            <button type="button" data-preset="softGloss" class="preset">ברק עדין</button>
+            <button type="button" data-preset="lacquer" class="preset">לק חי</button>
+            <button type="button" data-preset="naturalParchment" class="preset">קלף טבעי</button>
+          </div>
+          <label class="range-row"><span>עוצמת הפרופיל</span><output id="strengthOutput">100%</output><input id="strengthInput" type="range" min="0" max="100" value="100" /></label>
+        </section>
+
+        <section>
+          <div class="section-heading"><div><h2>יישור צילום</h2><p>יישור התמונה כולה בלבד, ללא תיקון אות בודדת.</p></div></div>
+          <div class="inline-actions">
+            <button id="autoStraightenBtn" class="button compact" type="button" disabled>יישור אוטומטי</button>
+            <button id="rotateLeftBtn" class="button compact" type="button" disabled>¼° שמאלה</button>
+            <button id="rotateRightBtn" class="button compact" type="button" disabled>¼° ימינה</button>
+          </div>
+          <p id="angleStatus" class="status-line">זווית: 0.00°</p>
+        </section>
+
+        <details open>
+          <summary>הגדרות מתקדמות</summary>
+          <div class="advanced-grid">
+            <label class="range-row"><span>חדות</span><output data-output="sharpness"></output><input data-setting="sharpness" type="range" min="0" max="100" /></label>
+            <label class="range-row"><span>הפחתת רעש</span><output data-output="denoise"></output><input data-setting="denoise" type="range" min="0" max="100" /></label>
+            <label class="range-row"><span>עומק שחור</span><output data-output="blackness"></output><input data-setting="blackness" type="range" min="0" max="100" /></label>
+            <label class="range-row"><span>אחידות מילוי</span><output data-output="uniformity"></output><input data-setting="uniformity" type="range" min="0" max="100" /></label>
+            <label class="range-row"><span>ברק רציף</span><output data-output="gloss"></output><input data-setting="gloss" type="range" min="0" max="100" /></label>
+            <label class="range-row"><span>מסה במרכז הדיו</span><output data-output="depth"></output><input data-setting="depth" type="range" min="0" max="100" /></label>
+            <label class="range-row"><span>חום הקלף</span><output data-output="warmth"></output><input data-setting="warmth" type="range" min="0" max="100" /></label>
+            <label class="range-row"><span>מרקם הקלף</span><output data-output="parchmentTexture"></output><input data-setting="parchmentTexture" type="range" min="0" max="100" /></label>
+            <label class="range-row"><span>בהירות הקלף</span><output data-output="parchmentBrightness"></output><input data-setting="parchmentBrightness" type="range" min="0" max="100" /></label>
+          </div>
+        </details>
+
+        <section class="verification">
+          <h2>בדיקת נאמנות</h2>
+          <div class="metric"><span>שינוי מבני באותיות</span><strong id="geometryMetric">0 פיקסלים</strong></div>
+          <label class="toggle"><input id="maskToggle" type="checkbox" /><span>הצגת מסכת הדיו</span></label>
+        </section>
+      </aside>
+
+      <section class="preview panel" aria-label="תצוגת לפני ואחרי">
+        <div id="emptyState" class="empty-state">
+          <div class="empty-mark">מ</div>
+          <h2>העלה צילום של אות, מילה או שורה</h2>
+          <p>העיבוד הראשוני נעשה מקומית במכשיר ואינו משנה את קווי המתאר.</p>
+        </div>
+        <div id="previewStage" class="preview-stage" hidden>
+          <canvas id="beforeCanvas"></canvas>
+          <div id="afterClip" class="after-clip"><canvas id="afterCanvas"></canvas></div>
+          <div id="splitLine" class="split-line" aria-hidden="true"></div>
+          <input id="splitInput" class="split-input" type="range" min="0" max="100" value="58" aria-label="השוואת לפני ואחרי" />
+          <span class="preview-label before-label">לפני</span>
+          <span class="preview-label after-label">אחרי</span>
+        </div>
+        <footer class="preview-footer"><span id="statusText" role="status" aria-live="polite">מוכן</span><span id="resolutionText"></span></footer>
+      </section>
+    </section>
+  </main>
+
+  <script src="image-core.js?v=20260803b"></script>
+  <script src="app.js?v=20260803b"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
+    }
+  </script>
+</body>
+</html>
