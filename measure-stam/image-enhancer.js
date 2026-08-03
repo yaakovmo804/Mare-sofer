@@ -62,6 +62,7 @@
     previewStage.style.aspectRatio = `${state.width} / ${state.height}`;
     requestAnimationFrame(() => {
       const rect = previewStage.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
       afterCanvas.style.width = `${rect.width}px`;
       afterCanvas.style.height = `${rect.height}px`;
     });
@@ -189,6 +190,7 @@
 
     emptyState.hidden = true;
     previewStage.hidden = false;
+    requestAnimationFrame(syncPreviewSizing);
     [exportBtn, resetBtn, autoStraightenBtn, rotateLeftBtn, rotateRightBtn].forEach((element) => { element.disabled = false; });
     angleStatus.textContent = 'זווית: 0.00°';
     activatePreset('faithful');
