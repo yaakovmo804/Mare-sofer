@@ -1,0 +1,31 @@
+name: Test Mareh Sofer Standalone
+
+on:
+  pull_request:
+    paths:
+      - 'mareh-sofer-image/**'
+      - '.github/workflows/test-mareh-sofer-standalone.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'mareh-sofer-image/**'
+      - '.github/workflows/test-mareh-sofer-standalone.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  node-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mareh-sofer-image
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run standalone regression tests
+        run: npm test

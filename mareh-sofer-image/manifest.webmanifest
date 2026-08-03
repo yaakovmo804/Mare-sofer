@@ -1,0 +1,13 @@
+{
+  "name": "מראה סופר",
+  "short_name": "מראה סופר",
+  "description": "שחזור וליטוש נאמן של תמונות כתב סת״ם",
+  "lang": "he",
+  "dir": "rtl",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#eee7dc",
+  "theme_color": "#17130f"
+}
