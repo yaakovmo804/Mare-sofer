@@ -1,0 +1,20 @@
+{
+  "appId": "tov-mareh",
+  "product": "מראה סופר",
+  "name": "טוב מראה",
+  "subtitle": "שיפור וליטוש תמונת הכתב",
+  "version": "0.2.0",
+  "aiEndpoint": "",
+  "hostEvents": {
+    "ready": "tov-mareh:ready",
+    "aiRequest": "tov-mareh:ai-request",
+    "export": "tov-mareh:export"
+  },
+  "capabilities": [
+    "local-image-restoration",
+    "offline-mode",
+    "ai-material-restoration",
+    "engine-comparison",
+    "locked-letter-geometry"
+  ]
+}
