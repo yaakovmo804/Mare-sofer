@@ -1,9 +1,10 @@
-const CACHE_NAME = 'mareh-sofer-standalone-v1';
+const CACHE_NAME = 'mareh-sofer-standalone-v2';
 const APP_ASSETS = [
   './',
   './index.html',
   './app.css?v=20260803b',
   './image-core.js?v=20260803b',
+  './ai-provider.js?v=20260803c',
   './app.js?v=20260803b',
   './manifest.webmanifest'
 ];
