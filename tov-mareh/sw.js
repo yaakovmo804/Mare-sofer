@@ -1,9 +1,9 @@
-const CACHE = 'tov-mareh-ipad-v2';
+const CACHE = 'tov-mareh-ipad-v3-loading-fit';
 const FILES = [
   './',
   './index.html',
-  './styles.css',
-  './app.js',
+  './styles.css?v=20260804-loading-fit',
+  './app.js?v=20260804-loading-fit',
   './manifest.webmanifest',
   './assets/tov-mareh-icon.svg'
 ];
@@ -39,17 +39,14 @@ self.addEventListener('fetch', (event) => {
   }
 
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      const network = fetch(event.request)
-        .then((response) => {
-          if (response && response.ok) {
-            const copy = response.clone();
-            caches.open(CACHE).then((cache) => cache.put(event.request, copy));
-          }
-          return response;
-        })
-        .catch(() => cached);
-      return cached || network;
-    })
+    fetch(event.request)
+      .then((response) => {
+        if (response && response.ok) {
+          const copy = response.clone();
+          caches.open(CACHE).then((cache) => cache.put(event.request, copy));
+        }
+        return response;
+      })
+      .catch(() => caches.match(event.request))
   );
 });
