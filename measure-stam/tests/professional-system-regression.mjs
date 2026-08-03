@@ -295,6 +295,76 @@ function loadHitTestHarness(objects, selectedId = null) {
   return { hitTest: context.hitTest, state };
 }
 
+function loadKastelHandlePointerHarness(tool, hitKind = 'handle') {
+  const source = read('app-2.js');
+  const start = source.indexOf('function pointerDown(event)');
+  const end = source.indexOf('function handleAreaPointer', start);
+  assert.ok(start >= 0 && end > start, 'canvas pointer routing must remain available');
+
+  const kastel = {
+    id: 71,
+    type: 'kastel',
+    points: [
+      { x: 20, y: 20 }, { x: 120, y: 20 },
+      { x: 120, y: 120 }, { x: 20, y: 120 }
+    ]
+  };
+  const state = {
+    tool,
+    objects: [kastel],
+    selectedId: kastel.id,
+    selectedPoint: null,
+    selectedSegment: null,
+    letterVectorSelection: null,
+    letterVectorLasso: null,
+    dragging: null,
+    interactionBefore: null,
+    activePointerId: null,
+    pointers: new Map(),
+    image: { width: 200, height: 200 },
+    formula: { analysis: { status: 'idle' } }
+  };
+  const calls = { captures: [], measurements: [], vectorLassos: [], renders: 0, selected: [] };
+  const hit = hitKind === 'handle'
+    ? { object: kastel, handle: 2, segment: null }
+    : hitKind === 'body'
+      ? { object: kastel, handle: null, segment: null }
+      : null;
+  const canvas = {
+    setPointerCapture(pointerId) { calls.captures.push(pointerId); },
+    releasePointerCapture() {}
+  };
+  const context = vm.createContext({
+    Map,
+    state,
+    canvas,
+    statusText: { textContent: '' },
+    clearIdleTouchesForPen() {},
+    isMeasurementPointer: event => ['pen', 'mouse'].includes(event.pointerType),
+    getPos: () => ({ x: 120, y: 120 }),
+    screenToImage: point => point,
+    captureInteractionState: () => ({ marker: 'interaction-before' }),
+    captureSnapshot: () => ({ marker: 'drag-before' }),
+    hitTest: () => hit,
+    beginVectorizeLasso(point, pointerId) { calls.vectorLassos.push({ point, pointerId }); },
+    selectObject(id) { state.selectedId = id; calls.selected.push(id); },
+    renderAll() { calls.renders++; },
+    handleFixedPointTool(type, point, count) { calls.measurements.push({ type, point, count }); },
+    structuredCloneSafe: value => JSON.parse(JSON.stringify(value)),
+    isLetterTemplate: () => false,
+    isSourceRegionEdit: () => false
+  });
+  vm.runInContext(`${source.slice(start, end)}\nthis.pointerDown = pointerDown;`, context);
+
+  const event = {
+    pointerType: 'pen',
+    pointerId: 19,
+    button: 0,
+    preventDefault() {}
+  };
+  return { pointerDown: context.pointerDown, state, calls, event, kastel };
+}
+
 function loadLetterOrganHelpers() {
   const source = read('letter-tools.js');
   const start = source.indexOf('function representativeOrganHandle');
@@ -453,19 +523,28 @@ function loadSlantScanHarness(image, nibPx, scan) {
 
 function loadSemanticReconcileHelper(handles) {
   const source = read('letter-tools.js');
+  const angleStart = source.indexOf('const VECTOR_FEATURE_ANGLE_CONVENTION');
+  const angleEnd = source.indexOf('function isLetterTemplate', angleStart);
   const start = source.indexOf('function reconcileSemanticVectorFeatures');
   const end = source.indexOf('function syncLetterControls', start);
+  assert.ok(angleStart >= 0 && angleEnd > angleStart,
+    'semantic feature angle helpers must remain available');
   assert.ok(start >= 0 && end > start, 'semantic reconcile helper must remain available');
   const engine = { enumerateHandles: () => handles };
   const context = vm.createContext({
     Math,
     Number,
+    MASTER_SYSTEM: loadMasterSystem(),
     letterAsset: () => null,
     letterVectorEngine: () => engine,
     refreshBoundVectorFeaturePoints: () => {},
     distance: (a, b) => Math.hypot(a.x - b.x, a.y - b.y)
   });
-  vm.runInContext(`${source.slice(start, end)}\nthis.reconcileSemanticVectorFeatures = reconcileSemanticVectorFeatures;`, context);
+  vm.runInContext(
+    `${source.slice(angleStart, angleEnd)}\n${source.slice(start, end)}\n` +
+      'this.reconcileSemanticVectorFeatures = reconcileSemanticVectorFeatures;',
+    context
+  );
   return context.reconcileSemanticVectorFeatures;
 }
 
@@ -482,18 +561,27 @@ function loadCorrectionGeometryHelpers() {
 
 function loadBoundFeatureRefreshHelper(handles) {
   const source = read('letter-tools.js');
+  const angleStart = source.indexOf('const VECTOR_FEATURE_ANGLE_CONVENTION');
+  const angleEnd = source.indexOf('function isLetterTemplate', angleStart);
   const start = source.indexOf('function refreshBoundVectorFeaturePoints');
   const end = source.indexOf('function updateSemanticFeatureAfterHandleMove', start);
+  assert.ok(angleStart >= 0 && angleEnd > angleStart,
+    'semantic feature angle helpers must remain available');
   assert.ok(start >= 0 && end > start, 'bound feature refresh helper must remain available');
   const engine = { enumerateHandles: () => handles };
   const context = vm.createContext({
     Math,
     Map,
+    MASTER_SYSTEM: loadMasterSystem(),
     letterAsset: () => null,
     letterVectorEngine: () => engine,
     midpoint: (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 })
   });
-  vm.runInContext(`${source.slice(start, end)}\nthis.refreshBoundVectorFeaturePoints = refreshBoundVectorFeaturePoints;`, context);
+  vm.runInContext(
+    `${source.slice(angleStart, angleEnd)}\n${source.slice(start, end)}\n` +
+      'this.refreshBoundVectorFeaturePoints = refreshBoundVectorFeaturePoints;',
+    context
+  );
   return context.refreshBoundVectorFeaturePoints;
 }
 
@@ -1644,11 +1732,11 @@ test('the integrated shell exposes composition, vector levels, info and active g
     for (const tool of ['rowAlign', 'circle', 'ellipse']) {
       assert.match(html, new RegExp(`data-tool="${tool}"`));
     }
-    assert.match(html, /master-system\.js\?v=20260802b/);
-    assert.match(html, /professional-tools\.js\?v=20260802b/);
-    assert.match(html, /slant-analyzer\.js\?v=20260802b/);
+    assert.match(html, /master-system\.js\?v=20260803a/);
+    assert.match(html, /professional-tools\.js\?v=20260803a/);
+    assert.match(html, /slant-analyzer\.js\?v=20260803a/);
     assert.ok(
-      html.indexOf('slant-analyzer.js?v=20260802b') < html.indexOf('professional-tools.js?v=20260802b'),
+      html.indexOf('slant-analyzer.js?v=20260803a') < html.indexOf('professional-tools.js?v=20260803a'),
       'the analyzer must load before the professional integration'
     );
     assert.match(html, /id="compositionCanvas"[^>]*tabindex="0"/);
@@ -2353,6 +2441,39 @@ test('a hidden full-image slant scan cannot capture a Pencil or mouse pan hit', 
     'a scan explicitly selected from the object list remains editable');
 });
 
+test('a selected kastel corner keeps drag priority across tools without consuming their actions', () => {
+  for (const tool of ['pan', 'kastel', 'length', 'vectorize']) {
+    const harness = loadKastelHandlePointerHarness(tool, 'handle');
+    harness.pointerDown(harness.event);
+
+    assert.equal(harness.state.dragging?.type, 'handle',
+      `${tool} must route the visible selected kastel corner into handle dragging`);
+    assert.equal(harness.state.dragging?.handle, 2);
+    assert.equal(harness.state.dragging?.id, harness.kastel.id);
+    assert.equal(harness.state.selectedPoint?.index, 2);
+    assert.equal(harness.calls.measurements.length, 0,
+      `${tool} must not create a measurement when the selected corner wins the hit`);
+    assert.equal(harness.calls.vectorLassos.length, 0,
+      `${tool} must not start vectorization when the selected corner wins the hit`);
+  }
+
+  const measurement = loadKastelHandlePointerHarness('length', 'body');
+  measurement.pointerDown(measurement.event);
+  assert.equal(measurement.state.dragging, null,
+    'the kastel body must not become editable while another measurement tool is active');
+  assert.equal(measurement.calls.measurements.length, 1,
+    'a tap away from the selected corner must still create the active measurement');
+  assert.equal(measurement.calls.measurements[0].type, 'length');
+  assert.equal(measurement.calls.measurements[0].count, 2);
+
+  const vectorize = loadKastelHandlePointerHarness('vectorize', 'body');
+  vectorize.pointerDown(vectorize.event);
+  assert.equal(vectorize.state.dragging, null,
+    'the kastel body must not become editable while vectorization is active');
+  assert.equal(vectorize.calls.vectorLassos.length, 1,
+    'a vectorize tap away from the selected corner must still begin its lasso');
+});
+
 test('touch targets and professional cards disclose their actual interaction mode', () => {
   const styles = read('styles.css');
   const html = read('medidaot.html');
@@ -2575,6 +2696,64 @@ test('semantic stem reconciliation keeps a vertical centerline and fails stale i
   assert.deepEqual(staleStem.tip, { x: 75, y: 104.5 });
   assert.equal(staleStem.geometryStatus, 'stale');
   assert.equal(staleStem.staleReason, 'unpaired-outline-after-edit');
+});
+
+test('semantic stem reconciliation preserves the master signed angle in both directions', () => {
+  const system = loadMasterSystem();
+  const makeFixture = tipX => {
+    const root = { x: 70, y: 28 };
+    const tip = { x: tipX, y: 106 };
+    const width = 14;
+    const dx = tip.x - root.x;
+    const dy = tip.y - root.y;
+    const length = Math.hypot(dx, dy);
+    const normal = { x: -dy / length * width / 2, y: dx / length * width / 2 };
+    const handles = [0, .5, 1].flatMap((fraction, pairIndex) => {
+      const center = {
+        x: root.x + dx * fraction,
+        y: root.y + dy * fraction
+      };
+      return [-1, 1].map((side, sideIndex) => ({
+        id: `p0:c${pairIndex * 2 + sideIndex}:anchor`,
+        kind: 'anchor',
+        point: {
+          x: center.x + normal.x * side,
+          y: center.y + normal.y * side
+        }
+      }));
+    });
+    return {
+      handles,
+      object: {
+        letterVector: {
+          revision: 5,
+          viewBox: [0, 0, 140, 140],
+          featureAngleConvention: 'signed-clockwise-from-vertical',
+          features: [{
+            id: 'stem-0', type: 'stem-axis', widthPx: width,
+            point: { ...root }, root: { ...root }, tip: { ...tip },
+            angleDeg: -system.signedVerticalAngle(root, tip)
+          }]
+        }
+      }
+    };
+  };
+
+  const reconciledAngles = [];
+  for (const tipX of [54, 86]) {
+    const { handles, object } = makeFixture(tipX);
+    loadSemanticReconcileHelper(handles)(object);
+    const feature = object.letterVector.features[0];
+    const expected = system.signedVerticalAngle(feature.root, feature.tip);
+    assert.equal(feature.geometryStatus, 'current');
+    assert.ok(Math.abs(feature.angleDeg - expected) < 1e-9,
+      `reconciled ${feature.angleDeg}° must match master ${expected}°`);
+    assert.ok(feature.angleDeg >= -90 && feature.angleDeg <= 90);
+    assert.equal(object.letterVector.featureAngleConvention, 'signed-deviation-from-vertical');
+    reconciledAngles.push(feature.angleDeg);
+  }
+  assert.ok(reconciledAngles[0] > 0 && reconciledAngles[1] < 0,
+    'mirrored stem directions must retain opposite master-system signs');
 });
 
 test('semantic roof reconciliation keeps endpoint centerlines and fails stale without an opposing edge pair', () => {

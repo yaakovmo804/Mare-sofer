@@ -1686,7 +1686,7 @@
         upperInkY = y;
         break;
       }
-      if (upperInkY == null || upperInkY < upper.rasterBottomY - nibRasterPx * 1.15) continue;
+      if (upperInkY == null) continue;
 
       let lowerRoofY = null;
       for (let y = lowerSearchTop; y <= lowerSearchBottom; y++) {
@@ -1702,17 +1702,46 @@
       candidates.push({ x, upperInkY, upperBoundaryY, lowerRoofY, gapRasterPx });
     }
 
-    const runs = [];
-    for (const candidate of candidates) {
-      const previous = runs[runs.length - 1];
-      if (previous && candidate.x === previous.items[previous.items.length - 1].x + 1) {
-        previous.items.push(candidate);
-      } else {
-        runs.push({ items: [candidate] });
-      }
-    }
+    const minimumBodyDepth = Math.max(1, nibRasterPx * 1.15);
+    const bodyCandidates = candidates.filter(candidate =>
+      candidate.upperInkY - upper.rasterRoofTopY >= minimumBodyDepth
+    );
     const minimumRunWidth = Math.max(2, Math.ceil(nibRasterPx * .34));
-    const stableRuns = runs.filter(run => run.items.length >= minimumRunWidth);
+    const stableRunsFor = pool => {
+      const runs = [];
+      for (const candidate of pool) {
+        const previous = runs[runs.length - 1];
+        if (previous && candidate.x === previous.items[previous.items.length - 1].x + 1) {
+          previous.items.push(candidate);
+        } else {
+          runs.push({ items: [candidate] });
+        }
+      }
+      return runs.filter(run => run.items.length >= minimumRunWidth);
+    };
+    const allRuns = stableRunsFor(candidates);
+    const bodyRuns = stableRunsFor(bodyCandidates);
+    const supportWidth = runs => runs.reduce((sum, run) => sum + run.items.length, 0);
+    const bodySupportWidth = supportWidth(bodyRuns);
+    const allSupportWidth = supportWidth(allRuns);
+    const representativeBodyDepth = median(bodyRuns.flatMap(run =>
+      run.items.map(candidate => candidate.upperBoundaryY - upper.rasterRoofTopY)
+    ));
+    const repeatedBodyEvidence = Number.isFinite(representativeBodyDepth) &&
+      detection.rows.filter((row, index) =>
+        (detection.profile.rowBodyEvidence[index] || 0) >= .42 &&
+        Math.abs(
+          row.rasterBottomY - row.rasterRoofTopY - representativeBodyDepth
+        ) <= nibRasterPx * .75
+      ).length >= 2;
+    const bodySupportIsMajority = bodySupportWidth * 2 > allSupportWidth;
+    // A three-pixel stem remains valid when body evidence at the same depth
+    // repeats across rows. A lone descender, however, cannot discard the much
+    // broader roof-only consensus merely because it is the only deep run.
+    const useBodyRuns = bodyRuns.length && (
+      repeatedBodyEvidence || bodySupportIsMajority
+    );
+    const stableRuns = useBodyRuns ? bodyRuns : allRuns;
     const stableCandidates = stableRuns.flatMap(run => run.items.map((candidate, index) => ({
       ...candidate,
       runLeft: run.items[0].x,
@@ -1748,7 +1777,8 @@
         right: (chosen.runRight + 1) * scaleX,
         candidateCount: stableCandidates.length,
         runCount: stableRuns.length,
-        minimumRunWidthRasterPx: minimumRunWidth
+        minimumRunWidthRasterPx: minimumRunWidth,
+        boundaryConsensus: useBodyRuns ? 'repeated-or-majority-body' : 'all-stable-runs'
       }
     };
   }

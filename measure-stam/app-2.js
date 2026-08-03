@@ -1063,18 +1063,20 @@ function pointerDown(event) {
   state.interactionBefore = captureInteractionState();
 
   const imagePoint = screenToImage(screenPoint);
-  if (state.tool === 'vectorize') {
+  const hit = hitTest(imagePoint);
+  // A visible corner of the selected kastel remains an edit target while any
+  // tool is active. Keep this handle-only so taps elsewhere still reach the
+  // active measurement or vectorization tool.
+  const selectedKastelHandle = hit?.object?.id === state.selectedId &&
+    hit.object.type === 'kastel' &&
+    Number.isInteger(hit.handle);
+  if (state.tool === 'vectorize' && !selectedKastelHandle) {
     beginVectorizeLasso(imagePoint, event.pointerId);
     return;
   }
-  if (state.tool === 'pan' && state.letterVectorLasso?.armed) {
+  if (state.tool === 'pan' && state.letterVectorLasso?.armed && !selectedKastelHandle) {
     if (beginLetterAnchorLasso(imagePoint, event.pointerId)) return;
   }
-  const hit = hitTest(imagePoint);
-  const selectedKastelHandle = state.tool === 'kastel' &&
-    hit?.object?.id === state.selectedId &&
-    hit.object.type === 'kastel' &&
-    Number.isInteger(hit.handle);
   const canEditHit = !!hit && (state.tool === 'pan' || selectedKastelHandle);
   if (canEditHit) {
     selectObject(hit.object.id, { preserveVectorSelection: true });

@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const source = fs.readFileSync(path.resolve(directory, '..', 'region-vector.js'), 'utf8');
+const masterSource = fs.readFileSync(path.resolve(directory, '..', 'master-system.js'), 'utf8');
 const context = vm.createContext({
   console,
   Uint8Array,
@@ -24,8 +25,10 @@ const context = vm.createContext({
   TypeError
 });
 context.globalThis = context;
+vm.runInContext(masterSource, context, { filename: 'master-system.js' });
 vm.runInContext(source, context, { filename: 'region-vector.js' });
 const vectorizer = context.MEDIDAOT_REGION_VECTOR;
+const masterSystem = context.MEDIDAOT_MASTER_SYSTEM;
 
 function image(width, height) {
   const data = new Uint8ClampedArray(width * height * 4);
@@ -381,7 +384,7 @@ test('roof and stem semantics persist exact roof endpoints, axis and junction in
   for (const landmark of landmarks) assert.ok(organAnchorIds.has(landmark.anchorIds[0]));
   assert.equal(result.vector.organs[0].transformMode, 'rigid-subpath');
   assert.equal(result.vector.featureCoordinateSpace, 'vector-local');
-  assert.equal(result.vector.featureAngleConvention, 'signed-clockwise-from-vertical');
+  assert.equal(result.vector.featureAngleConvention, 'signed-deviation-from-vertical');
   assert.equal(result.vector.schemaVersion, 3);
   assert.equal(result.vector.trace.featureCount, 13);
   assert.equal(result.vector.trace.stemCount, 1);
@@ -389,6 +392,34 @@ test('roof and stem semantics persist exact roof endpoints, axis and junction in
   assert.equal(result.vector.trace.organCount, 1);
   assert.equal(result.vector.trace.semanticMethod, 'contour-topology-v3');
   assert.equal(JSON.stringify(result.vector.features), JSON.stringify(result.features));
+});
+
+test('stem feature angles in both directions use the master signed vertical convention', () => {
+  const measured = [];
+  for (const direction of [-1, 1]) {
+    const sourceImage = image(140, 130);
+    fill(sourceImage, 18, 18, 122, 32);
+    for (let y = 31; y < 116; y++) {
+      const center = 70 + direction * (y - 31) * .18;
+      fill(sourceImage, Math.floor(center - 6), y, Math.ceil(center + 6), y + 1);
+    }
+    const result = vectorizer.vectorizeImageData(
+      sourceImage,
+      fullSelection(sourceImage.width, sourceImage.height),
+      { maximumAnchors: 120 }
+    );
+    const stem = result.vector.features.find(feature => feature.type === 'stem-axis');
+    assert.ok(stem, `direction ${direction} must produce a semantic stem axis`);
+    const expected = masterSystem.signedVerticalAngle(stem.root, stem.tip);
+    assert.ok(Math.abs(stem.angleDeg - expected) <= .001,
+      `stored ${stem.angleDeg}° must match master ${expected}°`);
+    assert.ok(stem.angleDeg * direction < 0,
+      'a lower endpoint moving right is negative and moving left is positive');
+    assert.ok(stem.angleDeg >= -90 && stem.angleDeg <= 90);
+    assert.equal(result.vector.featureAngleConvention, 'signed-deviation-from-vertical');
+    measured.push(stem.angleDeg);
+  }
+  assert.ok(measured[0] * measured[1] < 0, 'opposite stem directions must keep opposite signs');
 });
 
 test('each distinct stem below one roof receives its own axis and junction', () => {
