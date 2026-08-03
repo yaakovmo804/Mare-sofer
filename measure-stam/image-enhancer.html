@@ -6,7 +6,9 @@
   <meta name="theme-color" content="#17130f" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="מראה סופר" />
   <title>מראה סופר — שיפור תמונה</title>
+  <link rel="manifest" href="manifest-image-enhancer.webmanifest" />
   <link rel="stylesheet" href="image-enhancer.css?v=20260803a" />
 </head>
 <body>
@@ -102,5 +104,10 @@
 
   <script src="image-processing-core.js?v=20260803a"></script>
   <script src="image-enhancer.js?v=20260803a"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => navigator.serviceWorker.register('./image-enhancer-sw.js').catch(() => {}));
+    }
+  </script>
 </body>
 </html>
