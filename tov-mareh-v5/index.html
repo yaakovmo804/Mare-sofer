@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#0f1720">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="טוב מראה 5">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <title>טוב מראה — טעינת מנוע 5.0</title>
+  <style>
+    html,body{height:100%;margin:0;background:#0b1118;color:#f6f2ea;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif}
+    body{display:grid;place-items:center}.boot{display:grid;place-items:center;gap:16px;text-align:center}.spin{width:48px;height:48px;border:4px solid #ffffff30;border-top-color:#fff;border-radius:50%;animation:s 1s linear infinite}@keyframes s{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body>
+  <div class="boot"><div class="spin"></div><strong>טוען את טוב מראה — מנוע 5.0</strong></div>
+  <script>
+    (async function bootFreshTovMareh(){
+      try {
+        const sourceUrl = '../tov-mareh/index.html?source=20260804-v5';
+        const response = await fetch(sourceUrl, { cache: 'no-store' });
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        let html = await response.text();
+
+        html = html
+          .replace(/<link rel="manifest" href="[^"]+">/i, '<link rel="manifest" href="./manifest.webmanifest">')
+          .replace(/href="styles\.css(?:\?[^\"]*)?"/i, 'href="../tov-mareh/styles.css?v=20260804-v5"')
+          .replace(/src="assets\//g, 'src="../tov-mareh/assets/')
+          .replace(/href="assets\//g, 'href="../tov-mareh/assets/')
+          .replace(/<script\s+src="app\.js[^\"]*"><\/script>/gi, '')
+          .replace(/<script\s+src="engine-v21\.js[^\"]*"><\/script>/gi, '')
+          .replace(/<script\s+src="live-preview-v4\.js[^\"]*"><\/script>/gi, '');
+
+        const scripts = [
+          '<scr' + 'ipt src="../tov-mareh/app.js?v=20260804-v5"></scr' + 'ipt>',
+          '<scr' + 'ipt src="../tov-mareh/engine-v21.js?v=20260804-v5"></scr' + 'ipt>',
+          '<scr' + 'ipt src="../tov-mareh/live-preview-v4.js?v=20260804-v5"></scr' + 'ipt>',
+          '<scr' + 'ipt src="./engine-v5.js?v=20260804-v5"></scr' + 'ipt>'
+        ].join('\n');
+
+        html = html.replace('</body>', scripts + '\n</body>');
+        document.open();
+        document.write(html);
+        document.close();
+      } catch (error) {
+        document.body.innerHTML = '<div class="boot"><strong>הטעינה נכשלה</strong><span>' + String(error.message || error) + '</span><button onclick="location.reload()">נסה שוב</button></div>';
+      }
+    })();
+  </script>
+</body>
+</html>
