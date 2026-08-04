@@ -46,7 +46,7 @@
     const input = document.getElementById(id);
     if (!input) return;
     input.addEventListener('input', () => {
-      if (window.state && state.settings) state.settings[id] = Number(input.value);
+      if (typeof state !== 'undefined' && state.settings) state.settings[id] = Number(input.value);
       scheduleVerifiedPreview();
     });
     input.addEventListener('change', scheduleVerifiedPreview);
@@ -57,11 +57,7 @@
   });
 
   const status = document.getElementById('aiStatus');
-  if (status && !window.state?.aiEndpoint) status.textContent = 'מנוע מקומי 5.0 פעיל — הסליידרים מחוברים לתצוגה חיה';
-
-  if ('caches' in window) {
-    caches.keys().then((keys) => Promise.all(
-      keys.filter((key) => key.includes('tov-mareh-v5-old')).map((key) => caches.delete(key))
-    ));
+  if (status && (typeof state === 'undefined' || !state.aiEndpoint)) {
+    status.textContent = 'מנוע מקומי 5.0 פעיל — הסליידרים מחוברים לתצוגה חיה';
   }
 })();
