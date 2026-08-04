@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#0f1720">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="טוב מראה 4">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="format-detection" content="telephone=no">
+  <title>טוב מראה 4.0 — מראה סופר</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="../tov-mareh/assets/tov-mareh-icon.svg">
+  <link rel="icon" href="../tov-mareh/assets/tov-mareh-icon.svg">
+  <link rel="stylesheet" href="../tov-mareh/styles.css?v=20260804-v4-new-path">
+</head>
+<body>
+<div id="app" class="app-shell">
+  <header class="topbar">
+    <div class="brand">
+      <img src="../tov-mareh/assets/tov-mareh-icon.svg" class="brand-icon" alt="">
+      <div>
+        <h1>טוב מראה</h1>
+        <p>מראה סופר — שיפור וליטוש תמונת הכתב • מנוע 4.0</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <label class="btn primary">העלאת תמונה<input id="imageInput" type="file" accept="image/*" hidden></label>
+      <button id="saveProjectBtn" class="btn">שמירת פרויקט</button>
+      <label class="btn">פתיחת פרויקט<input id="projectInput" type="file" accept="application/json" hidden></label>
+      <button id="exportBtn" class="btn">ייצוא</button>
+    </div>
+  </header>
+
+  <div id="standaloneHint" class="standalone-hint" hidden>
+    <span>לפתיחה כאפליקציה: Safari ← שיתוף ← הוספה למסך הבית.</span>
+    <button id="dismissStandaloneHint" aria-label="סגירה">×</button>
+  </div>
+
+  <main class="workspace-shell">
+    <aside class="tool-rail panel" aria-label="כלים">
+      <button class="tool active" data-tool="view"><span>◉</span><b>תצוגה</b></button>
+      <button class="tool" data-tool="align"><span>↔</span><b>יישור</b></button>
+      <button class="tool" data-tool="ink"><span>●</span><b>דיו</b></button>
+      <button class="tool" data-tool="parchment"><span>▧</span><b>קלף</b></button>
+      <button class="tool" data-tool="ai"><span>✦</span><b>AI</b></button>
+      <div class="rail-spacer"></div>
+      <button id="undoBtn" class="tool"><span>↶</span><b>ביטול</b></button>
+      <button id="redoBtn" class="tool"><span>↷</span><b>שחזור</b></button>
+    </aside>
+
+    <section class="canvas-panel panel">
+      <nav class="canvas-toolbar">
+        <div class="engine-switch" role="group" aria-label="מנוע">
+          <button class="active" data-engine="local">מקומי</button>
+          <button data-engine="ai">AI</button>
+          <button data-engine="compare">השוואה</button>
+        </div>
+        <div class="compare-control">
+          <span>לפני</span><input id="compareRange" type="range" min="0" max="100" value="50"><span>אחרי</span>
+        </div>
+        <div class="zoom-control">
+          <button id="zoomOutBtn">−</button><span id="zoomLabel">100%</span><button id="zoomInBtn">+</button><button id="fitBtn">התאם</button>
+        </div>
+      </nav>
+
+      <div id="emptyState" class="empty-state">
+        <img src="../tov-mareh/assets/tov-mareh-icon.svg" alt="">
+        <h2>העלה צילום כתב</h2>
+        <p>העיבוד המקומי פועל על האייפד ושומר על צורת האותיות.</p>
+        <label class="btn primary large">בחירת תמונה<input id="emptyImageInput" type="file" accept="image/*" hidden></label>
+      </div>
+
+      <div id="stage" class="stage" hidden>
+        <div id="canvasWrap" class="canvas-wrap">
+          <canvas id="beforeCanvas"></canvas>
+          <canvas id="afterCanvas"></canvas>
+          <div id="compareDivider" class="compare-divider"></div>
+        </div>
+      </div>
+
+      <div id="busyOverlay" class="busy-overlay" hidden><div class="spinner"></div><span>מעבד תמונה…</span></div>
+    </section>
+
+    <aside class="inspector panel">
+      <section id="panel-view" class="inspector-page active">
+        <h2>תצוגה</h2>
+        <div class="quick-grid">
+          <button class="preset active" data-preset="faithful">נאמן למקור</button>
+          <button class="preset" data-preset="liveInk">דיו חי</button>
+          <button class="preset" data-preset="gentleGloss">ברק עדין</button>
+          <button class="preset" data-preset="lacquer">ברק לק</button>
+          <button class="preset" data-preset="faded">צילום דהוי</button>
+          <button class="preset" data-preset="flash">ביטול פלאש</button>
+        </div>
+        <div class="quality-card"><span>נעילת אותיות</span><strong id="lockLabel">95%</strong></div>
+        <div class="quality-card"><span>שינוי מבני משוער</span><strong id="deltaLabel">0.0%</strong></div>
+      </section>
+
+      <section id="panel-align" class="inspector-page">
+        <h2>יישור צילום</h2>
+        <button id="autoAlignBtn" class="wide-action">יישור אוטומטי</button>
+        <label>סיבוב <output id="rotationOut">0°</output></label><input id="rotation" type="range" min="-8" max="8" step="0.25" value="0">
+        <label>פרספקטיבה <output id="perspectiveOut">0</output></label><input id="perspective" type="range" min="-25" max="25" value="0">
+        <label>חיתוך שוליים <output id="cropOut">0</output></label><input id="crop" type="range" min="0" max="12" step="0.5" value="0">
+      </section>
+
+      <section id="panel-ink" class="inspector-page">
+        <h2>דיו</h2>
+        <label>חדות <output id="sharpnessOut">40</output></label><input id="sharpness" type="range" min="0" max="100" value="40">
+        <label>השחרה <output id="blackOut">36</output></label><input id="black" type="range" min="0" max="100" value="36">
+        <label>אחידות דיו <output id="uniformityOut">42</output></label><input id="uniformity" type="range" min="0" max="100" value="42">
+        <label>ברק <output id="glossOut">18</output></label><input id="gloss" type="range" min="0" max="100" value="18">
+        <label>עומק דיו <output id="depthOut">14</output></label><input id="depth" type="range" min="0" max="100" value="14">
+      </section>
+
+      <section id="panel-parchment" class="inspector-page">
+        <h2>קלף</h2>
+        <label>חום הקלף <output id="warmthOut">14</output></label><input id="warmth" type="range" min="0" max="100" value="14">
+        <label>מרקם הקלף <output id="textureOut">10</output></label><input id="texture" type="range" min="0" max="100" value="10">
+        <label>בהירות <output id="brightnessOut">54</output></label><input id="brightness" type="range" min="0" max="100" value="54">
+        <label>הפחתת רעש <output id="denoiseOut">12</output></label><input id="denoise" type="range" min="0" max="100" value="12">
+        <label>הפחתת הברקות <output id="deglareOut">18</output></label><input id="deglare" type="range" min="0" max="100" value="18">
+      </section>
+
+      <section id="panel-ai" class="inspector-page">
+        <h2>מנוע AI</h2>
+        <p class="muted">בהיעדר שרת, נעשה שימוש בעיבוד המקומי המשופר.</p>
+        <label>כתובת שרת</label><input id="aiEndpoint" class="text-input" type="url" placeholder="https://…/api/process">
+        <button id="testServerBtn" class="wide-action">בדיקת חיבור</button>
+        <button id="applyAiBtn" class="wide-action primary">עיבוד AI</button>
+        <div id="aiStatus" class="status-box">מנוע מקומי 4.0 פעיל</div>
+      </section>
+    </aside>
+  </main>
+
+  <footer class="bottom-bar">
+    <button class="bottom-preset active" data-preset="faithful">נאמן</button>
+    <button class="bottom-preset" data-preset="liveInk">דיו חי</button>
+    <button class="bottom-preset" data-preset="gentleGloss">ברק עדין</button>
+    <button class="bottom-preset" data-preset="lacquer">לק</button>
+    <button class="bottom-preset" data-preset="parchment">קלף חי</button>
+    <span class="bottom-spacer"></span>
+    <button id="applyBtn" class="btn primary">החל שיפור</button>
+  </footer>
+</div>
+<script src="../tov-mareh/app.js?v=20260804-v4-new-path"></script>
+<script src="../tov-mareh/engine-v21.js?v=20260804-v4-new-path"></script>
+<script src="../tov-mareh/live-preview-v4.js?v=20260804-v4-new-path"></script>
+</body>
+</html>
