@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f4c5c">
+  <meta name="description" content="מראה סופר — קצב הקריאה של הכתב. מסמנים תחנות על גבי הכתב ושומעים את המקצב החזותי.">
+  <title>מראה סופר — קצב הקריאה של הכתב</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true">מ״ס</div>
+        <div>
+          <p class="eyebrow">מראה סופר</p>
+          <h1>קצב הקריאה של הכתב</h1>
+          <p class="subtitle">הכתב כמוזיקה חזותית — מסמנים תחנות ושומעים את המרווחים.</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <span class="pilot-pill">פיילוט ניסיוני</span>
+        <button class="button ghost" id="newProjectBtn" type="button">פרויקט חדש</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="panel control-panel" aria-labelledby="control-title">
+        <div class="panel-heading">
+          <div>
+            <p class="step-label">שלב 1</p>
+            <h2 id="control-title">מעלים כתב ומגדירים תחנות</h2>
+          </div>
+          <span class="status" id="saveStatus" aria-live="polite">לא נשמר</span>
+        </div>
+
+        <label class="field-label" for="projectTitle">שם הדגימה</label>
+        <input class="text-input" id="projectTitle" type="text" value="קצב הקריאה של הכתב" autocomplete="off">
+
+        <div class="upload-box" id="uploadBox">
+          <input id="imageInput" type="file" accept="image/*" hidden>
+          <button class="button primary wide" id="uploadBtn" type="button">העלאת צילום כתב</button>
+          <p>PNG, JPG או צילום מהמצלמה. התמונה נשארת במכשיר.</p>
+        </div>
+
+        <div class="setting-block">
+          <div class="setting-row">
+            <div>
+              <label class="field-label" for="bpmRange">קצב בסיס להאזנה</label>
+              <p class="field-help">המרווח הממוצע מקבל פעימה אחת. המרחקים החריגים משנים את ההשהיה.</p>
+            </div>
+            <output id="bpmOutput" for="bpmRange">90 BPM</output>
+          </div>
+          <input id="bpmRange" type="range" min="40" max="180" step="1" value="90">
+        </div>
+
+        <fieldset class="segmented-fieldset">
+          <legend>איך מודדים מן התחנה אל התחנה?</legend>
+          <label class="segment-option">
+            <input type="radio" name="distanceMode" value="horizontal" checked>
+            <span>מרחק אופקי</span>
+          </label>
+          <label class="segment-option">
+            <input type="radio" name="distanceMode" value="path">
+            <span>מרחק לאורך המסלול</span>
+          </label>
+        </fieldset>
+
+        <div class="helper-card">
+          <strong>העיקרון</strong>
+          <p>התחנות מנוגנות לפי סדר הסימון. מרווחים חזותיים שווים נשמעים כפעימות שוות; מרווח חריג נשמע מיד כהקדמה או כהשהיה.</p>
+        </div>
+
+        <div class="tool-grid">
+          <button class="button secondary" id="undoBtn" type="button" disabled>בטל תחנה</button>
+          <button class="button secondary" id="reverseBtn" type="button" disabled>הפוך סדר</button>
+          <button class="button secondary" id="deleteSelectedBtn" type="button" disabled>מחק נבחרת</button>
+          <button class="button danger-soft" id="clearBtn" type="button" disabled>נקה תחנות</button>
+        </div>
+
+        <div class="export-grid">
+          <button class="button ghost" id="exportProjectBtn" type="button" disabled>יצוא פרויקט</button>
+          <button class="button ghost" id="importProjectBtn" type="button">יבוא פרויקט</button>
+          <input id="projectInput" type="file" accept="application/json,.json" hidden>
+          <button class="button ghost wide" id="exportPngBtn" type="button" disabled>שמור צילום מסומן</button>
+        </div>
+      </section>
+
+      <section class="panel canvas-panel" aria-labelledby="canvas-title">
+        <div class="panel-heading canvas-heading">
+          <div>
+            <p class="step-label">שלב 2</p>
+            <h2 id="canvas-title">מסמנים את תחנות הקריאה</h2>
+          </div>
+          <div class="canvas-actions">
+            <span id="pointCount">0 תחנות</span>
+            <button class="button tiny" id="fitBtn" type="button" disabled>התאם למסך</button>
+          </div>
+        </div>
+
+        <div class="canvas-stage" id="canvasStage">
+          <canvas id="annotationCanvas" aria-label="משטח סימון תחנות המקצב"></canvas>
+          <div class="empty-state" id="emptyState">
+            <div class="empty-icon" aria-hidden="true">♫</div>
+            <h3>העלה צילום כתב</h3>
+            <p>לאחר ההעלאה, הקש על נקודות הקריאה לפי הסדר. אפשר לגרור כל תחנה למיקום מדויק.</p>
+          </div>
+          <div class="playback-badge" id="playbackBadge" hidden>מנגן תחנה 1</div>
+        </div>
+
+        <div class="selected-editor" id="selectedEditor" hidden>
+          <div>
+            <span class="selected-number" id="selectedNumber">1</span>
+            <div>
+              <strong>תחנה נבחרת</strong>
+              <p>אפשר לגרור על התמונה או לתת לה שם קצר.</p>
+            </div>
+          </div>
+          <label>
+            <span>שם התחנה</span>
+            <input id="pointLabelInput" type="text" placeholder="לדוגמה: ראש האות, מרכז הלובן">
+          </label>
+        </div>
+      </section>
+
+      <section class="panel rhythm-panel" aria-labelledby="rhythm-title">
+        <div class="panel-heading">
+          <div>
+            <p class="step-label">שלב 3</p>
+            <h2 id="rhythm-title">שומעים את הקריאה</h2>
+          </div>
+          <div class="uniformity-badge" id="uniformityBadge">—</div>
+        </div>
+
+        <div class="play-grid">
+          <button class="play-button measured" id="playMeasuredBtn" type="button" disabled>
+            <span class="play-icon">▶</span>
+            <span><strong>נגן את מקצב הכתב</strong><small>השהיה לפי המרחקים שסומנו</small></span>
+          </button>
+          <button class="play-button regular" id="playRegularBtn" type="button" disabled>
+            <span class="play-icon">▶</span>
+            <span><strong>השווה למקצב אחיד</strong><small>אותו מספר תחנות, בהפרשים שווים</small></span>
+          </button>
+          <button class="button stop wide" id="stopBtn" type="button" disabled>עצור נגינה</button>
+        </div>
+
+        <div class="metric-grid">
+          <article class="metric-card">
+            <span>תחנות</span>
+            <strong id="metricPoints">0</strong>
+          </article>
+          <article class="metric-card">
+            <span>אחידות</span>
+            <strong id="metricUniformity">—</strong>
+          </article>
+          <article class="metric-card">
+            <span>משך הנגינה</span>
+            <strong id="metricDuration">—</strong>
+          </article>
+        </div>
+
+        <div class="rhythm-strip-wrap">
+          <div class="strip-heading">
+            <strong>שלד המקצב</strong>
+            <span>כל עמודה היא ההשהיה עד התחנה הבאה</span>
+          </div>
+          <div class="rhythm-strip" id="rhythmStrip">
+            <p class="strip-empty">סמן לפחות שתי תחנות כדי לראות ולשמוע את המקצב.</p>
+          </div>
+        </div>
+
+        <div class="station-list-wrap">
+          <div class="strip-heading">
+            <strong>תחנות הקריאה</strong>
+            <span>הסדר נקבע לפי סדר הסימון</span>
+          </div>
+          <ol class="station-list" id="stationList"></ol>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span>מראה סופר · קצב הקריאה של הכתב</span>
+      <span>גרסת פיילוט 0.1 · סימון ידני והנגנה מקומית</span>
+    </footer>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="./app.mjs"></script>
+</body>
+</html>
