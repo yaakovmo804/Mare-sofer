@@ -5,8 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0f4c5c">
   <meta name="description" content="מראה סופר — קצב הקריאה של הכתב. מסמנים תחנות על גבי הכתב ושומעים את המקצב החזותי.">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="קצב הכתב">
   <title>מראה סופר — קצב הקריאה של הכתב</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="./icon.svg">
   <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./pwa.css">
 </head>
 <body>
   <div class="app-shell">
@@ -20,7 +27,8 @@
         </div>
       </div>
       <div class="top-actions">
-        <span class="pilot-pill">פיילוט ניסיוני</span>
+        <span class="pilot-pill">אפליקציית פיילוט</span>
+        <button class="button ghost install-button" id="installAppBtn" type="button">הוסף למסך הבית</button>
         <button class="button ghost" id="newProjectBtn" type="button">פרויקט חדש</button>
       </div>
     </header>
@@ -39,8 +47,9 @@
         <input class="text-input" id="projectTitle" type="text" value="קצב הקריאה של הכתב" autocomplete="off">
 
         <div class="upload-box" id="uploadBox">
-          <input id="imageInput" type="file" accept="image/*" hidden>
-          <button class="button primary wide" id="uploadBtn" type="button">העלאת צילום כתב</button>
+          <input class="visually-hidden" id="imageInput" type="file" accept="image/*">
+          <label class="button primary wide upload-trigger" for="imageInput">העלאת צילום כתב</label>
+          <button id="uploadBtn" type="button" hidden tabindex="-1" aria-hidden="true"></button>
           <p>PNG, JPG או צילום מהמצלמה. התמונה נשארת במכשיר.</p>
         </div>
 
@@ -182,11 +191,23 @@
 
     <footer class="footer">
       <span>מראה סופר · קצב הקריאה של הכתב</span>
-      <span>גרסת פיילוט 0.1 · סימון ידני והנגנה מקומית</span>
+      <span>גרסת אפליקציה 0.2 · סימון ידני והנגנה מקומית</span>
     </footer>
   </div>
 
+  <dialog class="install-dialog" id="installDialog">
+    <div class="install-card">
+      <h2>הוסף את האפליקציה למסך הבית</h2>
+      <p id="installInstructions">לאחר ההתקנה האפליקציה תיפתח בחלון עצמאי, עם סמל משלה ושמירה מקומית.</p>
+      <div class="install-actions">
+        <button class="button primary" id="installNowBtn" type="button" hidden>התקן עכשיו</button>
+        <button class="button ghost" id="closeInstallDialog" type="button">סגור</button>
+      </div>
+    </div>
+  </dialog>
+
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script type="module" src="./app.mjs"></script>
+  <script type="module" src="./pwa.mjs"></script>
 </body>
 </html>

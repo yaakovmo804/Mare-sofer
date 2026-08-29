@@ -1,0 +1,23 @@
+{
+  "id": "mareh-sofer-reading-rhythm",
+  "name": "מראה סופר — קצב הקריאה של הכתב",
+  "short_name": "קצב הכתב",
+  "description": "מסמנים תחנות על גבי הכתב ושומעים את המקצב החזותי.",
+  "lang": "he",
+  "dir": "rtl",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#eef3f4",
+  "theme_color": "#0f4c5c",
+  "categories": ["education", "productivity"],
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
