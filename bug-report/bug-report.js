@@ -32,6 +32,17 @@
     return String(value).replace(/\s+/g, ' ').trim().slice(0, max);
   }
 
+  function stripUrlDetails(value, max = 320) {
+    const text = clean(value, max);
+    return text.replace(/(https?:\/\/[^\s?#]+)[?#][^\s]*/gi, '$1');
+  }
+
+  function safeSource(value) {
+    const text = clean(value, 180);
+    if (!text) return '';
+    return text.split(/[?#]/, 1)[0].slice(0, 140);
+  }
+
   function pushAction(label, meta) {
     const entry = {
       at: now(),
@@ -73,7 +84,7 @@
   }
 
   function error(message, meta) {
-    state.lastError = clean(message, 320) || 'שגיאה ללא הודעה';
+    state.lastError = stripUrlDetails(message, 320) || 'שגיאה ללא הודעה';
     return pushAction('שגיאת מערכת', { message: state.lastError, ...(meta || {}) });
   }
 
@@ -133,10 +144,19 @@
   async function copyReport(options) {
     const report = buildReport(options);
     if (global.navigator?.clipboard?.writeText) {
-      await global.navigator.clipboard.writeText(report);
-      return { copied: true, report };
+      try {
+        await global.navigator.clipboard.writeText(report);
+        return { copied: true, report, method: 'clipboard' };
+      } catch (copyError) {
+        return {
+          copied: false,
+          report,
+          method: 'manual',
+          copyError: clean(copyError?.name || copyError?.message || 'clipboard blocked', 80),
+        };
+      }
     }
-    return { copied: false, report };
+    return { copied: false, report, method: 'manual' };
   }
 
   function snapshot() {
@@ -154,7 +174,7 @@
     global.addEventListener?.('error', (event) => {
       const message = event?.message || event?.error?.message || 'window.error';
       error(message, {
-        source: event?.filename ? clean(event.filename, 100) : 'browser',
+        source: event?.filename ? safeSource(event.filename) : 'browser',
         line: event?.lineno || '',
       });
     });
