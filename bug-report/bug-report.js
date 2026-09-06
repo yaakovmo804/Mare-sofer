@@ -4,6 +4,7 @@
  *
  * Goals:
  * - Keep the last 10 meaningful user/system actions.
+ * - Survive a same-tab reload by using sessionStorage only.
  * - Capture window errors and unhandled promise rejections.
  * - Produce a short Hebrew report that can be copied into a development chat.
  * - Avoid collecting form values or personal content by default.
@@ -13,6 +14,7 @@
   'use strict';
 
   const MAX_ACTIONS = 10;
+  const STORAGE_KEY = 'mareh-sofer-bug-report-v1';
   const state = {
     appVersion: 'unknown',
     screen: 'unknown',
@@ -21,6 +23,7 @@
     sourceStatus: {},
     actions: [],
     startedAt: new Date().toISOString(),
+    restoredFromSession: false,
   };
 
   function now() {
@@ -43,23 +46,88 @@
     return text.split(/[?#]/, 1)[0].slice(0, 140);
   }
 
+  function safeMeta(meta) {
+    const out = {};
+    if (!meta || typeof meta !== 'object') return out;
+    for (const [key, value] of Object.entries(meta)) {
+      out[clean(key, 40)] = clean(value, 120);
+    }
+    return out;
+  }
+
+  function sessionStore() {
+    try {
+      return global.sessionStorage || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function persist() {
+    const storage = sessionStore();
+    if (!storage) return;
+    try {
+      storage.setItem(STORAGE_KEY, JSON.stringify({
+        appVersion: state.appVersion,
+        screen: state.screen,
+        lastControl: state.lastControl,
+        lastError: state.lastError,
+        sourceStatus: state.sourceStatus,
+        actions: state.actions,
+        startedAt: state.startedAt,
+      }));
+    } catch (_) {
+      // Storage can be blocked by browser/privacy settings. Reporting must still work in memory.
+    }
+  }
+
+  function restore() {
+    const storage = sessionStore();
+    if (!storage) return;
+    try {
+      const raw = storage.getItem(STORAGE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      if (!saved || typeof saved !== 'object') return;
+
+      state.appVersion = clean(saved.appVersion, 40) || state.appVersion;
+      state.screen = clean(saved.screen, 120) || state.screen;
+      state.lastControl = clean(saved.lastControl, 120);
+      state.lastError = stripUrlDetails(saved.lastError, 320);
+      state.startedAt = clean(saved.startedAt, 60) || state.startedAt;
+
+      state.sourceStatus = {};
+      if (saved.sourceStatus && typeof saved.sourceStatus === 'object') {
+        for (const [name, status] of Object.entries(saved.sourceStatus)) {
+          const key = clean(name, 60);
+          if (key) state.sourceStatus[key] = clean(status, 80) || 'לא ידוע';
+        }
+      }
+
+      if (Array.isArray(saved.actions)) {
+        state.actions = saved.actions.slice(-MAX_ACTIONS).map((item) => ({
+          at: clean(item?.at, 60) || now(),
+          label: clean(item?.label, 120),
+          ...(item?.meta && typeof item.meta === 'object' ? { meta: safeMeta(item.meta) } : {}),
+        })).filter((item) => item.label);
+      }
+      state.restoredFromSession = state.actions.length > 0;
+    } catch (_) {
+      // Corrupt or inaccessible storage is ignored; start a fresh in-memory trail.
+    }
+  }
+
   function pushAction(label, meta) {
     const entry = {
       at: now(),
       label: clean(label, 120),
     };
-    if (meta && typeof meta === 'object') {
-      entry.meta = {};
-      for (const [key, value] of Object.entries(meta)) {
-        // Intentionally store only values explicitly supplied by integration code.
-        // Never auto-read input values, textarea contents, file names or chat text.
-        entry.meta[clean(key, 40)] = clean(value, 120);
-      }
-    }
+    if (meta && typeof meta === 'object') entry.meta = safeMeta(meta);
     state.actions.push(entry);
     if (state.actions.length > MAX_ACTIONS) {
       state.actions.splice(0, state.actions.length - MAX_ACTIONS);
     }
+    persist();
     return entry;
   }
 
@@ -70,12 +138,14 @@
 
   function setVersion(version) {
     state.appVersion = clean(version, 40) || 'unknown';
+    persist();
   }
 
   function setSourceStatus(name, status) {
     const key = clean(name, 60);
     if (!key) return;
     state.sourceStatus[key] = clean(status, 80) || 'לא ידוע';
+    persist();
   }
 
   function control(label, meta) {
@@ -126,6 +196,7 @@
       `סוג תקלה: ${category}`,
       `הכפתור/פעולה האחרונה: ${state.lastControl || 'לא נרשם'}`,
       `שגיאת מערכת: ${state.lastError || 'לא נרשמה שגיאה'}`,
+      state.restoredFromSession ? 'היסטוריית פעולות: שוחזרה לאחר רענון באותו טאב' : '',
       result ? `מה קרה בפועל: ${result}` : '',
       userNote ? `הערת המשתמש: ${userNote}` : '',
       `מסלול שחזור: ${replayPath() || 'אין עדיין רצף פעולות'}`,
@@ -168,6 +239,8 @@
     state.lastError = '';
     state.actions = [];
     state.startedAt = now();
+    state.restoredFromSession = false;
+    persist();
   }
 
   function installGlobalErrorCapture() {
@@ -186,6 +259,7 @@
     });
   }
 
+  restore();
   installGlobalErrorCapture();
 
   global.MarehSoferBugReport = Object.freeze({
