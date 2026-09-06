@@ -3,14 +3,21 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 
-function loadBugReport() {
+function loadBugReport(options = {}) {
   const listeners = {};
   let clipboardText = '';
   const window = {
     navigator: {
       userAgent: 'Mareh-Sofer-Test',
       clipboard: {
-        async writeText(text) { clipboardText = text; },
+        async writeText(text) {
+          if (options.clipboardReject) {
+            const error = new Error('Clipboard blocked');
+            error.name = 'NotAllowedError';
+            throw error;
+          }
+          clipboardText = text;
+        },
       },
     },
     addEventListener(type, handler) { listeners[type] = handler; },
@@ -38,7 +45,7 @@ test('keeps only the last 10 actions', () => {
 
 test('builds a short Hebrew report with context and replay path', () => {
   const { bug } = loadBugReport();
-  bug.setVersion('v80');
+  bug.setVersion('v81-candidate');
   bug.setScreen('שיחה');
   bug.setSourceStatus('Notion', 'מקומי בלבד');
   bug.control('מקרה מקביל');
@@ -47,7 +54,7 @@ test('builds a short Hebrew report with context and replay path', () => {
     result: 'החלון לא נפתח',
     userNote: 'קרה פעמיים',
   });
-  assert.match(report, /גרסה: v80/);
+  assert.match(report, /גרסה: v81-candidate/);
   assert.match(report, /מסך: שיחה/);
   assert.match(report, /Notion: מקומי בלבד/);
   assert.match(report, /מקרה מקביל/);
@@ -63,26 +70,52 @@ test('captures global browser errors', () => {
   assert.equal(snapshot.actions.at(-1).label, 'שגיאת מערכת');
 });
 
+test('redacts URL query and hash details from captured errors', () => {
+  const { bug, listeners } = loadBugReport();
+  listeners.error({
+    message: 'failed at https://example.test/api?token=SECRET#trace',
+    filename: 'https://example.test/app.js?build=81#module',
+    lineno: 8,
+  });
+  const snapshot = bug.snapshot();
+  assert.equal(snapshot.lastError, 'failed at https://example.test/api');
+  assert.equal(snapshot.actions.at(-1).meta.source, 'https://example.test/app.js');
+  assert.doesNotMatch(JSON.stringify(snapshot), /SECRET|build=81/);
+});
+
 test('copyReport writes the report to clipboard when available', async () => {
   const { bug, getClipboardText } = loadBugReport();
-  bug.setVersion('v80');
+  bug.setVersion('v81-candidate');
   bug.setScreen('שיחה');
   bug.control('דווח תקלה');
   const result = await bug.copyReport({ category: 'תקלה בחיבור' });
   assert.equal(result.copied, true);
+  assert.equal(result.method, 'clipboard');
   assert.equal(getClipboardText(), result.report);
   assert.match(result.report, /תקלה בחיבור/);
 });
 
+test('copyReport falls back to manual report when iPad clipboard is blocked', async () => {
+  const { bug } = loadBugReport({ clipboardReject: true });
+  bug.setVersion('v81-candidate');
+  bug.setScreen('שיחה');
+  bug.control('דווח תקלה');
+  const result = await bug.copyReport({ category: 'תקלה בממשק' });
+  assert.equal(result.copied, false);
+  assert.equal(result.method, 'manual');
+  assert.equal(result.copyError, 'NotAllowedError');
+  assert.match(result.report, /מראה סופר — דו״ח תקלה/);
+});
+
 test('reset clears action history but preserves integration context', () => {
   const { bug } = loadBugReport();
-  bug.setVersion('v80');
+  bug.setVersion('v81-candidate');
   bug.setSourceStatus('OpenAI', 'תקין');
   bug.setScreen('שיחה');
   bug.control('כרטיס תלמיד');
   bug.reset();
   const snapshot = bug.snapshot();
   assert.equal(snapshot.actions.length, 0);
-  assert.equal(snapshot.appVersion, 'v80');
+  assert.equal(snapshot.appVersion, 'v81-candidate');
   assert.equal(snapshot.sourceStatus.OpenAI, 'תקין');
 });
