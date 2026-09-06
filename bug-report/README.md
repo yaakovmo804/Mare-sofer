@@ -57,8 +57,6 @@ bug.error('Notion request failed', { source: 'notion-bridge' });
 
 ## בדיקות
 
-נוספו בדיקות Node עבור:
-
 - מגבלת 10 פעולות אחרונות
 - יצירת דו״ח עברי עם הקשר ומסלול שחזור
 - לכידת `window.error`
