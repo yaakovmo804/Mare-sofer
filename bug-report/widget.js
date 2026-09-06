@@ -20,7 +20,7 @@
     const doc = global.document;
     const allowed = new Set((options.allowedControls || DEFAULT_CONTROLS).map(cleanText));
 
-    bug.setVersion(options.version || 'v80');
+    bug.setVersion(options.version || 'v81-candidate');
     bug.setScreen(options.screen || 'שיחה');
     Object.entries(options.sourceStatus || {}).forEach(([name, status]) => bug.setSourceStatus(name, status));
 
@@ -39,6 +39,7 @@
       #marehBugReportDialog button{font:inherit;border:1px solid #cfc7b9;background:#fff;border-radius:10px;padding:9px 13px;cursor:pointer}
       #marehBugReportDialog button.msbr-primary{background:#28251f;color:#fff;border-color:#28251f}
       #marehBugReportStatus{display:none;margin-top:12px;padding:10px;border-radius:10px;background:#f2efe7;white-space:pre-wrap;font-size:13px}
+      #marehBugManualCopy{display:none;margin-top:10px;min-height:150px;direction:rtl;user-select:text;-webkit-user-select:text}
     `;
     doc.head.appendChild(style);
 
@@ -59,6 +60,7 @@
         <div class="msbr-row"><label for="marehBugNote">הערה קצרה</label><textarea id="marehBugNote" placeholder="משפט אחד או שניים מספיקים"></textarea></div>
         <div class="msbr-actions"><button type="button" class="msbr-primary" id="marehBugCopy">העתק דו״ח תקלה</button><button type="button" id="marehBugClose">סגור</button></div>
         <div id="marehBugReportStatus"></div>
+        <textarea id="marehBugManualCopy" readonly aria-label="דו״ח תקלה להעתקה ידנית"></textarea>
       </div>`;
 
     doc.body.appendChild(launcher);
@@ -84,16 +86,30 @@
         userNote: doc.getElementById('marehBugNote').value,
       });
       const status = doc.getElementById('marehBugReportStatus');
+      const manual = doc.getElementById('marehBugManualCopy');
       status.style.display = 'block';
-      status.textContent = out.copied ? 'הדו״ח הועתק. אפשר להדביק אותו ישירות בשיחת הפיתוח.' : out.report;
+      if (out.copied) {
+        status.textContent = 'הדו״ח הועתק. אפשר להדביק אותו ישירות בשיחת הפיתוח.';
+        manual.style.display = 'none';
+        manual.value = '';
+      } else {
+        status.textContent = 'ההעתקה האוטומטית נחסמה. הדו״ח מוצג מתחת ומסומן להעתקה ידנית.';
+        manual.value = out.report;
+        manual.style.display = 'block';
+        manual.focus();
+        manual.select();
+        manual.setSelectionRange?.(0, manual.value.length);
+      }
     });
 
     function setScreen(name) { bug.setScreen(name); }
     function setSourceStatus(name, status) { bug.setSourceStatus(name, status); }
     function destroy() {
       doc.removeEventListener('click', clickTracker, true);
-      launcher.remove(); dialog.remove(); style.remove();
-      delete global.MarehSoferBugReportWidget;
+      launcher.remove();
+      dialog.remove();
+      style.remove();
+      global.MarehSoferBugReportWidget = Object.freeze({ init });
     }
 
     global.MarehSoferBugReportWidget = Object.freeze({ setScreen, setSourceStatus, destroy });
