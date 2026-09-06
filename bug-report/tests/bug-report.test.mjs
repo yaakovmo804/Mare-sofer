@@ -6,6 +6,12 @@ import vm from 'node:vm';
 function loadBugReport(options = {}) {
   const listeners = {};
   let clipboardText = '';
+  const storageMap = options.storageMap || new Map();
+  const sessionStorage = {
+    getItem(key) { return storageMap.has(key) ? storageMap.get(key) : null; },
+    setItem(key, value) { storageMap.set(key, String(value)); },
+    removeItem(key) { storageMap.delete(key); },
+  };
   const window = {
     navigator: {
       userAgent: 'Mareh-Sofer-Test',
@@ -20,15 +26,17 @@ function loadBugReport(options = {}) {
         },
       },
     },
+    sessionStorage,
     addEventListener(type, handler) { listeners[type] = handler; },
   };
-  const sandbox = { window, console, Date, Object, String, JSON };
+  const sandbox = { window, console, Date, Object, String, JSON, Map };
   vm.createContext(sandbox);
   const source = fs.readFileSync(new URL('../bug-report.js', import.meta.url), 'utf8');
   vm.runInContext(source, sandbox);
   return {
     bug: window.MarehSoferBugReport,
     listeners,
+    storageMap,
     getClipboardText: () => clipboardText,
   };
 }
@@ -107,6 +115,22 @@ test('copyReport falls back to manual report when iPad clipboard is blocked', as
   assert.match(result.report, /מראה סופר — דו״ח תקלה/);
 });
 
+test('restores the recent diagnostic trail after a reload in the same tab', () => {
+  const sharedStorage = new Map();
+  const first = loadBugReport({ storageMap: sharedStorage });
+  first.bug.setVersion('v81-candidate');
+  first.bug.setScreen('שיחה');
+  first.bug.control('מקרה מקביל');
+
+  const second = loadBugReport({ storageMap: sharedStorage });
+  const snapshot = second.bug.snapshot();
+  assert.equal(snapshot.restoredFromSession, true);
+  assert.equal(snapshot.appVersion, 'v81-candidate');
+  assert.match(snapshot.replayPath, /שיחה/);
+  assert.match(snapshot.replayPath, /מקרה מקביל/);
+  assert.match(second.bug.buildReport(), /שוחזרה לאחר רענון באותו טאב/);
+});
+
 test('reset clears action history but preserves integration context', () => {
   const { bug } = loadBugReport();
   bug.setVersion('v81-candidate');
@@ -116,6 +140,7 @@ test('reset clears action history but preserves integration context', () => {
   bug.reset();
   const snapshot = bug.snapshot();
   assert.equal(snapshot.actions.length, 0);
+  assert.equal(snapshot.restoredFromSession, false);
   assert.equal(snapshot.appVersion, 'v81-candidate');
   assert.equal(snapshot.sourceStatus.OpenAI, 'תקין');
 });
