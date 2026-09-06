@@ -15,43 +15,38 @@
 
 ## מה לא נאסף אוטומטית
 
-הרכיב אינו קורא ערכי input/textarea, תוכן שיחה, שמות תלמידים, שמות קבצים או תמונות. מטרת ה־MVP היא אבחון טכני מינימלי ללא איסוף עודף.
+הרכיב אינו קורא ערכי input/textarea, תוכן שיחה, שמות תלמידים, שמות קבצים או תמונות. שכבת `widget.js` עוקבת רק אחרי לחצנים שנמצאים ברשימת allowlist מקצועית מפורשת.
 
-## שילוב בסיסי
+## שילוב מינימלי בגרסה 80
 
 ```html
 <script src="/bug-report/bug-report.js"></script>
+<script src="/bug-report/widget.js"></script>
 <script>
-  const bug = window.MarehSoferBugReport;
-  bug.setVersion('v80');
-  bug.setScreen('שיחה');
-  bug.setSourceStatus('Notion', 'מקומי בלבד');
-
-  // בלחיצות משמעותיות בלבד
-  bug.control('מקרה מקביל');
-
-  // בשגיאה מוכרת שנלכדה בקוד
-  bug.error('Notion request failed', { source: 'notion-bridge' });
+  MarehSoferBugReportWidget.init({
+    version: 'v80',
+    screen: 'שיחה',
+    sourceStatus: {
+      OpenAI: 'תקין',
+      Claude: 'תקין',
+      'מאגר מקומי': 'מוכן',
+      Notion: 'מקומי בלבד'
+    }
+  });
 </script>
 ```
 
-## יצירת דו״ח
+ה־widget מוסיף לחיץ קטן „דווח תקלה” ופותח חלון RTL מקומי. המידע אינו נשלח לשרת; המשתמש מעתיק את הדו״ח ומדביק אותו בשיחת הפיתוח.
+
+## API בסיסי
 
 ```js
-const report = bug.buildReport({
-  category: 'תקלה בממשק',
-  result: 'לחצתי ולא נפתח חלון',
-  userNote: 'קרה פעמיים ברצף',
-});
-```
-
-או:
-
-```js
-await bug.copyReport({
-  category: 'תקלה בחיבור',
-  result: 'המקור לא נטען',
-});
+const bug = window.MarehSoferBugReport;
+bug.setVersion('v80');
+bug.setScreen('שיחה');
+bug.setSourceStatus('Notion', 'מקומי בלבד');
+bug.control('מקרה מקביל');
+bug.error('Notion request failed', { source: 'notion-bridge' });
 ```
 
 ## שלושת סוגי התקלה הראשוניים
@@ -60,13 +55,31 @@ await bug.copyReport({
 2. תקלה בחיבור — Notion/API/מודל/שרת.
 3. תוצאה שגויה — הפעולה הושלמה אך התוצאה המקצועית או החזותית אינה נכונה.
 
+## בדיקות
+
+נוספו בדיקות Node עבור:
+
+- מגבלת 10 פעולות אחרונות
+- יצירת דו״ח עברי עם הקשר ומסלול שחזור
+- לכידת `window.error`
+- העתקה ללוח
+- איפוס היסטוריה תוך שמירת גרסה ומצב מקורות
+
+הרצה מקומית אחרונה: **5/5 עברו**.
+
+```bash
+node --test bug-report/tests/bug-report.test.mjs
+```
+
 ## עקרון MVP
 
 בשלב הראשון אין צילום מסך אוטומטי, העלאת לוגים לשרת או הקלטת session. קודם בודקים האם דו״ח מקומי קצר עם רצף פעולות פותר בפועל את בעיית שחזור התקלה.
 
-## מצב המקור
+## מצב המקור והחסם היחיד כרגע
 
-האתר הפעיל של „מראה סופר — טעימה ראשונה” נמצא כיום ב־Sites בגרסה 80, בעוד מאגר GitHub אינו המקור הקנוני העדכני של האתר. לכן הרכיב נשמר בענף נפרד ואינו משולב אוטומטית ב־`main` עד לחיבור לקוד המקור העדכני.
+האתר הפעיל של „מראה סופר — טעימה ראשונה” נמצא ב־Sites בגרסה 80. ספריית ChatGPT חושפת את האתר הפעיל ואת מספר הגרסה, אך לא מאפשרת materialize לקוד המקור של Site projection; GitHub אינו המקור הקנוני העדכני של האתר.
+
+לכן ה־PR נשאר Draft ולא מתמזג ל־`main`. ברגע שקוד המקור הקנוני של גרסה 80 זמין, השילוב הראשוני דורש רק טעינת `bug-report.js`, טעינת `widget.js`, ואתחול במסך אחד.
 
 ## בדיקת האבטיפוס
 
