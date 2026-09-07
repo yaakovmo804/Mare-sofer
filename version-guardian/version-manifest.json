@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "product": "mareh-sofer-taste",
+  "product_name": "מראה סופר — טעימה ראשונה",
+  "release": {
+    "display_version": "82",
+    "release_id": "mareh-sofer-taste-82",
+    "channel": "active-observed"
+  },
+  "site": {
+    "project_id": "appgprj_6a82d8dc0e4481918bd72f41e377a866",
+    "slug": "mareh-sofer-taste",
+    "source_version_number": 83,
+    "projection_revision": 39
+  },
+  "source": {
+    "canonical_system": "chatgpt-sites",
+    "git_repository": "yaakovmo804/Mare-sofer",
+    "git_commit": null,
+    "git_is_canonical": false
+  },
+  "observed_at": "2026-09-07T08:17:00+03:00",
+  "notes": [
+    "display_version and site.source_version_number are different version namespaces and must not be compared as equal numbers.",
+    "GitHub is not currently the canonical source for the active ChatGPT Site."
+  ]
+}
