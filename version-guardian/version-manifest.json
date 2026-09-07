@@ -10,8 +10,8 @@
   "site": {
     "project_id": "appgprj_6a82d8dc0e4481918bd72f41e377a866",
     "slug": "mareh-sofer-taste",
-    "source_version_number": 83,
-    "projection_revision": 39
+    "source_version_number": 86,
+    "projection_revision": 45
   },
   "source": {
     "canonical_system": "chatgpt-sites",
@@ -19,9 +19,10 @@
     "git_commit": null,
     "git_is_canonical": false
   },
-  "observed_at": "2026-09-07T08:17:00+03:00",
+  "observed_at": "2026-09-07T08:24:00+03:00",
   "notes": [
     "display_version and site.source_version_number are different version namespaces and must not be compared as equal numbers.",
-    "GitHub is not currently the canonical source for the active ChatGPT Site."
+    "GitHub is not currently the canonical source for the active ChatGPT Site.",
+    "Observed active Site state updated from source version 83 / projection 39 to source version 86 / projection 45 while display version remained 82."
   ]
 }
