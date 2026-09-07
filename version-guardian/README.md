@@ -25,6 +25,7 @@
 - `version-manifest.json` — מקור האמת בפורמט מכונה.
 - `version-guardian.js` — מנוע השוואה בין runtime למקור האמת.
 - `version-badge.js` — לחיץ קטן „גרסה X · תקין/בדוק/אי־התאמה” וחלון פרטים.
+- `guard-release.mjs` — שער שחרור שמחזיר exit code 1 על mismatch חוסם.
 - `tests/version-guardian.test.mjs` — בדיקות רגרסיה.
 
 ## כללי חסימה
@@ -61,6 +62,20 @@
 
 ב־ChatGPT Site יש להזין את ערכי runtime מתוך מקור הפריסה עצמו, ולא לקרוא מספרים מטקסט חופשי במסך.
 
+## שער שחרור
+
+לפני QA/פריסה ניתן להריץ:
+
+```bash
+node version-guardian/guard-release.mjs runtime.json
+```
+
+- התאמה מלאה: exit code `0`.
+- warning תשתיתי בלבד: exit code `0` עם אזהרה.
+- mismatch מהותי: exit code `1` והודעת `RELEASE BLOCKED`.
+
+בדיקה ידנית של השער עברה: runtime תקין החזיר 0; runtime עם display version 81 מול Manifest 82 החזיר 1 ונחסם.
+
 ## בדיקות
 
 נבדק ב־7.9.2026: **6/6 עברו**.
@@ -75,4 +90,4 @@
 
 ## צעד הבא
 
-כאשר מקור ה־ChatGPT Site הקנוני זמין לעריכה, לשתול את שלושת קבצי הרכיב ולהוסיף את `version-manifest.json` לתהליך הפריסה. לאחר מכן כל גרסה חדשה חייבת לעדכן Manifest כחלק מהשחרור, לא ידנית לאחר הפריסה.
+כאשר מקור ה־ChatGPT Site הקנוני זמין לעריכה, לשתול את ארבעת רכיבי הריצה ולהוסיף את `version-manifest.json` לתהליך הפריסה. לאחר מכן כל גרסה חדשה חייבת לעדכן Manifest כחלק מהשחרור, לא ידנית לאחר הפריסה.
