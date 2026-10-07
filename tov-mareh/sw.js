@@ -1,52 +1,43 @@
-const CACHE = 'tov-mareh-ipad-v6-engine-40';
+const CACHE = 'tov-mareh-ipad-v7-explicit-engines';
 const FILES = [
   './',
   './index.html',
   './styles.css?v=20260804-real-controls',
-  './app.js?v=20260804-real-controls',
-  './engine-v21.js',
-  './live-preview-v4.js',
+  './app.js?v=20261007-explicit-engines',
+  './engine-v21.js?v=20261007-explicit-engines',
+  './live-preview-v4.js?v=20261007-explicit-engines',
   './manifest.webmanifest',
   './assets/tov-mareh-icon.svg'
 ];
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(FILES)));
-  self.skipWaiting();
+  event.waitUntil(
+    caches.open(CACHE).then((cache) => cache.addAll(FILES)).then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) => Promise.all(
-      keys.filter((key) => key !== CACHE).map((key) => caches.delete(key))
-    ))
+      keys.filter((key) => key.startsWith('tov-mareh-ipad-') && key !== CACHE)
+        .map((key) => caches.delete(key))
+    )).then(() => self.clients.claim())
   );
-  self.clients.claim();
 });
 
-async function combinedAppResponse(request) {
+// Return each file unchanged. The HTML owns the engine order.
+async function networkFirst(request, cacheKey = request) {
+  const cache = await caches.open(CACHE);
   try {
-    const [appResponse, engineResponse, previewResponse] = await Promise.all([
-      fetch(request, { cache: 'no-store' }),
-      fetch('./engine-v21.js', { cache: 'no-store' }),
-      fetch('./live-preview-v4.js', { cache: 'no-store' })
-    ]);
-    if (!appResponse.ok || !engineResponse.ok || !previewResponse.ok) {
-      throw new Error('engine fetch failed');
+    const response = await fetch(request, { cache: 'no-store' });
+    if (response.ok) {
+      await cache.put(cacheKey, response.clone());
     }
-    const combined = [
-      await appResponse.text(),
-      await engineResponse.text(),
-      await previewResponse.text()
-    ].join('\n\n');
-    return new Response(combined, {
-      headers: {
-        'Content-Type': 'application/javascript; charset=utf-8',
-        'Cache-Control': 'no-store'
-      }
-    });
+    return response;
   } catch (error) {
-    return caches.match(request);
+    const cached = await cache.match(cacheKey);
+    if (cached) return cached;
+    throw error;
   }
 }
 
@@ -54,33 +45,9 @@ self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
 
   const url = new URL(event.request.url);
-  if (url.pathname.endsWith('/tov-mareh/app.js')) {
-    event.respondWith(combinedAppResponse(event.request));
-    return;
-  }
-
-  if (event.request.mode === 'navigate') {
-    event.respondWith(
-      fetch(event.request, { cache: 'no-store' })
-        .then((response) => {
-          const copy = response.clone();
-          caches.open(CACHE).then((cache) => cache.put('./index.html', copy));
-          return response;
-        })
-        .catch(() => caches.match('./index.html'))
-    );
-    return;
-  }
+  if (url.origin !== self.location.origin) return;
 
   event.respondWith(
-    fetch(event.request, { cache: 'no-store' })
-      .then((response) => {
-        if (response && response.ok) {
-          const copy = response.clone();
-          caches.open(CACHE).then((cache) => cache.put(event.request, copy));
-        }
-        return response;
-      })
-      .catch(() => caches.match(event.request))
+    networkFirst(event.request, event.request.mode === 'navigate' ? './index.html' : event.request)
   );
 });

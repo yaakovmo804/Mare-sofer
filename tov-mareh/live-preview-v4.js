@@ -137,13 +137,7 @@
   const exportButton = $('exportBtn');
   if (exportButton) exportButton.onclick = exportImage;
 
-  if (!localStorage.getItem('tm_engine_v4_reset')) {
-    localStorage.setItem('tm_engine_v4_reset', '1');
-    if ('caches' in window) {
-      caches.keys().then((keys) => Promise.all(keys.filter((key) => key.includes('tov-mareh')).map((key) => caches.delete(key))));
-    }
-  }
-
+  // Cache migration belongs to sw.js; initialization must preserve its installed cache.
   const subtitle = document.querySelector('.brand p');
   if (subtitle && !subtitle.textContent.includes('4.0')) subtitle.textContent += ' • מנוע 4.0';
 })();
