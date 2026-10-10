@@ -21,3 +21,7 @@ jobs:
         run: npm ci
       - name: Run regression tests
         run: npm test
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Check Tov Mareh engine loading in Chromium
+        run: npm run test:tov-mareh-loading
