@@ -81,6 +81,8 @@
     const settings = state.settings;
 
     const sharp = settings.sharpness / 100 * multiplier;
+    // maskedUnsharp from app.js reads the ink weight at each RGBA pixel's first channel.
+    const sharpMask = sharp > 0.01 ? new Uint8ClampedArray(data.length) : null;
     const black = settings.black / 100 * multiplier;
     const uniformity = settings.uniformity / 100;
     const gloss = settings.gloss / 100 * multiplier;
@@ -126,6 +128,7 @@
 
         const rawInk = clamp((threshold - luminance) / 115, 0, 1);
         const inkMask = Math.pow(rawInk, 0.72 + uniformity * 0.32);
+        if (sharpMask) sharpMask[index] = Math.round(inkMask * 255);
         const paperMask = 1 - inkMask;
         const fibre = (
           Math.sin(x * 0.018 + y * 0.006) * 0.55 +
@@ -153,8 +156,9 @@
     }
 
     actx.putImageData(output, 0, 0);
-    if (sharp > 0.01) unsharp(sharp * 1.45);
-    $('deltaLabel').textContent = estimateDelta(source, output).toFixed(1) + '%';
+    if (sharpMask) maskedUnsharp(sharp * 1.45, sharpMask);
+    const result = sharpMask ? actx.getImageData(0, 0, width, height) : output;
+    $('deltaLabel').textContent = estimateDelta(source, result).toFixed(1) + '%';
   };
 
   const brandLine = document.querySelector('.brand p');
