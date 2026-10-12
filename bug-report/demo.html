@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>מראה סופר — דיווח תקלה</title>
+  <style>
+    *{box-sizing:border-box} body{font-family:system-ui,-apple-system,"Segoe UI",Arial,sans-serif;margin:0;background:#f6f3ec;color:#231f1a}
+    main{max-width:760px;margin:40px auto;padding:24px}.card{background:#fff;border:1px solid #ded8cb;border-radius:18px;padding:22px;box-shadow:0 8px 30px rgba(40,30,20,.06)}
+    h1{font-size:26px;margin:0 0 6px}.muted{color:#746d62;font-size:14px}.actions{display:flex;gap:10px;flex-wrap:wrap;margin:22px 0}
+    button{font:inherit;border:1px solid #cfc7b9;background:#fff;border-radius:11px;padding:10px 14px;cursor:pointer}button.primary{background:#28251f;color:#fff;border-color:#28251f}
+    dialog{width:min(620px,calc(100% - 24px));border:0;border-radius:18px;padding:0;box-shadow:0 24px 80px rgba(0,0,0,.22)}dialog::backdrop{background:rgba(20,18,15,.38)}
+    .modal{padding:22px}.row{display:grid;gap:7px;margin:14px 0}label{font-weight:650}textarea,select,input{width:100%;font:inherit;border:1px solid #cfc7b9;border-radius:10px;padding:10px;background:#fff}textarea{min-height:90px;resize:vertical}
+    .modal-actions{display:flex;gap:9px;justify-content:flex-start;margin-top:18px}.status{padding:10px 12px;border-radius:10px;background:#f2efe7;margin-top:12px;display:none;white-space:pre-wrap}
+  </style>
+</head>
+<body>
+<main>
+  <section class="card">
+    <h1>אבטיפוס: דיווח תקלה בלחיצה</h1>
+    <div class="muted">הדגמה בלבד — ללא שליחת מידע לשרת.</div>
+    <div class="actions">
+      <button id="studentBtn">כרטיס תלמיד</button>
+      <button id="parallelBtn">מקרה מקביל</button>
+      <button id="simulateBtn">הדגם שגיאה</button>
+      <button class="primary" id="reportBtn">דווח תקלה</button>
+    </div>
+    <div id="miniStatus" class="muted"></div>
+  </section>
+</main>
+
+<dialog id="reportDialog">
+  <form method="dialog" class="modal" id="reportForm">
+    <h2 style="margin-top:0">דיווח תקלה</h2>
+    <div class="muted">המערכת כבר צירפה גרסה, מסך, פעולות אחרונות ושגיאות טכניות.</div>
+
+    <div class="row">
+      <label for="category">סוג התקלה</label>
+      <select id="category">
+        <option>תקלה בממשק</option>
+        <option>תקלה בחיבור</option>
+        <option>תוצאה שגויה</option>
+        <option>אחר</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label for="result">מה קרה בפועל?</label>
+      <input id="result" placeholder="לדוגמה: לחצתי ולא נפתח חלון" />
+    </div>
+
+    <div class="row">
+      <label for="note">הערה קצרה</label>
+      <textarea id="note" placeholder="משפט אחד או שניים מספיקים"></textarea>
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" class="primary" id="copyBtn">העתק דו״ח תקלה</button>
+      <button value="cancel">סגור</button>
+    </div>
+    <div id="copyStatus" class="status"></div>
+  </form>
+</dialog>
+
+<script src="./bug-report.js"></script>
+<script>
+  const bug = window.MarehSoferBugReport;
+  bug.setVersion('v80-demo');
+  bug.setScreen('שיחה');
+  bug.setSourceStatus('OpenAI','תקין');
+  bug.setSourceStatus('Claude','תקין');
+  bug.setSourceStatus('מאגר מקומי','מוכן');
+  bug.setSourceStatus('Notion','מקומי בלבד');
+
+  const miniStatus = document.getElementById('miniStatus');
+  function refresh(){ miniStatus.textContent = 'מסלול אחרון: ' + (bug.replayPath() || 'טרם נרשמו פעולות'); }
+
+  document.getElementById('studentBtn').onclick = () => { bug.control('כרטיס תלמיד'); bug.setScreen('כרטיס תלמיד'); refresh(); };
+  document.getElementById('parallelBtn').onclick = () => { bug.control('מקרה מקביל'); refresh(); };
+  document.getElementById('simulateBtn').onclick = () => { bug.control('בדיקת חיבור'); bug.error('500 Internal Server Error',{source:'Notion bridge'}); refresh(); };
+  document.getElementById('reportBtn').onclick = () => { bug.control('דווח תקלה'); document.getElementById('reportDialog').showModal(); refresh(); };
+
+  document.getElementById('copyBtn').onclick = async () => {
+    const options = {
+      category: document.getElementById('category').value,
+      result: document.getElementById('result').value,
+      userNote: document.getElementById('note').value,
+    };
+    const out = await bug.copyReport(options);
+    const box = document.getElementById('copyStatus');
+    box.style.display = 'block';
+    box.textContent = out.copied ? 'הדו״ח הועתק ללוח.' : out.report;
+  };
+
+  refresh();
+</script>
+</body>
+</html>
