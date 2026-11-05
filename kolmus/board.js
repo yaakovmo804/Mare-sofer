@@ -106,7 +106,7 @@
   function syncControls(){
     const rec=Boolean(recorder)||recordPending, drawing=Boolean(current), lock=busy||rec||drawing;
     const review=cursor!==null;
-    $("count").textContent=`${doc.strokes.length} מקטעים`;$("scrub").max=String(Math.max(1,duration()));
+    $("count").textContent=doc.strokes.length===1?"מקטע אחד":`${doc.strokes.length} מקטעים`;$("scrub").max=String(Math.max(1,duration()));
     if(!review){$("scrub").value=String(duration());$("time").value=time(duration());}
     $("live").hidden=!review || inPlayer;$("undo").disabled=lock||empty()||inPlayer;$("redo").disabled=lock||!redo.length||inPlayer;
     $("play").disabled=lock||empty();$("scrub").disabled=lock||empty();
@@ -301,15 +301,25 @@
       let failure=false;
       rec.ondataavailable=e=>{if(e.data?.size)pieces.push(e.data);};
       rec.onerror=()=>{failure=true;note("הקלטת הסרטון נקטעה. תנועות החודים נשמרו בלוח.");if(rec.state!=="inactive")rec.stop();};
-      rec.onstop=()=>{
-        clearInterval(heartbeat);stream.getTracks().forEach(t=>t.stop());recorder=null;recordPending=false;
+      rec.onstop=async()=>{
+        const end=now();clearInterval(heartbeat);stream.getTracks().forEach(t=>t.stop());
+        recorder=null;recordPending=true;tracking.cancel(end);syncControls();
         if(!failure&&pieces.length){
           const type=rec.mimeType||pieces[0].type, ext=type.includes("mp4")?"mp4":"webm",name=`${fileStem()}-${crypto.randomUUID().slice(0,8)}.${ext}`;
-          offerVideo(new Blob(pieces,{type}),name);
-          void cache.write("latest-video",{fileName:name,blob:finishedClip}).catch(()=>note("כדי לשמור את הסרטון במכשיר לחצו על ״שמירת הסרטון״."));
-          doc.clips.push({fromMs:from,toMs:now(),audio:Boolean(audio),fileName:name});changed();note("הסרטון מוכן. שמרו את הסרטון ואת קובץ ההדגמה לשימוש בהמשך.");
+          const blob=new Blob(pieces,{type});
+          doc.clips.push({fromMs:from,toMs:end,audio:Boolean(audio),fileName:name});
+          clearTimeout(saveTimer);dirty=true;const stamp=++revision,snapshot=structuredClone(doc);
+          const persisted=saveTail.catch(()=>{}).then(()=>cache.saveRecording(draftKey,snapshot,name,blob));
+          saveTail=persisted.catch(()=>{});
+          try{
+            await persisted;if(stamp===revision)dirty=false;
+            note("הסרטון וההדגמה נשמרו במכשיר. אפשר כעת להוריד אותם.");
+          }catch{
+            saveDraft();note("אין די מקום לשמור את הסרטון במכשיר. הורידו אותו לפני היציאה.");
+          }
+          offerVideo(blob,name);
         }else if(!failure)note("הדפדפן לא החזיר וידאו. קובץ ההדגמה זמין לשמירה.");
-        syncControls();makeFrames();
+        recordPending=false;syncControls();makeFrames();
       };
       rec.start(250);recorder=rec;heartbeat=setInterval(paintMovie,100);note(audio?"מקליט את הלוח ואת המיקרופון.":"מקליט את הלוח ללא קול.");
     }catch(err){stream?.getTracks().forEach(t=>t.stop());audio?.getTracks().forEach(t=>t.stop());recorder=null;note(err.message||"ההקלטה לא התחילה.");}

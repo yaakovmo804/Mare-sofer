@@ -43,5 +43,11 @@
     if(!item || item.expires<Date.now())throw Error("ההעברה פגה. אפשר לפתוח את קובץ ה־JSON.");
     return item.value;
   }
-  globalThis.KolmusLocal={read,write,remove,handoff,receive};
+  function saveRecording(draftKey,doc,fileName,blob){
+    return transact("readwrite",store=>{
+      store.put(doc,draftKey);
+      return store.put({fileName,blob},"latest-video");
+    });
+  }
+  globalThis.KolmusLocal={read,write,remove,handoff,receive,saveRecording};
 })();
