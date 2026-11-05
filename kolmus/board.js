@@ -189,6 +189,16 @@
     const d=$("confirm");$("confirm-title").textContent=title;$("confirm-text").textContent=message;d.returnValue="cancel";
     return new Promise(resolve=>{d.addEventListener("close",()=>resolve(d.returnValue==="ok"),{once:true});d.showModal();});
   }
+  function offerVideo(blob,fileName){
+    forgetVideo();finishedClip=blob;clipUrl=URL.createObjectURL(blob);
+    const a=$("video-save");a.href=clipUrl;a.download=fileName;a.hidden=false;
+  }
+  async function restoreVideo(next){
+    const last=next.clips.at(-1);if(!last)return;
+    try{const saved=await cache.read("latest-video");
+      if(doc===next&&saved?.fileName===last.fileName&&saved.blob instanceof Blob)offerVideo(saved.blob,saved.fileName);
+    }catch{/* The downloadable motion record is independent of media storage. */}
+  }
   async function replaceDoc(next){
     const image=await ensureReference(next.reference);
     if(next.reference?.kind==="glyph"){const r=next.reference;$("glyph").value=r.letter;$("tradition").value=r.style;}
@@ -259,7 +269,7 @@
     try{
       const next=C.verify(JSON.parse(await f.text()));
       if(!inPlayer&&(!empty()||finishedClip)&&!await confirmAction("פתיחת הדגמה","לפתוח את ההדגמה מהקובץ במקום הלוח הנוכחי?"))return;
-      busy=true;syncControls();await replaceDoc(next);forgetVideo();
+      busy=true;syncControls();forgetVideo();await replaceDoc(next);await restoreVideo(next);
       if(inPlayer&&doc.strokes.length)seek(doc.strokes[0].startMs);else changed();
       note("ההדגמה נטענה עם הרקע וסדר המקטעים.");
     }catch(err){note(err.message||"הקובץ לא נפתח.");}finally{busy=false;syncControls();}
@@ -294,9 +304,9 @@
       rec.onstop=()=>{
         clearInterval(heartbeat);stream.getTracks().forEach(t=>t.stop());recorder=null;recordPending=false;
         if(!failure&&pieces.length){
-          forgetVideo();const type=rec.mimeType||pieces[0].type, ext=type.includes("mp4")?"mp4":"webm",name=`${fileStem()}.${ext}`;
-          finishedClip=new Blob(pieces,{type});clipUrl=URL.createObjectURL(finishedClip);
-          const a=$("video-save");a.href=clipUrl;a.download=name;a.hidden=false;
+          const type=rec.mimeType||pieces[0].type, ext=type.includes("mp4")?"mp4":"webm",name=`${fileStem()}-${crypto.randomUUID().slice(0,8)}.${ext}`;
+          offerVideo(new Blob(pieces,{type}),name);
+          void cache.write("latest-video",{fileName:name,blob:finishedClip}).catch(()=>note("כדי לשמור את הסרטון במכשיר לחצו על ״שמירת הסרטון״."));
           doc.clips.push({fromMs:from,toMs:now(),audio:Boolean(audio),fileName:name});changed();note("הסרטון מוכן. שמרו את הסרטון ואת קובץ ההדגמה לשימוש בהמשך.");
         }else if(!failure)note("הדפדפן לא החזיר וידאו. קובץ ההדגמה זמין לשמירה.");
         syncControls();makeFrames();
@@ -308,7 +318,7 @@
   $("destinations").onclick=()=>{$("measure-layer").querySelector('[value="reference"]').disabled=!doc.reference;$("transfer").showModal();};
   $("close-transfer").onclick=()=>$("transfer").close();
   const fullURL="https://yaakovmo804.github.io/Mare-sofer/measure-stam/medidaot.html";
-  function handoffFor(target){return {doc,layer:$("measure-layer").value,frameMs:cursor??duration(),png:imageLayer($("measure-layer").value).toDataURL("image/png"),target};}
+  function handoffFor(target){return {doc,layer:$("measure-layer").value,frameMs:cursor??duration(),video:target==="class"?finishedClip:null,target};}
   async function send(target){
     const msg=$("transfer-note");
     if(!suite&&target!=="full"){
@@ -338,7 +348,7 @@
         if(inPlayer && doc.strokes.length){seek(doc.strokes[0].startMs);note("ההדגמה מוכנה לניגון.");}
       }else if(!inPlayer){
         const saved=await cache.read(draftKey);
-        if(saved){await replaceDoc(C.verify(saved));note("ההדגמה האחרונה במכשיר נפתחה.");}
+        if(saved){await replaceDoc(C.verify(saved));await restoreVideo(doc);note("ההדגמה האחרונה במכשיר נפתחה.");}
       }
     }catch(err){note(viewer?err.message:"השמירה המקומית אינה זמינה. אפשר לשמור את ההדגמה כקובץ.");}
     busy=false;syncControls();makeFrames();render();

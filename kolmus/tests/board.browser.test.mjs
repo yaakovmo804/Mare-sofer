@@ -105,6 +105,9 @@ test("separate guide, true video and microphone tracks, compatible full-measurem
       return {size:blob.size,width:v.videoWidth,height:v.videoHeight,media:blob.type};
     });
     assert.ok(media.size>1000);assert.deepEqual([media.width,media.height],[960,698]);assert.match(media.media,/video/);
+    await page.waitForFunction(async()=>Boolean((await KolmusLocal.read("latest-video"))?.blob?.size));
+    await page.waitForFunction(async()=>Boolean((await KolmusLocal.read("drawing-draft"))?.clips.length));
+    await page.reload();await page.waitForSelector("#video-save:not([hidden])");
     const doc=await capture();assert.equal(doc.reference.letter,"ב");assert.ok(doc.reference.paths[0].d.length>20);assert.ok(doc.clips[0].audio);
     await page.locator("#destinations").click();await page.locator("#measure-layer").selectOption("reference");await page.locator("#to-full").click();
     await page.waitForURL(/medidaot.html\?kolmus=/);
@@ -129,5 +132,24 @@ test("sub-minute readout, JSON round trip, separate tracks and valid cancellatio
     });
     assert.deepEqual(result.angles.map(x=>x[0]),["12:30","12:30","12:30","12:30","12:30","12:30","12:30","12:31","12:31","12:32","12:29"]);
     assert.equal(result.mid,0);assert.ok(result.edge>0);assert.equal(result.last,"cancel");assert.deepEqual(result.swapped,[100,200]);
+  }finally{await context.close();}
+});
+
+test("microphone refusal keeps silent recording available and studio fits two iPad layouts",async()=>{
+  const {context,page}=await board();
+  try{
+    for(const [width,height] of [[1024,768],[768,1024]]){
+      await page.setViewportSize({width,height});
+      assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+      const box=await page.locator("#sheet").boundingBox();assert.ok(box.width>470&&box.height>280);
+    }
+    await page.evaluate(()=>{navigator.mediaDevices.getUserMedia=async()=>{throw new DOMException("denied","NotAllowedError");};});
+    await page.locator("#mic").check();await page.locator("#record").click();
+    await page.waitForFunction(()=>document.querySelector("#status").textContent.includes("המיקרופון לא נפתח"));
+    assert.equal(await page.locator("#record").evaluate(b=>b.classList.contains("active")),false);
+    await page.locator("#mic").uncheck();await page.locator("#record").click();
+    await page.waitForFunction(()=>document.querySelector("#record").classList.contains("active"));
+    await page.waitForTimeout(300);await page.locator("#record").click();
+    await page.waitForSelector("#video-save:not([hidden])");
   }finally{await context.close();}
 });
