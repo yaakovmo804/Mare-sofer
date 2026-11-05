@@ -316,7 +316,7 @@
     }
     if(suite&&target==="full"){
       // A file handoff also works with separate iPad home-screen apps and COOP-isolated tabs.
-      json();msg.replaceChildren(document.createTextNode("בכלי המדידה בחרו ״הדגמת כתיבה״ וטענו את הקובץ ששמרתם. "));
+      download(new Blob([JSON.stringify({...doc,selection:{frameMs:cursor??duration(),layer:$("measure-layer").value}})],{type:"application/json"}),fileStem()+".json");msg.replaceChildren(document.createTextNode("בכלי המדידה בחרו ״הדגמת כתיבה״ וטענו את הקובץ ששמרתם. "));
       const a=document.createElement("a");a.href=fullURL;a.target="_blank";a.rel="noopener";a.textContent="פתיחת כלי המדידה";msg.append(a);return;
     }
     try{

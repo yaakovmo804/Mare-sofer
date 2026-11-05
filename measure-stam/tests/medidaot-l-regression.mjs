@@ -7,7 +7,7 @@ import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
 const TEST_VERSION = '20260803a';
-const TEST_CACHE_DATE = '2026-08-03a';
+const TEST_CACHE_DATE = '2026-11-06a';
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const appDirectory = path.resolve(testDirectory, '..');
 
@@ -2275,6 +2275,7 @@ test('HTML, manifests, and service worker reference one complete release asset s
     'auto-measure.js',
     'stability-patch.js'
   ].map(filename => `${filename}?v=${TEST_VERSION}`);
+  expectedScripts.push('../kolmus/core.js?v=20261106a', '../kolmus/local.js?v=20261106a', 'kolmus-import.js?v=20261106a');
 
   for (const htmlName of ['medidaot.html', 'index.html']) {
     const html = readAppFile(htmlName);
@@ -2317,7 +2318,7 @@ test('HTML, manifests, and service worker reference one complete release asset s
   const appShell = [...appShellMatch[1].matchAll(/'([^']+)'/g)]
     .map(match => match[1]);
   for (const script of expectedScripts) {
-    assert.ok(appShell.includes(`./${script}`), `service worker misses ${script}`);
+    assert.ok(appShell.includes(script.startsWith('../') ? script : `./${script}`), `service worker misses ${script}`);
   }
   for (const reference of appShell) {
     const relative = reference.replace(/^\.\//, '').split('?')[0];
