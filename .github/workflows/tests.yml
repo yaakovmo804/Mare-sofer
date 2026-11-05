@@ -25,3 +25,6 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Check Tov Mareh engine loading in Chromium
         run: npm run test:tov-mareh-loading
+
+      - name: Check two-finger demonstration and measurement import
+        run: node --test kolmus/tests/board.browser.test.mjs
