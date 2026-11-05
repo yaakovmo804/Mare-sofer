@@ -26,5 +26,5 @@ jobs:
       - name: Check Tov Mareh engine loading in Chromium
         run: npm run test:tov-mareh-loading
 
-      - name: Check two-finger demonstration and measurement import
-        run: node --test kolmus/tests/board.browser.test.mjs
+      - name: Check the original calligraphy board import
+        run: node --test measure-stam/tests/calligraphy-board-import.browser.mjs
