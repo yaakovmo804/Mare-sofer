@@ -107,7 +107,15 @@ test("separate guide, true video and microphone tracks, compatible full-measurem
     assert.ok(media.size>1000);assert.deepEqual([media.width,media.height],[960,698]);assert.match(media.media,/video/);
     await page.waitForFunction(async()=>Boolean((await KolmusLocal.read("latest-video"))?.blob?.size));
     await page.waitForFunction(async()=>Boolean((await KolmusLocal.read("drawing-draft"))?.clips.length));
-    await page.reload();await page.waitForSelector("#video-save:not([hidden])");
+    await page.reload();await page.waitForFunction(()=>!document.querySelector("#record").disabled);
+    const restored=await page.evaluate(async()=>{
+      const draft=await KolmusLocal.read("drawing-draft"),media=await KolmusLocal.read("latest-video");
+      let validation="ok";try{KolmusCore.verify(draft);}catch(e){validation=e.message;}
+      return {hidden:document.querySelector("#video-save").hidden,status:document.querySelector("#status").textContent,
+        frameCount:document.querySelector("#count").textContent,validation,clip:draft?.clips?.at(-1)?.fileName,name:media?.fileName,
+        isBlob:media?.blob instanceof Blob,size:media?.blob?.size};
+    });
+    assert.equal(restored.hidden,false,JSON.stringify(restored));
     const doc=await capture();assert.equal(doc.reference.letter,"ב");assert.ok(doc.reference.paths[0].d.length>20);assert.ok(doc.clips[0].audio);
     await page.locator("#destinations").click();await page.locator("#measure-layer").selectOption("reference");await page.locator("#to-full").click();
     await page.waitForURL(/medidaot.html\?kolmus=/);

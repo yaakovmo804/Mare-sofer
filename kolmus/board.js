@@ -350,7 +350,7 @@
         const saved=await cache.read(draftKey);
         if(saved){await replaceDoc(C.verify(saved));await restoreVideo(doc);note("ההדגמה האחרונה במכשיר נפתחה.");}
       }
-    }catch(err){note(viewer?err.message:"השמירה המקומית אינה זמינה. אפשר לשמור את ההדגמה כקובץ.");}
+    }catch(err){note(viewer?err.message:`שחזור ההדגמה מהמכשיר נכשל. ${err.message||""}`);}
     busy=false;syncControls();makeFrames();render();
   }
   void init();
