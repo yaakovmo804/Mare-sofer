@@ -29,6 +29,7 @@
       </div>
       <div class="top-actions">
         <label class="btn primary">העלאת תמונה<input id="imageInput" type="file" accept="image/*" hidden /></label>
+        <label class="btn" title="טעינת המסלולים ואות המקור מלוח שתי האצבעות">הדגמת כתיבה<input id="kolmus-file" type="file" accept=".json,application/json" hidden /></label>
         <button id="saveProjectBtn" class="btn">שמירת פרויקט ודאטה</button>
         <label class="btn">פתיחת פרויקט<input id="projectInput" type="file" accept="application/json" hidden /></label>
         <button id="exportBtn" class="btn">ייצוא תמונה</button>
@@ -420,6 +421,7 @@
 
     <button id="helpBtn" class="floating-help" aria-label="עזרה">?</button>
   </div>
+  <dialog id="kolmus-import" class="metric-info-dialog" dir="rtl"><h2>מדידה מתוך הדגמה</h2><p id="kolmus-source"></p><label>מה למדוד<select id="kolmus-layer"><option value="ink">הדיו שצויר</option><option id="kolmus-original" value="reference">אות הרקע המקורית</option></select></label><p id="kolmus-error" role="status"></p><div class="button-row"><button class="btn primary" id="kolmus-apply">טעינה למדידה</button><button class="btn" id="kolmus-cancel">ביטול</button></div></dialog>
   <script src="master-system.js?v=20260803a"></script>
   <script src="letter-assets.js?v=20260803a"></script>
   <script src="letter-vector-engine.js?v=20260803a"></script>
@@ -433,5 +435,8 @@
   <script src="professional-tools.js?v=20260803a"></script>
   <script src="auto-measure.js?v=20260803a"></script>
   <script src="stability-patch.js?v=20260803a"></script>
+  <script src="../kolmus/core.js?v=20261106a"></script>
+  <script src="../kolmus/local.js?v=20261106a"></script>
+  <script src="kolmus-import.js?v=20261106a"></script>
 </body>
 </html>

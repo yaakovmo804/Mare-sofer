@@ -1,5 +1,6 @@
-const CACHE_NAME = 'medidaot-v20-2026-08-03a';
+const CACHE_NAME = 'medidaot-v21-2026-11-06a';
 const APP_SHELL = [
+  './kolmus-import.js?v=20261106a', '../kolmus/core.js?v=20261106a', '../kolmus/local.js?v=20261106a',
   './', './index.html', './medidaot.html', './medidaot.html?v=20260803a',
   './styles.css', './styles.css?v=20260803a',
   './master-system.js', './master-system.js?v=20260803a',
